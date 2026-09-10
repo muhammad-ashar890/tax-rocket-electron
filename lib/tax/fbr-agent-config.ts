@@ -79,6 +79,11 @@ export function getFbrDesktopAuthConfig(): FbrDesktopAuthConfig {
   }
   return {
     loginUrl,
+    // SEMANTICS: "a logged-in IRIS page exists", NOT "the return is open".
+    // `#homeLink` is present on the dashboard AND on every return page, so it can
+    // only ever confirm the session. Return readiness is proven by the
+    // app-nitr-workflow header (see RETURN_WORKSPACE_PROBE in iris-navigation.js);
+    // do not move this selector into a readiness role.
     readySelector:
       process.env.FBR_IRIS_READY_SELECTOR?.trim() ||
       (useMockIris ? "#iris-dashboard-ready" : "#homeLink"),
@@ -122,8 +127,8 @@ export type FbrSelectorBundleSummary = {
 
 export type FbrPortalAutomationConfig = {
   livePilot: {
-    mode: "navigation_inspection_only";
-    automaticFilingEnabled: false;
+    mode: "navigation_inspection_only" | "supervised_live_filing";
+    automaticFilingEnabled: boolean;
   };
   portalHostAllowlist: string[];
   readiness: {
@@ -274,6 +279,31 @@ function splitHosts(value: string | undefined) {
     .filter(Boolean);
 }
 
+/**
+ * The deployment's own consent for letting the agent type into IRIS.
+ *
+ * The operator has `TAXROCKET_REAL_AUTOFILL` in the agent's shell; this is the
+ * second, independent half — a value the SHIPPED app decides, so a stale copy of
+ * the desktop agent, or an operator who exported the env var in a hurry, cannot on
+ * its own write into a government return. Unset, empty or unrecognised means off:
+ * the only accepted spellings are `true`, `1`, `on`, `yes` (same set the agent's
+ * own parser accepts, so the two switches cannot disagree about what "on" means).
+ *
+ * It lives in the server environment because the server builds the job context:
+ * there is no DB table for it, which is deliberate — a row that silently enables
+ * writes would outlive the deployment that set it.
+ */
+export const LIVE_FILING_ENV_VAR = "TAXROCKET_ALLOW_LIVE_FILING";
+
+const LIVE_FILING_ON_VALUES = new Set(["true", "1", "on", "yes"]);
+
+export function isLiveFilingEnabledByDeployment(): boolean {
+  const raw = String(process.env[LIVE_FILING_ENV_VAR] ?? "")
+    .trim()
+    .toLowerCase();
+  return LIVE_FILING_ON_VALUES.has(raw);
+}
+
 export async function getFbrPortalAutomationConfig(input?: {
   routeFamily?: IrisRouteFamily | null;
 }): Promise<FbrPortalAutomationConfig> {
@@ -298,10 +328,18 @@ export async function getFbrPortalAutomationConfig(input?: {
       ? DEFAULT_SELECTOR_BUNDLE.routeSelectors[input.routeFamily]
       : null;
 
+  const liveFilingEnabled = isLiveFilingEnabledByDeployment();
+
   return {
+    // `automaticFilingEnabled` is read by the agent (main.js:resolveAutofillMode):
+    // an explicit `false` downgrades TAXROCKET_REAL_AUTOFILL=live to a dry run, so
+    // this is a deployment-level kill switch rather than a decorative flag. It is
+    // only honoured when present as a boolean — `true` does NOT enable writes by
+    // itself, the operator's env var still has to opt in. Both halves are required,
+    // and `mode` carries which half is which so a log line says it out loud.
     livePilot: {
-      mode: "navigation_inspection_only",
-      automaticFilingEnabled: false,
+      mode: liveFilingEnabled ? "supervised_live_filing" : "navigation_inspection_only",
+      automaticFilingEnabled: liveFilingEnabled,
     },
     portalHostAllowlist: allowlist,
     readiness: {

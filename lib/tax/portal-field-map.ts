@@ -10,6 +10,10 @@ import {
   TAX_SECTION_TO_IRIS_CODE,
 } from "./iris-field-codes";
 import type { IrisRouteFamily } from "./fbr-agent-config";
+import {
+  PORTAL_ROW_EVIDENCE,
+  PORTAL_WRITEABLE_CODES,
+} from "./portal-row-evidence";
 
 export type PortalFieldMapEntry = {
   ledgerEntryId?: string;
@@ -31,6 +35,53 @@ export type PortalFieldMapEntry = {
   isTaxField: boolean;
   filerStatus?: string;
   propertyValue?: number;
+  /**
+   * Packet v1.1.0: how many ledger rows were summed into this one IRIS cell.
+   * A single IRIS row is one figure, so N ledger entries must collapse into one
+   * field — see the aggregation note in buildPortalFieldMap.
+   */
+  sourceEntryCount?: number;
+};
+
+/**
+ * Categories the engine produces that have NO verified IRIS line-item code.
+ * Surfaced on the packet instead of being guessed into "Other Receipts": a
+ * wrong number on a government return is worse than an unfilled one.
+ */
+export type PortalMappingGaps = {
+  /** Ledger categories with no IRIS code — nothing was queued for these. */
+  unmappedCategories: {
+    category: string;
+    entryIds: string[];
+    totalAmount: number;
+    reason: string;
+  }[];
+  /** IRIS codes deliberately skipped because the row is computed, not entered. */
+  skippedComputedCodes: { code: string; description: string; amount: number }[];
+  /**
+   * Codes whose IRIS row has NEVER been seen rendered with a writeable cell in a
+   * real portal capture. They look right (every one exists in the client's
+   * field-code extract) but the packet cannot prove the portal exposes an
+   * enterable line for them, so they are reported for manual entry instead of
+   * queued and burned as `row_not_found` / `column_disabled` at fill time.
+   */
+  captureUnverified?: {
+    code: string;
+    description: string;
+    category: string;
+    amount: number;
+    reason: string;
+  }[];
+  /**
+   * Pension exempt/taxable split from the engine that does not add up to the
+   * ledger row it belongs to. One IRIS line (1008) carries the whole figure, so
+   * a disagreement is surfaced rather than silently resolved.
+   */
+  pensionSplitMismatch?: {
+    entryId: string;
+    ledgerAmount: number;
+    engineSplitTotal: number;
+  }[];
 };
 
 export type PortalFieldMap = {
@@ -43,6 +94,8 @@ export type PortalFieldMap = {
   incomeFields: PortalFieldMapEntry[];
   adjustableTaxFields: PortalFieldMapEntry[];
   wealthFields: PortalFieldMapEntry[];
+  /** Codes with no verified IRIS target, reported rather than guessed. */
+  mappingGaps?: PortalMappingGaps;
   computationHints: {
     totalIncome: number;
     taxableIncome: number;
@@ -147,6 +200,66 @@ function getPortalNavigationHints(entry: PortalFieldMapEntry) {
     leftPanel: null,
     leftSection: null,
   };
+}
+
+/**
+ * Which IRIS column a figure may legally be written into.
+ *
+ * Encoded from the portal capture in the operator's live run
+ * (`TaxRocketAgentLogs/latest-portal-inspection.json`, job cmttt19vj000mo8c80v6916tw,
+ * build fix16-new-return-setup-20260908). Salary renders
+ * `Total Income | Subject to Final Tax | Subject to Exemption | Subject to Normal Income`
+ * and only columns 1 and 3 are enterable — the agent's own log recorded every one of its
+ * 24 attempted writes as `column_disabled col=3 (header_exact)`, because the packet asked
+ * for "Amount Subject to Normal Tax" on a column IRIS derives as
+ * `Total − Final − Exemption`. So the packet must target the entered column, never the
+ * derived one. (`scripts/verify-iris-row-filler.cjs:121` already asserts the same rule:
+ * "salary: writes into the editable Total column of row #1009".)
+ */
+const TOTAL_AMOUNT_COLUMN: PortalFieldMapEntry["column"] = "Total Amount";
+
+/**
+ * IRIS codes that are computed by the portal (rowLevel "Summary" in the CSV catalog, or a
+ * derived group header). They render `[D D D D]`, so filling them is always a refusal — and
+ * worse, an unmapped tax section used to be pointed at `640000` "Adjustable Tax", the summary
+ * row of the whole withholding schedule. Those rows are skipped and reported instead.
+ */
+const COMPUTED_IRIS_CODES = new Set(
+  Object.values(IRIS_CODES)
+    .filter((def: any) => def.rowLevel === "Summary")
+    .map((def: any) => def.code as string),
+);
+
+/** Categories that carry no verified IRIS line-item code — gap, never a guess. */
+const GAP_ONLY_INCOME_CATEGORIES: Record<string, string> = {
+  BANK_PROFIT:
+    "Final-tax route: belongs in Other Sources → 'Subject to Final Tax', which has no live capture yet.",
+  PROFIT_ON_DEBT:
+    "Final-tax route: belongs in Other Sources → 'Subject to Final Tax', which has no live capture yet.",
+  DIVIDEND:
+    "Final-tax route @15/20%: needs the Other Sources line-item code (5016/5004) confirmed from a live capture.",
+  BUSINESS:
+    "Business income is filed on the Business schedules (3xxx); which line carries the engine total is unconfirmed.",
+  SERVICES:
+    "Services income has no verified IRIS line-item code on the 114(1) income sheets.",
+  OTHER_INCOME:
+    "'Other income' has no single IRIS line; 'Other Receipts' (5028) is not a substitute for an unknown source.",
+  CAPITAL_GAIN:
+    "Capital gains need the Capital Gain sheet (4006/4016 long term, 4026/4036 short term), not captured live.",
+  FOREIGN:
+    "Foreign income needs the Foreign Sources sheet (6011 etc), not captured live.",
+};
+
+/**
+ * The entered column for an income line item. Every income schedule IRIS 2.0
+ * renders in the Data tab takes the gross figure in column 1 and derives the
+ * Final-Exemption-Normal split (verified on Salary, and the assumption recorded
+ * as UNVERIFIED for Property in `scripts/verify-portal-field-map.cjs`); the
+ * engine's exempt/final/normal breakdown therefore never becomes a portal write.
+ * Final-tax categories are not routed at all — see GAP_ONLY_INCOME_CATEGORIES.
+ */
+function incomeColumnForIrisCode(_irisCode: string): PortalFieldMapEntry["column"] {
+  return TOTAL_AMOUNT_COLUMN;
 }
 
 function toPortalAutofillField(
@@ -282,6 +395,79 @@ function normalizeCategory(cat: string | null | undefined): string {
     .replace(/[^A-Z0-9_]/g, "_");
 }
 
+/** A priced income source the portal map cannot carry on a verified IRIS line. */
+export type UnmappedPortalSource = { category: string; totalAmount: number };
+
+/**
+ * What the packet says about its own coverage. `complete` means every priced
+ * category has a verified IRIS line; `partial_manual_entry_required` means a human
+ * explicitly accepted the listed gaps, and the amounts stay recorded so nobody can
+ * later claim the return was silent about them.
+ */
+export type PacketCoverage =
+  | { mode: "complete" }
+  | {
+      mode: "partial_manual_entry_required";
+      acceptedByOperator: true;
+      unmappedSources: UnmappedPortalSource[];
+    };
+
+/**
+ * The packet gate in one function: which categories block, the sentence the
+ * operator reads, and what the snapshot records. The refusal and the acceptance
+ * have to come from the same numbers, or an override could quietly drop an income
+ * source that the plain refusal promised to keep visible.
+ */
+export function describeUnmappedPortalSources(gaps: unknown): {
+  blocked: UnmappedPortalSource[];
+  refusal: string;
+  coverage: PacketCoverage;
+} {
+  const raw = (gaps as { unmappedCategories?: unknown } | null | undefined)
+    ?.unmappedCategories;
+  const blocked = (Array.isArray(raw) ? raw : [])
+    .map((entry) => ({
+      category: String(
+        (entry as Partial<UnmappedPortalSource> | null)?.category ?? "",
+      ),
+      totalAmount: Number(
+        (entry as Partial<UnmappedPortalSource> | null)?.totalAmount ?? 0,
+      ),
+    }))
+    .filter(
+      (entry) =>
+        entry.category.length > 0 &&
+        Number.isFinite(entry.totalAmount) &&
+        entry.totalAmount !== 0,
+    )
+    .sort((a, b) => a.category.localeCompare(b.category));
+
+  if (blocked.length === 0) {
+    return { blocked, refusal: "", coverage: { mode: "complete" } };
+  }
+
+  const listed = blocked
+    .map(
+      (gap) =>
+        `${gap.category.replaceAll("_", " ").toLowerCase()} (${gap.totalAmount.toLocaleString()})`,
+    )
+    .join(", ");
+
+  return {
+    blocked,
+    refusal:
+      `Packet not generated: ${listed} has no verified IRIS line item, so this return would be ` +
+      "filed without it. Enter those sources manually in IRIS (the packet PDF is " +
+      "still usable as the worksheet), or supply the live capture/rules that " +
+      "map them — see NEEDS_RULES_IMPLEMENTATION.md and npm run inventory:portal-coverage.",
+    coverage: {
+      mode: "partial_manual_entry_required",
+      acceptedByOperator: true,
+      unmappedSources: blocked,
+    },
+  };
+}
+
 export function buildPortalFieldMap(params: {
   taxYear: number;
   filerType: string | null;
@@ -313,6 +499,90 @@ export function buildPortalFieldMap(params: {
   const adjustableTaxFields: PortalFieldMapEntry[] = [];
   const wealthFields: PortalFieldMapEntry[] = [];
 
+  /**
+   * IRIS has ONE cell per (code, column); the engine has one row per ledger
+   * entry. Without aggregation 13 SALARY rows emitted 13 fields onto row 1009
+   * and the live run overwrote the same cell 13 times — the last write won, so
+   * a taxpayer with several salary months got one month onto the return.
+   * Accumulate here, emit once.
+   */
+  type Agg = { entry: PortalFieldMapEntry; ids: string[] };
+  const incomeAgg = new Map<string, Agg>();
+  const taxAgg = new Map<string, Agg>();
+  const unmapped = new Map<
+    string,
+    { category: string; entryIds: string[]; totalAmount: number; reason: string }
+  >();
+  const skipped = new Map<string, { code: string; description: string; amount: number }>();
+  const unproven = new Map<
+    string,
+    {
+      code: string;
+      description: string;
+      category: string;
+      amount: number;
+      reason: string;
+    }
+  >();
+
+  /**
+   * Single choke point for "this IRIS line has never been proven enterable".
+   * Returns true when the target must NOT be queued. Two failure shapes are
+   * distinguished because they need different follow-up work:
+   *  - the row id never rendered in any capture  → capture the sheet;
+   *  - it rendered with every cell disabled       → the row is computed, so the
+   *    code is wrong for entry even though it exists.
+   */
+  const holdUnprovenCode = (
+    code: string,
+    description: string,
+    category: string,
+    amount: number,
+  ): boolean => {
+    if (PORTAL_WRITEABLE_CODES.has(String(code))) return false;
+    const evidence = PORTAL_ROW_EVIDENCE[String(code)];
+    const reason = evidence
+      ? `Captured ${evidence.captureCount} time(s) as a rendered row with no writeable cell — IRIS computes it, so nothing may be entered on "${description}".`
+      : `"${description}" has never appeared as a rendered row in any captured IRIS page, so its existence as an enterable line is unproven.`;
+    const bucket = unproven.get(String(code)) || {
+      code: String(code),
+      description,
+      category,
+      amount: 0,
+      reason,
+    };
+    bucket.amount += amount;
+    unproven.set(String(code), bucket);
+    return true;
+  };
+  const pensionSplitMismatch: {
+    entryId: string;
+    ledgerAmount: number;
+    engineSplitTotal: number;
+  }[] = [];
+
+  const addIncome = (
+    key: string,
+    build: () => Omit<PortalFieldMapEntry, "sourceEntryCount">,
+    ledgerEntryId?: string,
+  ) => {
+    const next = build();
+    if (holdUnprovenCode(next.irisCode, next.irisDescription, next.ourCategory, next.ourAmount)) {
+      return;
+    }
+    const existing = incomeAgg.get(key);
+    if (existing) {
+      existing.entry.ourAmount += next.ourAmount;
+      if (ledgerEntryId) existing.ids.push(ledgerEntryId);
+      existing.entry.sourceEntryCount = existing.ids.length;
+      return;
+    }
+    incomeAgg.set(key, {
+      entry: { ...next, sourceEntryCount: 1 } as PortalFieldMapEntry,
+      ids: ledgerEntryId ? [ledgerEntryId] : [],
+    });
+  };
+
   let totalIncome = 0;
 
   for (const entry of ledgerEntries) {
@@ -323,84 +593,103 @@ export function buildPortalFieldMap(params: {
     totalIncome += entry.entryType === "INCOME" ? amount : 0;
 
     const mappings = CATEGORY_TO_IRIS_MAP[normalizedCat] ||
-      CATEGORY_TO_IRIS_MAP[entry.category?.toUpperCase() || ""] || [
-        {
-          incomeCode: IRIS_CODES.OTHER_SOURCES_OTHER_RECEIPTS.code,
-          description: `Fallback for ${normalizedCat}`,
-        },
-      ];
+      CATEGORY_TO_IRIS_MAP[entry.category?.toUpperCase() || ""];
+
+    // No verified IRIS line for this category → report the gap. It used to fall
+    // back to 5028 "Other Receipts", which produced the row_not_found entries the
+    // operator saw for codes that are not rendered on this return at all.
+    if (!mappings || mappings.length === 0) {
+      const reason =
+        GAP_ONLY_INCOME_CATEGORIES[normalizedCat] ||
+        `Category "${normalizedCat}" has no verified IRIS line-item code for the 114(1) income sheets.`;
+      const bucket = unmapped.get(normalizedCat) || {
+        category: normalizedCat,
+        entryIds: [],
+        totalAmount: 0,
+        reason,
+      };
+      bucket.totalAmount += amount;
+      if (entry.id) bucket.entryIds.push(entry.id);
+      unmapped.set(normalizedCat, bucket);
+      continue;
+    }
 
     for (const mapping of mappings) {
-      // Income field
       const irisDef = Object.values(IRIS_CODES).find(
         (c: any) => c.code === mapping.incomeCode,
       ) as any;
-      incomeFields.push({
-        ledgerEntryId: entry.id,
-        ourCategory: normalizedCat,
-        ourDescription: entry.description,
-        ourAmount: amount,
-        irisCode: mapping.incomeCode,
-        irisDescription: irisDef?.description || mapping.description,
-        portalArea: irisDef?.portalArea || "Other Sources",
-        section: irisDef?.section || "Receipts / Deductions",
-        column: "Amount Subject to Normal Tax",
-        isTaxField: false,
-        filerStatus: taxpayerListStatus || undefined,
-      });
 
-      // If mapping includes tax code, also add adjustable tax field (if we have tax credit for it)
-      // For now, we add a placeholder for tax that will be filled from taxCredits
+      // Computed rows (rowLevel "Summary") are derived by IRIS. Writing them is
+      // always a refusal today, and will be a wrong figure the day IRIS allows it.
+      if (irisDef?.rowLevel === "Summary" || COMPUTED_IRIS_CODES.has(mapping.incomeCode)) {
+        const bucket = skipped.get(mapping.incomeCode) || {
+          code: mapping.incomeCode,
+          description: irisDef?.description || mapping.description,
+          amount: 0,
+        };
+        bucket.amount += amount;
+        skipped.set(mapping.incomeCode, bucket);
+        continue;
+      }
+
+      // A category may legitimately map to more than one IRIS row (pension in
+      // Salary and Annuity in Other Sources). It may NOT map to the same row
+      // twice with different halves of one number — the pension split below.
+      const column = incomeColumnForIrisCode(mapping.incomeCode);
+      addIncome(
+        `${mapping.incomeCode}:${column}`,
+        () => ({
+          ourCategory: normalizedCat,
+          ourDescription: entry.description,
+          ourAmount: amount,
+          irisCode: mapping.incomeCode,
+          irisDescription: irisDef?.description || mapping.description,
+          portalArea: irisDef?.portalArea || "Other Sources",
+          section: irisDef?.section || "Receipts / Deductions",
+          column,
+          isTaxField: false,
+          filerStatus: taxpayerListStatus || undefined,
+        }),
+        entry.id,
+      );
     }
 
-    // Special handling for pension - split exempt vs taxable
+    // Pension: our engine splits exempt/taxable, IRIS has ONE enterable line
+    // (1008) whose derived columns we must not touch. Feed the whole pension
+    // figure into that one line so the exempt portion is expressed by the row
+    // itself rather than by double-counting it across 1008 and 5007.
+    // `pensionDetails` remains on computationHints for the review screen.
     if (normalizedCat === "PENSION" && pensionDetails) {
-      // Exempt portion goes to Amount Exempt column
-      if (pensionDetails.exemptAmount > 0) {
-        incomeFields.push({
-          ledgerEntryId: entry.id,
-          ourCategory: "PENSION_EXEMPT",
-          ourDescription: `${entry.description} - Exempt portion (limit ${pensionDetails.exemptLimit})`,
-          ourAmount: pensionDetails.exemptAmount,
-          irisCode: IRIS_CODES.SALARY_PENSION_ANNUITY.code,
-          irisDescription: "Pension exempt",
-          portalArea: "Employment",
-          section: "Salary",
-          column: "Amount Exempt from Tax / Subject to Fixed / Final Tax",
-          isTaxField: false,
-        });
-      }
-      if (pensionDetails.taxableAmount > 0) {
-        incomeFields.push({
-          ledgerEntryId: entry.id,
-          ourCategory: "PENSION_TAXABLE",
-          ourDescription: `${entry.description} - Taxable above limit`,
-          ourAmount: pensionDetails.taxableAmount,
-          irisCode: IRIS_CODES.SALARY_PENSION_ANNUITY.code,
-          irisDescription: "Pension taxable",
-          portalArea: "Employment",
-          section: "Salary",
-          column: "Amount Subject to Normal Tax",
-          isTaxField: false,
+      const engineTotal =
+        (pensionDetails.exemptAmount || 0) + (pensionDetails.taxableAmount || 0);
+      if (engineTotal > 0 && Math.abs(engineTotal - amount) > 0.5) {
+        pensionSplitMismatch.push({
+          entryId: entry.id ?? "(unknown)",
+          ledgerAmount: amount,
+          engineSplitTotal: engineTotal,
         });
       }
     }
 
-    // Property handling - if RENT, also calculate 1/5th repair deduction
+    // Property: the 1/5th repair deduction is its own IRIS line (2031), not a
+    // column of the rent row. Keep it, on the entered column.
     if (["RENT", "RENTAL", "PROPERTY_RENT"].includes(normalizedCat)) {
       const repairDeduction = amount * 0.2; // 1/5th
-      incomeFields.push({
-        ledgerEntryId: entry.id,
-        ourCategory: "PROPERTY_DEDUCTION_REPAIR",
-        ourDescription: `1/5th Repair deduction for ${entry.description}`,
-        ourAmount: repairDeduction,
-        irisCode: IRIS_CODES.PROPERTY_REPAIR_1_5TH.code,
-        irisDescription: IRIS_CODES.PROPERTY_REPAIR_1_5TH.description,
-        portalArea: "Property",
-        section: "Receipts / Deductions",
-        column: "Total Amount",
-        isTaxField: false,
-      });
+      addIncome(
+        `${IRIS_CODES.PROPERTY_REPAIR_1_5TH.code}:${TOTAL_AMOUNT_COLUMN}`,
+        () => ({
+          ourCategory: "PROPERTY_DEDUCTION_REPAIR",
+          ourDescription: `1/5th Repair deduction for ${entry.description}`,
+          ourAmount: repairDeduction,
+          irisCode: IRIS_CODES.PROPERTY_REPAIR_1_5TH.code,
+          irisDescription: IRIS_CODES.PROPERTY_REPAIR_1_5TH.description,
+          portalArea: "Property",
+          section: "Receipts / Deductions",
+          column: TOTAL_AMOUNT_COLUMN,
+          isTaxField: false,
+        }),
+        entry.id,
+      );
     }
   }
 
@@ -433,36 +722,87 @@ export function buildPortalFieldMap(params: {
     }
 
     if (!irisCode) {
-      // Fallback - use general adjustable tax code with description
-      irisCode = IRIS_CODES.ADJUSTABLE_TAX.code;
+      // Unmapped withholding section. It used to land on 640000 "Adjustable Tax",
+      // which is the schedule's computed summary row (`column_disabled c1` on the
+      // live capture) — i.e. a guaranteed refusal dressed up as a placement.
+      const reason = `Withholding section "${credit.section}" has no verified IRIS code in TAX_SECTION_TO_IRIS_CODE.`;
+      const bucket = unmapped.get(`TAX_${sectionUpper}`) || {
+        category: `TAX_${sectionUpper}`,
+        entryIds: [],
+        totalAmount: 0,
+        reason,
+      };
+      bucket.totalAmount += amount;
+      if (credit.id) bucket.entryIds.push(credit.id);
+      unmapped.set(`TAX_${sectionUpper}`, bucket);
+      continue;
     }
 
     const irisDef = Object.values(IRIS_CODES).find(
       (c: any) => c.code === irisCode,
     ) as any;
 
-    adjustableTaxFields.push({
-      taxCreditId: credit.id,
-      ourCategory: `TAX_${sectionUpper}`,
-      ourDescription: `${credit.section} - ${credit.subcategory} (${credit.source})`,
-      ourAmount: amount,
-      irisCode,
-      irisDescription:
+    if (irisDef?.rowLevel === "Summary" || COMPUTED_IRIS_CODES.has(irisCode)) {
+      const bucket = skipped.get(irisCode) || {
+        code: irisCode,
+        description: irisDef?.description || `${credit.section} ${credit.subcategory}`,
+        amount: 0,
+      };
+      bucket.amount += amount;
+      skipped.set(irisCode, bucket);
+      continue;
+    }
+
+    if (
+      holdUnprovenCode(
+        irisCode,
         irisDef?.description || `${credit.section} ${credit.subcategory}`,
-      portalArea: irisDef?.portalArea || "Tax Chargeable / Payments",
-      section: irisDef?.section || "Adjustable Tax",
-      column: "Tax Collected / Deducted",
-      isTaxField: true,
-      filerStatus: taxpayerListStatus || undefined,
-    });
+        `TAX_${sectionUpper}`,
+        amount,
+      )
+    ) {
+      continue;
+    }
+
+    const taxColumn: PortalFieldMapEntry["column"] = "Tax Collected / Deducted";
+    const taxKey = `${irisCode}:${taxColumn}`;
+    const existingTax = taxAgg.get(taxKey);
+    if (existingTax) {
+      existingTax.entry.ourAmount += amount;
+      if (credit.id) existingTax.ids.push(credit.id);
+      existingTax.entry.sourceEntryCount = existingTax.ids.length;
+    } else {
+      taxAgg.set(taxKey, {
+        entry: {
+          ourCategory: `TAX_${sectionUpper}`,
+          ourDescription: `${credit.section} - ${credit.subcategory} (${credit.source})`,
+          ourAmount: amount,
+          irisCode,
+          irisDescription:
+            irisDef?.description || `${credit.section} ${credit.subcategory}`,
+          portalArea: irisDef?.portalArea || "Tax Chargeable / Payments",
+          section: irisDef?.section || "Adjustable Tax",
+          column: taxColumn,
+          isTaxField: true,
+          filerStatus: taxpayerListStatus || undefined,
+          sourceEntryCount: 1,
+        },
+        ids: credit.id ? [credit.id] : [],
+      });
+    }
   }
+
+  for (const { entry } of incomeAgg.values()) incomeFields.push(entry);
+  for (const { entry } of taxAgg.values()) adjustableTaxFields.push(entry);
 
   // Wealth fields - from closing wealth etc (simplified)
   // For now, we add a placeholder that agent can use to fill wealth statement if needed
   // Actual wealth mapping needs user input - will be enhanced later
 
   return {
-    version: "1.0.0",
+    // 1.1.0 — one field per IRIS cell (aggregated), entered-column targeting,
+    // computed rows and unverified categories reported instead of guessed.
+    version: "1.1.0",
     generatedAt: new Date().toISOString(),
     taxYear,
     filerType,
@@ -472,6 +812,18 @@ export function buildPortalFieldMap(params: {
     incomeFields,
     adjustableTaxFields,
     wealthFields,
+    mappingGaps: {
+      unmappedCategories: [...unmapped.values()].sort((a, b) =>
+        a.category.localeCompare(b.category),
+      ),
+      skippedComputedCodes: [...skipped.values()].sort((a, b) =>
+        a.code.localeCompare(b.code),
+      ),
+      captureUnverified: [...unproven.values()].sort((a, b) =>
+        a.code.localeCompare(b.code),
+      ),
+      pensionSplitMismatch,
+    },
     computationHints: {
       totalIncome,
       taxableIncome,
@@ -481,7 +833,7 @@ export function buildPortalFieldMap(params: {
       pensionTaxableAmount: pensionDetails?.taxableAmount,
     },
     selectorBundle: {
-      version: "v1.0-2026-05-11",
+      version: "v1.1-2026-09-09-iris2-capture",
       portalType: "AUTO",
     },
   };

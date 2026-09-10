@@ -7,7 +7,7 @@
 // TY2026+ return setup steps that do not require legal/financial judgement.
 // Create/Save/Submit/payment controls and all financial inputs remain off
 // limits until the engine/mapping audit is resolved.
-const BUILD_TAG = "fix16-new-return-setup-20260908";
+const BUILD_TAG = "fix17-setup-continue-20260910";
 const DEFAULT_HOSTS = ["iris.fbr.gov.pk"];
 const SECTION_TOUR = Object.freeze([
   { id: "salary", group: "Employment", tab: "Salary" },
@@ -63,6 +63,21 @@ const INCOME_SECTION_IDS = Object.freeze(
   ALL_SECTION_IDS.filter((id) => !WEALTH_SECTION_IDS.includes(id)),
 );
 
+/**
+ * Sections that must render data rows when the return is open. Payment and
+ * Attachment do not own grids, so their emptiness proves nothing — that is the
+ * difference between "IRIS changed" and "this page has no table here".
+ */
+const ROW_BEARING_SECTION_IDS = Object.freeze([
+  "salary",
+  "tax_deductions",
+  "allowance_credits",
+  "withholding",
+  "computations",
+  "wealth_assets",
+  "wealth_reconciliation",
+]);
+
 function normalizeSetupLabel(value) {
   return String(value || "")
     .replace(/\s+/g, " ")
@@ -102,8 +117,11 @@ function classifyNewReturnSetupStage(input = {}) {
   if (prompts.has("resident") || prompts.has("non-resident"))
     return "residency";
   if (actions.has("accept and continue")) return "accept_continue";
+  // The TY2026 dialog labels its field "Tax Period"; the dashboard period screen
+  // says "Period"/"Tax Year". All three are the same stage — this used to be the
+  // only reason the agent stopped at the dialog without clicking Continue.
   if (
-    (prompts.has("tax year") || prompts.has("period")) &&
+    (prompts.has("tax year") || prompts.has("period") || prompts.has("tax period")) &&
     actions.has("continue")
   )
     return "period";
@@ -240,12 +258,49 @@ function portalProbe(options = {}) {
       return "residency";
     if (actions.has("accept and continue")) return "accept_continue";
     if (
-      (prompts.has("tax year") || prompts.has("period")) &&
+      (
+        prompts.has("tax year") ||
+        prompts.has("period") ||
+        prompts.has("tax period")
+      ) &&
       actions.has("continue")
     )
       return "period";
     return null;
   };
+  // Material renders field captions as <mat-label>/<mdc-floating-label>, never as
+  // a bare <label>, so a selector limited to label/legend sees nothing in the
+  // Normal Return dialog. One constant for both prompt sources so they cannot
+  // drift apart again.
+  const SETUP_LABEL_SELECTOR =
+    'label,mat-label,.mat-mdc-form-field-label,.mdc-floating-label,legend,[role="heading"],h1,h2,h3,h4,.mat-mdc-dialog-title,.mdc-dialog__title,.dialog-title';
+  // A recognised setup stage may already carry portal-filled fields (the TY2026
+  // dialog shows Person + Tax Period and asks only for Continue): those are not
+  // waiting for a human. An EMPTY editable box is, and so is a 4-digit period
+  // that names a different year than the packet's. Values are compared inside
+  // the page; only the verdict is returned, never the value.
+  const setupFieldsAwaitHuman = (scope) =>
+    Array.from(scope.querySelectorAll("input, textarea"))
+      .filter(visible)
+      .some((input) => {
+        const type = input.getAttribute("type") || "text";
+        if (/^(?:radio|checkbox|button|submit|hidden)$/i.test(type)) return false;
+        // An OTP/password box is a human question even when the page happens to
+        // show a setup caption next to it and the box is already filled.
+        if (
+          type === "password" ||
+          input.getAttribute("autocomplete") === "one-time-code"
+        )
+          return true;
+        if (input.disabled || input.readOnly) return false;
+        const value = String(input.value || "").trim();
+        if (!value) return true;
+        return (
+          /^20\d\d$/.test(value) &&
+          Number(options.taxYear) > 0 &&
+          Number(value) !== Number(options.taxYear)
+        );
+      });
   const isSafeAutoAdvanceStage = (stage) =>
     ["menu", "return_type", "period", "accept_continue"].includes(stage);
   const attribute = (s) =>
@@ -735,7 +790,7 @@ function portalProbe(options = {}) {
     // heuristic itself stays untouched for every other dialog.
     const setupDescriptor = {
       documentPresent: false,
-      prompts: Array.from(el.querySelectorAll('label,legend,[role="heading"]'))
+      prompts: Array.from(el.querySelectorAll(SETUP_LABEL_SELECTOR))
         .filter(visible)
         .map(text),
       actions: dialogControls.map(text),
@@ -747,15 +802,9 @@ function portalProbe(options = {}) {
       isSafeAutoAdvanceStage(setupStage) &&
       !verificationSignature &&
       !commitControlPresent &&
-      // A setup stage never asks for free text; only choices and Continue.
-      !Array.from(el.querySelectorAll("input, textarea"))
-        .filter(visible)
-        .some(
-          (input) =>
-            !/^(?:radio|checkbox|button|submit)$/i.test(
-              input.getAttribute("type") || "text",
-            ),
-        )
+      // A setup stage may show prefilled boxes, but nothing may still be waiting
+      // to be typed by a human (see setupFieldsAwaitHuman).
+      !setupFieldsAwaitHuman(el)
     )
       return "setup";
     // A real entry/verification field inside a dialog makes dismissal a
@@ -803,12 +852,18 @@ function portalProbe(options = {}) {
   );
   // Phase 1.5a. A recognised setup dialog the agent itself opened is a stage to
   // advance, not an obstacle to pause on. Every other dialog kind -- protected,
-  // welcome, unknown -- still blocks exactly as before, and any live backdrop
-  // blocks unconditionally.
-  const blocking =
-    dialogKinds.some((kind) => kind !== "setup") || blockers.length > 0;
+  // welcome, unknown -- still blocks exactly as before.
   const setupDialogOnly =
     dialogs.length > 0 && dialogKinds.every((kind) => kind === "setup");
+  const blocking =
+    dialogKinds.some((kind) => kind !== "setup") || blockers.length > 0;
+  // `blocking` keeps its original meaning (any live backdrop counts), because
+  // fill and readiness consumers rely on that being conservative. Advancing a
+  // setup dialog is the one thing allowed through it: IRIS dialogs are Material
+  // overlays, so the dialog's OWN backdrop used to make its Continue button
+  // permanently unreachable — the loop tolerated it (frame.setupDialogOnly),
+  // the action path did not, and the two disagreed on every retry.
+  const setupAdvanceAllowed = setupDialogOnly;
   const isClose = (el) => {
     const label = normalize(
       el.getAttribute("aria-label") || el.getAttribute("title") || text(el),
@@ -2036,7 +2091,7 @@ function portalProbe(options = {}) {
     let matches = [];
     if (!options.openReturn) actionResult.status = "navigation_not_enabled";
     else if (!authenticated) actionResult.status = "login_required";
-    else if (blocking || sensitiveInputVisible)
+    else if ((blocking && !setupAdvanceAllowed) || sensitiveInputVisible)
       actionResult.status = "blocked_by_dialog";
     else if (!identityConfigured) actionResult.status = "identity_required";
     else {
@@ -2316,13 +2371,14 @@ function portalProbe(options = {}) {
     .slice(0, 100);
   const newReturnPrompts = [
     "Tax Year",
+    "Tax Period",
     "Period",
     "Normal Return",
     "Simplified Return",
     "Resident",
     "Non-Resident",
   ].filter((label) =>
-    Array.from(document.querySelectorAll('label,legend,[role="heading"]'))
+    Array.from(document.querySelectorAll(SETUP_LABEL_SELECTOR))
       .filter(visible)
       .some((el) => text(el).toLowerCase() === label.toLowerCase()),
   );
@@ -2427,7 +2483,7 @@ async function probeFrames(
       eligible.length !== 1 ||
       before.frames.some(
         (frame) =>
-          frame.hasBlockingOverlay ||
+          (frame.hasBlockingOverlay && !frame.setupDialogOnly) ||
           frame.loginVisible ||
           frame.readiness?.explicitSessionExpired,
       )
@@ -3527,6 +3583,120 @@ async function inspectNavigation(
   return { inspection: await read(), requiredAction: "portal_navigation" };
 }
 
+
+/**
+ * "Selector drift" has to be an evidenced conclusion, not a string match.
+ *
+ * The captured section tour is the only ground truth the agent has: it says which
+ * panels were found and how many rows each rendered. Drift means rows that MUST be
+ * there are missing. `structure_changed` (the tour could not bind headers to rows)
+ * is a different failure — the DOM is present, our packet's claim about it is not
+ * verified — and telling an operator to rewrite selectors for that wastes a real
+ * filing window.
+ */
+function buildPortalEvidenceDiagnostics(sectionTour, rowBearingIds) {
+  const rowBearing = rowBearingIds || ROW_BEARING_SECTION_IDS;
+  const sections = Array.isArray(sectionTour && sectionTour.sections)
+    ? sectionTour.sections
+    : [];
+  if (!sections.length) {
+    return { state: "no_evidence", sections: [], drifted: [], unverified: [] };
+  }
+
+  const summary = sections.map((section) => ({
+    id: section && section.id != null ? section.id : null,
+    status: (section && section.status) || null,
+    transition: (section && section.transition) || null,
+    rowCount: Array.isArray(section && section.rows) ? section.rows.length : 0,
+    gridCount: Array.isArray(section && section.grids) ? section.grids.length : 0,
+    mappingVerified: Boolean(section && section.mappingVerified),
+  }));
+
+  const drifted = summary.filter(
+    (section) =>
+      rowBearing.includes(section.id) &&
+      section.rowCount === 0 &&
+      section.status === "captured",
+  );
+  const unverified = summary.filter(
+    (section) =>
+      section.rowCount > 0 &&
+      section.mappingVerified === false &&
+      String(section.transition || "").includes("structure_changed"),
+  );
+
+  return {
+    state: drifted.length
+      ? "rows_missing"
+      : unverified.length
+        ? "structure_unverified"
+        : "structure_present",
+    sections: summary,
+    drifted: drifted.map((section) => section.id),
+    unverified: unverified.map((section) => section.id),
+  };
+}
+
+/**
+ * The one predicate that says "this page IS the return workspace", as an in-page script.
+ *
+ * `countVisibleInputs() > 0` is NOT readiness: the Summary-of-Economic-Transactions
+ * gate renders ten visible inputs, so an agent waiting on that signal happily reports
+ * a form that was never opened. This is the same evidence `classifyPage` uses for
+ * `readiness.returnWorkspace`, exported so the autofill runner and the dashboard
+ * flow cannot drift into disagreeing about what "ready" means.
+ */
+const RETURN_WORKSPACE_PROBE = `(() => {
+  const clip = (t) => String(t == null ? '' : t).replace(/\\s+/g, ' ').trim();
+  // textContent, NOT innerText: innerText is undefined outside a browser and
+  // silently turns every label match into a false negative.
+  const labelled = (el) => clip(el && (el.innerText || el.textContent));
+  // Only explicit DOM markers count as hidden. A zero-width box is a stylesheet
+  // that failed to load, not evidence that the return is closed.
+  const isHidden = (el) => {
+    if (!el) return true;
+    if (el.closest('[hidden], [inert], [aria-hidden="true"]')) return true;
+    const panel = el.closest('mat-expansion-panel');
+    const header = panel && panel.querySelector(':scope > mat-expansion-panel-header');
+    if (header && !header.classList.contains('mat-expanded') &&
+        header.getAttribute('aria-expanded') !== 'true') return true;
+    try {
+      const s = (typeof getComputedStyle === 'function' ? getComputedStyle(el) : null);
+      if (s && (s.display === 'none' || s.visibility === 'hidden')) return true;
+    } catch (e) {}
+    return false;
+  };
+  const visible = (list) => {
+    const shown = list.filter((el) => !isHidden(el));
+    return shown.length ? shown : list;
+  };
+  const countInputs = (root) => (root ? root.querySelectorAll('input:not([type="hidden"])') : []).length;
+  const workflow = visible(Array.from(document.querySelectorAll('app-nitr-workflow')))[0];
+  if (!workflow) {
+    return { returnWorkspace: false, reason: 'app-nitr-workflow-absent', inputs: countInputs(document) };
+  }
+  const header = workflow.querySelector('app-wf-header');
+  if (!header) {
+    return { returnWorkspace: false, reason: 'app-wf-header-absent', inputs: countInputs(workflow) };
+  }
+  const year = visible(Array.from(header.querySelectorAll('h6')))
+    .some((el) => /^Year\\s+20\\d{2}$/i.test(labelled(el)));
+  const returnDocument = visible(Array.from(header.querySelectorAll('p,span')))
+    .some((el) => {
+      const label = labelled(el);
+      return label.length < 220 && /\\b(?:114|116)\\s*\\(\\s*\\d+\\s*\\)/i.test(label);
+    });
+  const registration = visible(Array.from(header.querySelectorAll('p')))
+    .some((el) => /^Registration\\s*(?:No|Number)\\s*:/i.test(labelled(el)));
+  return {
+    returnWorkspace: Boolean(year && returnDocument && registration),
+    evidence: { year, returnDocument, registration },
+    reason: year && returnDocument && registration ? null : 'workflow-header-incomplete',
+    inputs: countInputs(workflow),
+  };
+})()`;
+
+
 module.exports = {
   BUILD_TAG,
   DEFAULT_HOSTS,
@@ -3550,4 +3720,7 @@ module.exports = {
   navigateToSection,
   isAuthenticated,
   inspectNavigation,
+  ROW_BEARING_SECTION_IDS,
+  buildPortalEvidenceDiagnostics,
+  RETURN_WORKSPACE_PROBE,
 };

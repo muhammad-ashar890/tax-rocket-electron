@@ -40,6 +40,14 @@ const ROW_SELECTOR = ".tableRows.dataRow[id]";
 const CELL_WRAPPER_SELECTOR = ".data-middle-child-wapper";
 const DESCRIPTION_SELECTOR = ".row-description-text";
 
+/**
+ * Must equal AGENT_BUILD_TAG in main.js and BUILD_TAG in iris-navigation.js.
+ * This file holds the in-page script that decides which cell a rupee lands in, so
+ * a stale copy is a correctness risk, not a cosmetic one — main.js refuses to run
+ * the real-portal flow when the three files disagree.
+ */
+const BUILD_TAG = "fix17-setup-continue-20260910";
+
 /** Outcome reason codes. `filled` is the only success. */
 const FILL_STATUS = {
   FILLED: "filled",
@@ -50,7 +58,39 @@ const FILL_STATUS = {
   NO_EDITABLE_CELL: "no_editable_cell",
   EMPTY_VALUE: "empty_value",
   MISSING_CODE: "missing_code",
+  /**
+   * The cell was located only by POSITION (4-column fallback) or by being the
+   * sole editable box, so its column identity was never proven against a header.
+   * Fine to report in a dry run; never good enough to write into a live return.
+   */
+  UNVERIFIED_TARGET: "unverified_target",
+  /** The element no longer holds what we wrote (Angular rewrote/rejected it). */
+  READBACK_MISMATCH: "readback_mismatch",
 };
+
+/**
+ * Amounts the portal will actually accept. The captured amount inputs are
+ * `type=text` with `onkeypress="if (event.which > 57) return false;"` and a
+ * `thousandseparator` attribute, i.e. plain digits only — so a value like
+ * `1e+21` (what String(1e21) produces) or "1,234.50" would be silently mangled.
+ */
+function normalisePortalAmount(value) {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return { ok: false, reason: FILL_STATUS.EMPTY_VALUE, value: "" };
+  }
+  const raw = String(value).trim().replace(/,/g, "");
+  if (!/^-?\d+(?:\.\d+)?$/.test(raw)) {
+    return { ok: false, reason: "unparseable_amount", value: raw };
+  }
+  const amount = Number(raw);
+  if (!Number.isFinite(amount)) {
+    return { ok: false, reason: "unparseable_amount", value: raw };
+  }
+  // IRIS renders whole rupees; half-up on the paisa keeps us aligned with the
+  // engine's own rounding rather than JS banker's rounding.
+  const rounded = Math.round(amount);
+  return { ok: true, value: String(rounded), exact: rounded === amount };
+}
 
 /**
  * Canonical column intents. Our packet's column vocabulary and IRIS's rendered
@@ -174,6 +214,8 @@ function buildInPageFillScript(fields, options) {
   const payload = {
     fields,
     dryRun: Boolean(options && options.dryRun),
+    // Live mode may not write to a cell whose column identity was only guessed.
+    allowUnverifiedTargets: Boolean(options && options.allowUnverifiedTargets),
     rowSelector: ROW_SELECTOR,
     cellSelector: CELL_WRAPPER_SELECTOR,
     descriptionSelector: DESCRIPTION_SELECTOR,
@@ -218,39 +260,92 @@ function buildInPageFillScript(fields, options) {
 
     // Header labels for the table this row belongs to, so we can match a
     // column by TEXT rather than trusting a hardcoded index.
-    const headerLabelsFor = (row) => {
-      let node = row.previousElementSibling;
-      while (node) {
-        if (node.classList && node.classList.contains("heading-bar")) break;
-        node = node.previousElementSibling;
-      }
-      if (!node) {
-        let parent = row.parentElement;
-        while (parent && !node) {
-          const bars = Array.from(parent.querySelectorAll(".heading-bar"));
-          if (bars.length) node = bars[bars.length - 1];
-          parent = parent.parentElement;
-        }
-      }
-      if (!node) return [];
-      // The heading bar's direct children are [Description, Code, <columns>, Action?].
-      // The value-column labels live one level deeper, inside the wide column
-      // block — there is no .columns-parent on the header itself (that class
-      // only exists on data rows), so pick the child holding the most labels.
-      const direct = Array.from(node.children);
+    //
+    // A panel render contains SEVERAL heading bars: the section's own grid plus
+    // the depreciation/amortisation sub-tables (the live capture of the Salary
+    // view had 3, the Withholding view had 6). Taking "the last bar in the
+    // parent" can therefore label a row with a different table's columns, so we
+    // collect every candidate bar, keep only those whose value-label count
+    // equals the row's cell count, and prefer the nearest one to the row.
+    const barsFor = (scope) => Array.from(scope.querySelectorAll(".heading-bar"));
+
+    const labelCountOf = (bar) => {
+      const direct = Array.from(bar.children);
       let best = [];
       for (const child of direct) {
         const labels = Array.from(child.children)
-          .map((c) => c.textContent.replace(/\\s+/g, " ").trim())
+          .map((c) => c.textContent.replace(/\s+/g, " ").trim())
           .filter(Boolean);
         if (labels.length > best.length) best = labels;
       }
-      if (best.length > 1) return best;
-      // Single-column sections render one label directly (e.g. "Amount").
-      return direct
-        .map((c) => c.textContent.replace(/\\s+/g, " ").trim())
-        .filter(Boolean);
+      const labels = best.length > 1
+        ? best
+        : direct.map((c) => c.textContent.replace(/\s+/g, " ").trim()).filter(Boolean);
+      return labels.filter(
+        (h) => norm(h) !== "description" && norm(h) !== "code" && norm(h) !== "action"
+      );
     };
+
+    const nearestBars = (row) => {
+      const out = [];
+      // Walk the sibling chain WITHOUT stopping at data rows: in the captured
+      // IRIS markup the heading bar and the rows are siblings of the same grid
+      // container, so row #2's previous sibling is row #1, not the bar.
+      let node = row.previousElementSibling;
+      let step = 0;
+      while (node) {
+        if (node.classList && node.classList.contains("heading-bar")) {
+          out.push({ bar: node, distance: step, side: "before" });
+          break;
+        }
+        node = node.previousElementSibling;
+        step += 1;
+      }
+      node = row.nextElementSibling;
+      step = 0;
+      while (node) {
+        if (node.classList && node.classList.contains("heading-bar")) {
+          out.push({ bar: node, distance: step, side: "after" });
+          break;
+        }
+        node = node.nextElementSibling;
+        step += 1;
+      }
+      if (!out.length) {
+        // Nothing in the row's own container: fall back to the panels around it,
+        // still ranked by DOM order so the nearest table wins.
+        const owner =
+          row.closest("mat-expansion-panel-body") ||
+          row.closest("mat-expansion-panel");
+        const scope = owner || row.parentElement;
+        if (scope) {
+          const bars = barsFor(scope);
+          bars.forEach((bar, index) => {
+            out.push({ bar, distance: 100 + index, side: "owner" });
+          });
+        }
+      }
+      return out;
+    };
+
+    // Prefer the bar that describes this row: first the nearest one before it
+    // (a grid's own header), then its own header; among those, prefer a bar whose
+    // value-label count equals the row's cell count, and only then accept a
+    // differently-sized header (a single-column grid can legitimately render more
+    // labels than cells).
+    const headerLabelsFor = (row, expectedCount) => {
+      const found = nearestBars(row)
+        .map((entry) => ({ entry, labels: labelCountOf(entry.bar) }))
+        .filter((c) => c.labels.length);
+      if (!found.length) return [];
+      const rank = (c) =>
+        (c.entry.side === "before" ? 0 : 1) * 100 +
+        (expectedCount && c.labels.length === expectedCount ? 0 : 10) +
+        c.entry.distance;
+      found.sort((a, b) => rank(a) - rank(b) || a.labels.length - b.labels.length);
+      return found[0].labels;
+    };
+
 
     const results = [];
 
@@ -268,10 +363,26 @@ function buildInPageFillScript(fields, options) {
         results.push({ ...base, status: S.MISSING_CODE });
         continue;
       }
-      if (field.value === null || field.value === undefined || String(field.value).trim() === "") {
-        results.push({ ...base, status: S.EMPTY_VALUE });
+      // Values are normalised Node-side (prepareField) so this script — which
+      // runs inside the IRIS page and cannot see module scope — receives a plain
+      // digit string it can write verbatim. The guards here are deliberate
+      // duplicates: buildInPageFillScript is also called directly by the suites.
+      if (
+        field.amountValid === false ||
+        field.value === null ||
+        field.value === undefined ||
+        String(field.value).trim() === ""
+      ) {
+        results.push({
+          ...base,
+          status: field.amountReason && field.amountReason !== S.EMPTY_VALUE
+            ? field.amountReason
+            : S.EMPTY_VALUE,
+        });
         continue;
       }
+      const amount = { value: String(field.value) };
+      if (field.roundedFrom) base.roundedFrom = field.roundedFrom;
 
       const rows = findRows(field.irisCode);
       if (!rows.length) {
@@ -296,6 +407,20 @@ function buildInPageFillScript(fields, options) {
         results.push({ ...base, status: S.COLUMN_NOT_FOUND, rowDescription: descOf(row) });
         continue;
       }
+      if (!wrappers.some((w) => isEditable(inputOf(w)))) {
+        // IRIS derives every cell of this row (e.g. #1000 "Total Income from
+        // Salary", #640000 "Adjustable Tax"). Naming it as a derived row instead
+        // of "column_disabled" is the difference between "the packet targeted a
+        // computed row" and "the selector bundle is stale" for the operator.
+        results.push({
+          ...base,
+          status: S.NO_EDITABLE_CELL,
+          rowDescription: descOf(row),
+          columnCount: wrappers.length,
+          hint: "computed_row",
+        });
+        continue;
+      }
 
       // Single-column sections (Assets, Reconciliation): only one place to go.
       let index = -1;
@@ -308,7 +433,7 @@ function buildInPageFillScript(fields, options) {
 
       // Preferred: match the rendered header text to our intent.
       if (index < 0) {
-        const headers = headerLabelsFor(row);
+        const headers = headerLabelsFor(row, wrappers.length);
         // headers usually start with Description, Code, then the value columns
         const valueHeaders = headers.filter(
           (h) => norm(h) !== "description" && norm(h) !== "code" && norm(h) !== "action"
@@ -378,7 +503,23 @@ function buildInPageFillScript(fields, options) {
         results.push({
           ...base, status: S.FILLED, columnIndex: index, matchedBy,
           rowDescription: descOf(row), dryRun: true,
+          plannedValue: amount.value,
           previousValue: input.value || "",
+        });
+        continue;
+      }
+
+      if (
+        !CFG.dryRun &&
+        !CFG.allowUnverifiedTargets &&
+        (matchedBy === "position_fallback" || matchedBy === "sole_editable")
+      ) {
+        results.push({
+          ...base,
+          status: S.UNVERIFIED_TARGET,
+          columnIndex: index,
+          matchedBy,
+          rowDescription: descOf(row),
         });
         continue;
       }
@@ -387,12 +528,25 @@ function buildInPageFillScript(fields, options) {
       // scrollIntoView/focus are convenience only — never let them abort a fill.
       try { if (typeof input.scrollIntoView === "function") input.scrollIntoView({ block: "center" }); } catch (e) {}
       try { if (typeof input.focus === "function") input.focus(); } catch (e) {}
-      input.value = String(field.value);
+      const target = amount.value;
+      input.value = target;
       // Angular needs both to update its model and run recalculation.
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
       try { if (typeof input.blur === "function") input.blur(); } catch (e) {}
       input.dispatchEvent(new Event("blur", { bubbles: true }));
+
+      const readback = (input.value || "").replace(/\s+/g, "").replace(/,/g, "");
+      if (readback !== target) {
+        // The portal kept a different figure (reformatted, clamped, or reverted).
+        // Reporting "filled" here would be the worst possible outcome. Use
+        // continue, never return: the remaining fields must still be attempted.
+        results.push({
+          ...base, status: S.READBACK_MISMATCH, columnIndex: index, matchedBy,
+          rowDescription: descOf(row), previousValue, readback: input.value,
+        });
+        continue;
+      }
 
       results.push({
         ...base, status: S.FILLED, columnIndex: index, matchedBy,
@@ -415,6 +569,7 @@ function prepareField(field) {
   const irisCode = field.irisCode || null;
   const column = field.column || null;
   const intent = resolveColumnIntent(column);
+  const amount = normalisePortalAmount(field.value);
 
   const headerPatterns = [];
   if (intent) {
@@ -430,7 +585,11 @@ function prepareField(field) {
     label: field.label || "",
     column,
     intent,
-    value: field.value,
+    value: amount.ok ? amount.value : field.value,
+    amountValid: amount.ok,
+    amountReason: amount.ok ? null : amount.reason,
+    amountExact: amount.ok ? amount.exact : false,
+    roundedFrom: amount.ok && !amount.exact ? String(field.value) : undefined,
     headerPatterns: Array.from(new Set(headerPatterns)),
     fallbackIndex: intent != null ? FOUR_COLUMN_FALLBACK[intent] : undefined,
   };
@@ -445,16 +604,33 @@ function prepareField(field) {
  * @returns {Promise<{results: Array, summary: object}>}
  */
 async function fillIrisRows(windowInstance, portalFieldMap, options = {}) {
-  const fields = (portalFieldMap || [])
+  const prepared = (portalFieldMap || [])
     .filter((f) => f && f.irisCode)
     .map(prepareField);
+  // Amounts the portal could never accept are refused here, so the in-page
+  // script only ever sees values it can write verbatim.
+  const rejected = prepared
+    .filter((f) => !f.amountValid)
+    .map((f) => ({
+      key: f.key,
+      irisCode: f.irisCode,
+      label: f.label,
+      requestedColumn: f.column,
+      status:
+        f.value === null || f.value === undefined || String(f.value).trim() === ""
+          ? FILL_STATUS.EMPTY_VALUE
+          : f.amountReason,
+    }));
+  const fields = prepared.filter((f) => f.amountValid);
 
   if (!fields.length) {
-    return { results: [], summary: summarise([]) };
+    const results = rejected;
+    return { results, summary: summarise(results) };
   }
 
   const script = buildInPageFillScript(fields, options);
-  const results = await windowInstance.webContents.executeJavaScript(script);
+  const filled = await windowInstance.webContents.executeJavaScript(script);
+  const results = [...filled, ...rejected];
   return { results, summary: summarise(results) };
 }
 
@@ -488,7 +664,9 @@ function describeFillSummary(summary) {
 }
 
 module.exports = {
+  BUILD_TAG,
   FILL_STATUS,
+  normalisePortalAmount,
   COLUMN_INTENT,
   COLUMN_ALIASES,
   FOUR_COLUMN_FALLBACK,

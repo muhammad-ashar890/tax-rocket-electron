@@ -54,6 +54,14 @@ export function useFilingFinalization({
   const [generatingPacket, setGeneratingPacket] = useState(false);
   const [generatingPdf, setGeneratingPdf] = useState(false);
   const [packetError, setPacketError] = useState<string | null>(null);
+  /**
+   * Income the coverage gate refused to fold into the packet. Non-empty means the
+   * practitioner can, deliberately, generate anyway — the amounts then travel into
+   * the snapshot as manual-entry items instead of vanishing.
+   */
+  const [packetUnmappedSources, setPacketUnmappedSources] = useState<
+    { category: string; totalAmount: number }[]
+  >([]);
 
   useEffect(() => {
     if (!draftId) {
@@ -107,19 +115,33 @@ export function useFilingFinalization({
     return true;
   }
 
-  async function handleGeneratePacket() {
+  async function handleGeneratePacket(acceptUnmapped?: unknown) {
     if (!draftId) return;
+
+    // Strictly `true`, because this handler is also wired to a click: a MouseEvent
+    // must never read as "the practitioner accepted the coverage gap".
+    const accept = acceptUnmapped === true;
 
     setGeneratingPacket(true);
     setPacketError(null);
-    const result = await generateFilingPacketAction(draftId);
+    const result = await generateFilingPacketAction(draftId, {
+      acceptUnmappedPortalSources: accept,
+    });
     setGeneratingPacket(false);
 
     if (!result.success || !result.packet) {
       setPacketError(result.error ?? "Failed to generate filing packet");
+      setPacketUnmappedSources(
+        (
+          result as {
+            unmappedPortalSources?: { category: string; totalAmount: number }[];
+          }
+        ).unmappedPortalSources ?? [],
+      );
       return;
     }
 
+    setPacketUnmappedSources([]);
     setFilingPacket(result.packet as FilingPacketSummary);
   }
 
@@ -182,6 +204,7 @@ export function useFilingFinalization({
     generatingPacket,
     generatingPdf,
     packetError,
+    packetUnmappedSources,
     setApprovalConfirmed,
     setTaxCalculatedInSession,
     setFilingPacket,

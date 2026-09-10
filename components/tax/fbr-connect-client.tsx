@@ -33,6 +33,12 @@ type Props = Readonly<{
   taxPayable?: number | null;
   refundDue?: number | null;
   packetVersion?: number;
+  /**
+   * The deployment's own consent for typing into IRIS (server env
+   * TAXROCKET_ALLOW_LIVE_FILING). Shown verbatim rather than hidden, because an
+   * operator must never discover after the fact that amounts were entered.
+   */
+  liveFilingEnabled?: boolean;
 }>;
 
 type DesktopSession = {
@@ -161,6 +167,7 @@ export default function FbrConnectClient({
   taxPayable,
   refundDue,
   packetVersion,
+  liveFilingEnabled = false,
 }: Props) {
   const [connection, setConnection] = useState(initialConnection);
   const [session, setSession] = useState<DesktopSession | null>(null);
@@ -486,9 +493,27 @@ export default function FbrConnectClient({
               it locally before starting. The pilot opens a matching original
               114(1) draft, or the new-return menu if none exists in the
               complete list. It inspects the supplied Data sections plus Payment
-              and Attachment structures. It does not enter amounts, upload
-              files, pay, save or submit.
+              and Attachment structures.
+              {liveFilingEnabled
+                ? " Live entry is ON for this deployment, so it will type the approved packet's amounts into the IRIS columns it can prove — it still never uploads files, pays, saves or submits."
+                : " It does not enter amounts, upload files, pay, save or submit."}
             </p>
+            {liveFilingEnabled && (
+              <div
+                role="alert"
+                className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-400"
+              >
+                <span className="font-medium">
+                  Live entry is enabled (TAXROCKET_ALLOW_LIVE_FILING).
+                </span>{" "}
+                Amounts from packet v{packetVersion ?? "?"} will be written into
+                verified IRIS cells as you run this job. Nothing is saved or
+                submitted — review the figures on the portal before you save.
+                Only sections whose structure the agent verified are written;
+                the rest are reported as skipped and stay manual. Turn it off by
+                unsetting the variable and restarting the web app.
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 size="sm"
@@ -501,7 +526,9 @@ export default function FbrConnectClient({
                 ) : (
                   <Play className="h-3.5 w-3.5" />
                 )}
-                Start navigation check
+                {liveFilingEnabled
+                  ? "Start supervised entry"
+                  : "Start navigation check"}
               </Button>
               <Button
                 variant="outline"

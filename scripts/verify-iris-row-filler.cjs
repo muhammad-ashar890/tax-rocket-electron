@@ -177,7 +177,11 @@ test("salary: refuses the fully-calculated summary row #1000 instead of corrupti
     field("salary.total", "1000", "Total Amount", 5000000),
   ]);
   const r = byKey["salary.total"];
-  assert.equal(r.status, filler.FILL_STATUS.COLUMN_DISABLED, JSON.stringify(r));
+  // Reported as a fully-derived ROW, not as a per-column refusal: that is the
+  // distinction which stops a computed row from being misdiagnosed as "selector
+  // drift" in the operator log (the live run logged 12 × column_disabled for #1000).
+  assert.equal(r.status, filler.FILL_STATUS.NO_EDITABLE_CELL, JSON.stringify(r));
+  assert.equal(r.hint, "computed_row");
   assert.ok(!("readback" in r), "must not have written anything");
 });
 
@@ -275,7 +279,8 @@ test("assets: derived totals like #7019 stay protected", () => {
   ]);
   assert.equal(
     byKey["assets.total"].status,
-    filler.FILL_STATUS.COLUMN_DISABLED,
+    filler.FILL_STATUS.NO_EDITABLE_CELL,
+    "a whole-row derived figure is reported as such",
   );
 });
 
@@ -287,7 +292,7 @@ test("reconciliation: editable inflow #7031 fills, derived #703000 refuses", () 
   assert.equal(byKey["recon.income"].status, filler.FILL_STATUS.FILLED);
   assert.equal(
     byKey["recon.unreconciled"].status,
-    filler.FILL_STATUS.COLUMN_DISABLED,
+    filler.FILL_STATUS.NO_EDITABLE_CELL,
     "unreconciled amount is IRIS-derived and must never be written",
   );
 });
@@ -369,12 +374,12 @@ test("summary counts successes and itemises every skip reason", () => {
   assert.equal(summary.total, 3);
   assert.equal(summary.filled, 1);
   assert.equal(summary.skipped, 2);
-  assert.equal(summary.byStatus[filler.FILL_STATUS.COLUMN_DISABLED], 1);
+  assert.equal(summary.byStatus[filler.FILL_STATUS.NO_EDITABLE_CELL], 1);
   assert.equal(summary.byStatus[filler.FILL_STATUS.ROW_NOT_FOUND], 1);
 
   const text = filler.describeFillSummary(summary);
   assert.match(text, /1\/3 fields filled/);
-  assert.match(text, /column_disabled/);
+  assert.match(text, /no_editable_cell/);
   assert.match(text, /row_not_found/);
 });
 
@@ -385,4 +390,183 @@ test("an all-skip run is reported honestly, never as success", () => {
   const summary = filler.summarise(results);
   assert.equal(summary.filled, 0);
   assert.match(filler.describeFillSummary(summary), /0\/1 fields filled/);
+});
+
+// ───────────────────────────────────────────────────────────────
+// P1: what the filler refuses to WRITE (a dry run cannot prove these)
+// ───────────────────────────────────────────────────────────────
+
+function withDom(fixtureName) {
+  return new JSDOM(loadFixture(fixtureName), { runScripts: "outside-only" });
+}
+
+function evalIn(dom, fields, options) {
+  const script = filler.buildInPageFillScript(
+    fields.map((f) => filler.prepareField(f)),
+    options,
+  );
+  return dom.window.eval(script);
+}
+
+test("live: a cell reached only by elimination is refused, not guessed into", () => {
+  // #923184 on the computations fixture resolves no header at all, so col 0 comes
+  // from `sole_editable` — a guess about which column the taxpayer meant. Harmless
+  // in a dry run, unacceptable in a live write: the wrong column is a wrong return.
+  const dom = withDom("computations.html");
+  const results = evalIn(
+    dom,
+    [field("comp.guess", "923184", "Zzz No Such Column", 5000)],
+    { dryRun: false },
+  );
+  const r = results.find((entry) => entry.key === "comp.guess");
+  assert.equal(r.matchedBy, "sole_editable", JSON.stringify(r));
+  assert.equal(r.status, filler.FILL_STATUS.UNVERIFIED_TARGET, JSON.stringify(r));
+  assert.match(
+    filler.describeFillSummary(filler.summarise(results)),
+    /unverified_target/,
+  );
+});
+
+test("dry: the same guess is still reported, because dry runs exist to inspect it", () => {
+  const dom = withDom("computations.html");
+  const results = evalIn(
+    dom,
+    [field("comp.guess", "923184", "Zzz No Such Column", 5000)],
+    { dryRun: true },
+  );
+  const r = results.find((entry) => entry.key === "comp.guess");
+  assert.equal(r.status, filler.FILL_STATUS.FILLED);
+  assert.equal(r.dryRun, true);
+  assert.equal(r.previousValue, r.previousValue ?? "");
+});
+
+test("live: an explicit opt-in lets an operator accept a guessed cell", () => {
+  const dom = withDom("computations.html");
+  const results = evalIn(
+    dom,
+    [field("comp.guess", "923184", "Zzz No Such Column", 5000)],
+    { dryRun: false, allowUnverifiedTargets: true },
+  );
+  assert.equal(
+    results.find((entry) => entry.key === "comp.guess").status,
+    filler.FILL_STATUS.FILLED,
+  );
+});
+
+test("live: a write the portal did not keep is a mismatch, never a fill", () => {
+  // salary #1009 col 0 is reached by header_exact and is editable, so every guard
+  // passes and only the read-back can catch the portal reverting our value.
+  const dom = withDom("salary.html");
+  const input = dom.window.document
+    .getElementById("1009")
+    .querySelectorAll("input")[0];
+  assert.equal(input.disabled, false, "fixture must expose an editable target");
+  let stored = input.value;
+  Object.defineProperty(input, "value", {
+    configurable: true,
+    get: () => "0", // the portal "kept" something else
+    set: (next) => {
+      stored = next;
+    },
+  });
+  const results = evalIn(
+    dom,
+    [field("salary.readback", "1009", "Total Amount", 250000)],
+    { dryRun: false },
+  );
+  const r = results.find((entry) => entry.key === "salary.readback");
+  assert.equal(r.status, filler.FILL_STATUS.READBACK_MISMATCH, JSON.stringify(r));
+  assert.equal(r.readback, "0", "report what the portal actually holds");
+  assert.equal(stored, "250000", "the write was attempted exactly once");
+});
+
+test("live: a mismatch on one field does not abandon the fields after it", () => {
+  const dom = withDom("salary.html");
+  const first = dom.window.document
+    .getElementById("1009")
+    .querySelectorAll("input")[0];
+  Object.defineProperty(first, "value", {
+    configurable: true,
+    get: () => "0",
+    set: () => {},
+  });
+  const results = evalIn(
+    dom,
+    [
+      field("salary.readback", "1009", "Total Amount", 250000),
+      field("salary.next", "1010", "Total Amount", 1000),
+    ],
+    { dryRun: false },
+  );
+  assert.equal(results.length, 2, "both fields must be itemised");
+  assert.equal(
+    results.find((entry) => entry.key === "salary.next").status,
+    filler.FILL_STATUS.FILLED,
+  );
+});
+
+test("fillIrisRows: amounts the portal could never take are refused before the DOM is touched", async () => {
+  const queued = [];
+  const windowInstance = {
+    webContents: {
+      executeJavaScript: async (script) => {
+        queued.push(script);
+        return []; // the caller only needs to know which fields reached the page
+      },
+    },
+  };
+  const { results, summary } = await filler.fillIrisRows(
+    windowInstance,
+    [
+      field("salary.paisa", "1010", "Total Amount", 1000.75),
+      field("salary.junk", "1049", "Total Amount", "1,000 rupees"),
+      field("salary.blank", "1089", "Total Amount", ""),
+      field("salary.ok", "1009", "Total Amount", "5,000,000"),
+    ],
+    { dryRun: true },
+  );
+  assert.equal(queued.length, 1, "exactly one script is injected");
+  // #1049 is carried ONLY by the unparseable value, so its absence from the
+  // injected script proves the pre-filter ran (keys survive for queued fields).
+  assert.ok(!queued[0].includes('"1049"'), "an unusable amount must never reach the page");
+  assert.ok(queued[0].includes('"1009"'), "valid fields still go through");
+  const byKey = Object.fromEntries(results.map((r) => [r.key, r]));
+  assert.equal(byKey["salary.junk"].status, "unparseable_amount");
+  assert.equal(byKey["salary.blank"].status, filler.FILL_STATUS.EMPTY_VALUE);
+  // The mocked page returns nothing, so the summary holds the pre-rejections only.
+  assert.equal(summary.total, 2);
+  assert.equal(summary.skipped, 2);
+  // A paisa amount is not refused — the portal has no paisa, so it is rounded.
+  assert.ok(queued[0].includes('"value":"1001"'), "1000.75 rounds up, exactly once");
+});
+
+test("prepareField normalises to the portal's whole-rupee digits-only form", () => {
+  const whole = filler.prepareField({
+    key: "k",
+    irisCode: "1009",
+    column: "Total Amount",
+    value: "1,250,000.00",
+  });
+  assert.equal(whole.amountValid, true);
+  assert.equal(whole.value, "1250000");
+  assert.equal(whole.amountExact, true);
+
+  const paisa = filler.prepareField({
+    key: "k2",
+    irisCode: "1009",
+    column: "Total Amount",
+    value: 1250000.4,
+  });
+  assert.equal(paisa.value, "1250000");
+  assert.equal(paisa.amountExact, false);
+  assert.equal(paisa.roundedFrom, "1250000.4");
+
+  const exponent = filler.prepareField({
+    key: "k3",
+    irisCode: "1009",
+    column: "Total Amount",
+    value: 1e21,
+  });
+  assert.equal(exponent.amountValid, false, "String(1e21) is not a portal amount");
+  assert.equal(exponent.amountReason, "unparseable_amount");
 });

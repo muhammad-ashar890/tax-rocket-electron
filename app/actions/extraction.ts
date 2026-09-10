@@ -12,6 +12,12 @@ import { createNotification } from "@/app/actions/notifications";
 import { prisma } from "@/lib/prisma";
 import { consumeRateLimit } from "@/lib/rate-limit";
 import { parseTaxpayerDateOfBirth } from "@/lib/tax/taxpayer-age";
+import {
+  CARRY_FORWARD_DOCUMENT_TYPES,
+  planCnicProfileUpdate,
+  planIdentityCarryForward,
+  readCnicValidity,
+} from "@/lib/tax/cnic-profile";
 import { validateTaxYearStatement } from "@/lib/tax/tax-year-period";
 
 const GEMINI_SUPPORTED_TYPES = new Set([
@@ -45,7 +51,7 @@ Use this exact shape:
   "notes": ["string"]
 }
 For a bank statement, always return separate fields labelled exactly "Bank Name", "Account Label", "Account Number", "Currency", "Opening Balance", "Closing Balance", "Statement Period Start", and "Statement Period End". Never combine the statement dates into one field: read the start and end dates from the statement header and return each as ISO YYYY-MM-DD. Extract every visible transaction row from the statement table. Do not include opening-balance or closing-balance marker rows as transactions; those balances belong in fields. Do not invent rows. Return transaction dates as ISO YYYY-MM-DD whenever possible. Keep descriptions and currency amounts exactly as shown in the document.
-For a CNIC, always return separate fields labelled exactly "CNIC Number", "Name", "Father Name" and "Date of Birth". Return "Date of Birth" as ISO YYYY-MM-DD. Read it from the "Date of Birth" line only: never use the issue date or the expiry date, and never guess a date of birth that is not printed on the card.`;
+For a CNIC, always return separate fields labelled exactly "CNIC Number", "Name", "Father Name", "Date of Birth" and "Expiry Date", plus "Address" when the card prints one. Return "Date of Birth" and "Expiry Date" as ISO YYYY-MM-DD. Read the date of birth from the "Date of Birth" line only: never use the issue date or the expiry date for it, and never guess a date of birth that is not printed on the card. For "Expiry Date" return the card's own validity/expiry line ("Valid Upto", "Expiry", "Date of Expiry"), or null when the card prints none — never infer one from the issue date.`;
 
 type DocumentSlotRule = {
   label: string;
@@ -306,6 +312,142 @@ function parseModelJson(text: string) {
   }
 }
 
+/**
+ * Identity documents (currently the CNIC) belong to the person, not to a tax year,
+ * so a card approved for one filing must not have to be uploaded again for the
+ * next one. This copies the already-approved record onto the new draft — the draft
+ * keeps its own audit row (packets and evidence refer to a document per filing),
+ * while the human does the upload exactly once.
+ *
+ * It never invents verification: the copy only happens when the profile still
+ * carries the CNIC and date of birth that the earlier approval wrote.
+ */
+/**
+ * Read one field back out of a stored extraction payload. Defensive by design: a
+ * payload saved by an older version of the extractor simply yields no value, which
+ * means "could not check", never "expired".
+ */
+function extractFieldFromPayload(
+  payload: string | null | undefined,
+  labels: string[],
+): unknown {
+  if (!payload) return null;
+  try {
+    const parsed = JSON.parse(payload) as {
+      fields?: Array<{ label: string; value: unknown }>;
+    };
+    return exactFieldValue(parsed?.fields ?? [], labels);
+  } catch {
+    return null;
+  }
+}
+
+export async function carryForwardIdentityDocumentsAction(draftId: string) {
+  try {
+    const draft = await getOwnedDraft(draftId);
+    const results = [] as {
+      documentType: string;
+      copied: boolean;
+      reason: string;
+      sourceTaxYear?: number | null;
+      sourceExpiry?: string | null;
+    }[];
+
+    for (const documentType of CARRY_FORWARD_DOCUMENT_TYPES) {
+      const present = await prisma.document.findFirst({
+        where: {
+          filingDraftId: draft.id,
+          userId: draft.userId,
+          documentType,
+          extractionStatus: "MAPPED",
+        },
+        select: { id: true },
+      });
+      const profile = await prisma.user.findUnique({
+        where: { id: draft.userId },
+        select: { cnic: true, dateOfBirth: true },
+      });
+      // Only a card that an operator already approved counts as a source; a file
+      // that was uploaded and left unreviewed proves nothing.
+      const prior = await prisma.document.findFirst({
+        where: {
+          userId: draft.userId,
+          documentType,
+          extractionStatus: "MAPPED",
+          filingDraftId: { not: draft.id },
+        },
+        orderBy: { extractedAt: "desc" },
+        include: { filingDraft: { select: { taxYear: true } } },
+      });
+
+      // The card is only reusable while it is still valid: one approved in a
+      // previous year may have lapsed since, and reusing a lapsed card would carry
+      // an invalid identity into a new return.
+      const priorValidity = readCnicValidity({
+        expiryDate: extractFieldFromPayload(prior?.extractedData, [
+          "expiry_date",
+          "expiry",
+          "valid_upto",
+          "valid_until",
+          "date_of_expiry",
+        ]),
+      });
+
+      const plan = planIdentityCarryForward({
+        documentType,
+        draftAlreadyHasIt: Boolean(present),
+        profileVerified: Boolean(profile?.cnic && profile?.dateOfBirth),
+        hasPriorUpload: Boolean(prior),
+        priorTaxYear: prior?.filingDraft?.taxYear ?? null,
+        priorExpired: priorValidity.status === "expired",
+        priorExpiry: priorValidity.expiry,
+      });
+
+      if (!plan.copy) {
+        results.push({
+          documentType,
+          copied: false,
+          reason: plan.reason,
+          sourceExpiry: plan.sourceExpiry ?? null,
+        });
+        continue;
+      }
+
+      await prisma.document.create({
+        data: {
+          filingDraftId: draft.id,
+          userId: draft.userId,
+          documentType,
+          fileName: prior.fileName,
+          fileUrl: prior.fileUrl,
+          mimeType: prior.mimeType,
+          sizeBytes: prior.sizeBytes,
+          extractionStatus: "MAPPED",
+          extractionProvider: prior.extractionProvider,
+          extractedData: prior.extractedData,
+          extractedAt: prior.extractedAt,
+        },
+      });
+
+      results.push({
+        documentType,
+        copied: true,
+        reason: plan.reason,
+        sourceTaxYear: plan.sourceTaxYear,
+        sourceExpiry: priorValidity.expiry,
+      });
+    }
+
+    revalidatePath("/tax/new");
+    return { success: true, results };
+  } catch (error) {
+    console.error("Error carrying forward identity documents:", error);
+    // Reuse is an optimisation: on any failure the ordinary upload path still works,
+    // so this must never block the documents step.
+    return { success: false, error: "carry_forward_failed", results: [] };
+  }
+}
+
 export async function getFilingDocumentsAction(draftId: string) {
   try {
     const draft = await getOwnedDraft(draftId);
@@ -396,6 +538,21 @@ function fieldValue(
     const actual = normalizedLabel(field.label);
     return wanted.some((label) => actual === label || actual.includes(label));
   })?.value;
+}
+
+/**
+ * `fieldValue` matches on substrings, which is right for synonyms but wrong for
+ * identity fields: "father name" CONTAINS "name", so the requested father's name
+ * could be stored as the taxpayer's own legal name if the extraction listed them
+ * in the other order. Labels the prompt pins exactly are compared exactly.
+ */
+function exactFieldValue(
+  fields: Array<{ label: string; value: unknown }>,
+  labels: string[],
+) {
+  const wanted = labels.map(normalizedLabel);
+  return fields.find((field) => wanted.includes(normalizedLabel(field.label)))
+    ?.value;
 }
 
 function parseExtractedAmount(value: unknown) {
@@ -803,13 +960,69 @@ export async function approveAndMapExtractedDocumentAction(documentId: string) {
 
     if (document.documentType === "cnic") {
       // The CNIC is the authoritative source for date of birth, which the
-      // Section 149(IA) pension rules need. Store it on the taxpayer profile
-      // so the calculator never has to guess an age.
+      // Section 149(IA) pension rules need, and it carries the legal name and the
+      // address too. What may be written where is decided by `planCnicProfileUpdate`
+      // (pure, unit-tested); this branch only reads, applies and reports.
       const extractedDateOfBirth = parseTaxpayerDateOfBirth(
         fieldValue(fields, ["date_of_birth", "dob", "birth_date"]),
       );
+      // Whole-label lookup again: "Date of Issue" must not satisfy "Expiry Date".
+      const extractedExpiryDate = exactFieldValue(fields, [
+        "expiry_date",
+        "expiry",
+        "valid_upto",
+        "valid_until",
+        "date_of_expiry",
+      ]);
 
-      if (!extractedDateOfBirth) {
+      const profile = await prisma.user.findUnique({
+        where: { id: document.userId },
+        select: { name: true, cnic: true, dateOfBirth: true, address: true },
+      });
+      const cardCnicDigits = String(
+        exactFieldValue(fields, ["cnic_number", "cnic", "identity_number"]) ??
+          "",
+      )
+        .replace(/[^0-9]/g, "")
+        .trim();
+      const cnicTakenByOtherAccount =
+        cardCnicDigits.length === 13
+          ? Boolean(
+              await prisma.user.findFirst({
+                where: { cnic: cardCnicDigits, id: { not: document.userId } },
+                select: { id: true },
+              }),
+            )
+          : false;
+
+      const plan = planCnicProfileUpdate({
+        profile: profile ?? {},
+        extracted: {
+          name: exactFieldValue(fields, [
+            "name",
+            "full_name",
+            "taxpayer_name",
+          ]),
+          cnic: cardCnicDigits,
+          dateOfBirth: extractedDateOfBirth,
+          address: exactFieldValue(fields, ["address"]),
+          expiryDate: extractedExpiryDate,
+        },
+        cnicTakenByOtherAccount,
+      });
+
+      // A lapsed card is refused before any write, so it can never become the
+      // identity of record for a filing.
+      if (plan.expired) {
+        return {
+          success: false,
+          error:
+            plan.validity.message ??
+            "This CNIC has expired, so it cannot be used. Upload the renewed card.",
+        };
+      }
+
+      if (plan.missingDateOfBirth) {
         return {
           success: false,
           error:
@@ -817,22 +1030,13 @@ export async function approveAndMapExtractedDocumentAction(documentId: string) {
         };
       }
 
-      const extractedCnic = String(
-        fieldValue(fields, ["cnic_number", "cnic", "identity_number"]) ?? "",
-      )
-        .replace(/[^0-9]/g, "")
-        .trim();
-
       await prisma.$transaction(async (tx) => {
-        await tx.user.update({
-          where: { id: document.userId },
-          data: {
-            dateOfBirth: extractedDateOfBirth,
-            // A 13-digit CNIC is only written when the profile has none, so a
-            // re-upload never silently overwrites a verified identity number.
-            ...(extractedCnic.length === 13 ? { cnic: extractedCnic } : {}),
-          },
-        });
+        if (Object.keys(plan.update).length > 0) {
+          await tx.user.update({
+            where: { id: document.userId },
+            data: plan.update,
+          });
+        }
 
         await tx.document.update({
           where: { id: document.id },
@@ -841,11 +1045,19 @@ export async function approveAndMapExtractedDocumentAction(documentId: string) {
       });
 
       revalidatePath("/tax/profile");
+      revalidatePath("/tax/dashboard");
 
       return {
         success: true,
         mapping: "CNIC",
-        dateOfBirth: extractedDateOfBirth.toISOString().slice(0, 10),
+        dateOfBirth: extractedDateOfBirth!.toISOString().slice(0, 10),
+        // Summary only: the raw profile row is never handed to the client.
+        profilePlan: {
+          filled: plan.filled,
+          skipped: plan.skipped,
+          overwritten: plan.overwritten,
+          validity: plan.validity,
+        },
       };
     }
 

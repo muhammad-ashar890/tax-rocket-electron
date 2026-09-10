@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { Download, Loader2 } from "lucide-react";
 
@@ -9,6 +10,7 @@ import {
   WorkflowKpiStrip,
 } from "@/components/tax/workflow-page-shell";
 import { StepHeading } from "@/components/tax/wizard-ui";
+import type { PortalMappingGaps } from "@/components/tax/filing/config/filing-wizard-config";
 
 type FilingPacketSummary = {
   id: string;
@@ -18,6 +20,7 @@ type FilingPacketSummary = {
   taxPayable: number;
   refundDue: number;
   pdfUrl?: string | null;
+  mappingGaps?: PortalMappingGaps | null;
 };
 
 /** One priced income source from the latest calculation. */
@@ -68,11 +71,169 @@ type WizardPacketStepProps = Readonly<{
   generatingPacket: boolean;
   generatingPdf: boolean;
   packetError: string | null;
-  onGeneratePacket: () => void;
+  /** Income the coverage gate refused; non-empty offers the explicit override. */
+  packetUnmappedSources: { category: string; totalAmount: number }[];
+  onGeneratePacket: (acceptUnmapped?: unknown) => void | Promise<void>;
   onGeneratePdf: () => void;
   irisLoginConfirmed: boolean;
   onIrisLoginChange: (checked: boolean) => void;
 }>;
+
+/**
+ * The packet tells us which ledger categories it could NOT place on an IRIS line
+ * (P0 `mappingGaps`). Showing that here — before approval — is the difference
+ * between "the agent failed" and "these four sources are manual, by design".
+ */
+function PortalMappingGapNotice({
+  gaps,
+}: {
+  gaps: PortalMappingGaps | null | undefined;
+}) {
+  if (!gaps) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Portal mapping gaps are not recorded for this packet version. Re-generate
+        the packet to see which figures IRIS will not be filled for.
+      </p>
+    );
+  }
+  const unmapped = gaps.unmappedCategories || [];
+  const computed = gaps.skippedComputedCodes || [];
+  const unproven = gaps.captureUnverified || [];
+  const mismatches = gaps.pensionSplitMismatch || [];
+  if (
+    !unmapped.length &&
+    !computed.length &&
+    !mismatches.length &&
+    !unproven.length
+  ) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Every income line in this packet maps to an enterable IRIS row — nothing is
+        flagged for manual entry.
+      </p>
+    );
+  }
+  const money = (value: number) => `PKR ${Math.round(value).toLocaleString()}`;
+  return (
+    <div className="overflow-hidden rounded-xl border border-amber-500/40 bg-amber-50/40 dark:bg-amber-500/5">
+      <div className="border-b border-amber-500/30 px-4 py-3">
+        <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-200">
+          Manual entry still required
+        </h3>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          The agent will fill only what IRIS accepts as an entered value. These are
+          deliberately left for you.
+        </p>
+      </div>
+      {unmapped.length > 0 && (
+        <div className="px-4 py-3">
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Income with no verified IRIS line item
+          </p>
+          <ul className="mt-2 space-y-1">
+            {unmapped.map((gap) => (
+              <li
+                key={gap.category}
+                className="flex flex-wrap items-baseline justify-between gap-2 text-sm"
+              >
+                <span>
+                  {SOURCE_LABELS[gap.category.toLowerCase()] ||
+                    gap.category.replaceAll("_", " ").toLowerCase()}
+                  <span className="ml-2 text-xs text-muted-foreground">
+                    {gap.reason}
+                  </span>
+                </span>
+                <span className="font-medium tabular-nums">
+                  {money(gap.totalAmount)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {computed.length > 0 && (
+        <div className="border-t border-amber-500/20 px-4 py-3">
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Rows IRIS computes itself (never written)
+          </p>
+          <ul className="mt-2 space-y-1">
+            {computed.map((row) => (
+              <li
+                key={row.code}
+                className="flex flex-wrap items-baseline justify-between gap-2 text-sm"
+              >
+                <span>
+                  {row.description}
+                  <span className="ml-2 font-mono text-xs text-muted-foreground">
+                    {row.code}
+                  </span>
+                </span>
+                <span className="tabular-nums text-muted-foreground">
+                  {money(row.amount)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {unproven.length > 0 && (
+        <div className="border-t border-amber-500/20 px-4 py-3">
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            IRIS rows we have never seen rendered
+          </p>
+          <ul className="mt-2 space-y-1">
+            {unproven.map((row) => (
+              <li
+                key={`${row.code}-${row.category}`}
+                className="flex flex-wrap items-baseline justify-between gap-2 text-sm"
+              >
+                <span>
+                  {row.description}
+                  <span className="ml-2 font-mono text-xs text-muted-foreground">
+                    {row.code}
+                  </span>
+                </span>
+                <span className="tabular-nums text-muted-foreground">
+                  {money(row.amount)}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2 text-xs text-muted-foreground">
+            These codes exist in IRIS&apos;s field list, but no captured portal page
+            has shown an editable row for them, so the agent will not guess. Add a
+            capture of the matching sheet and they move into the fill set by
+            themselves.
+          </p>
+        </div>
+      )}
+      {mismatches.length > 0 && (
+        <div className="border-t border-amber-500/20 px-4 py-3">
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Pension split does not match the ledger
+          </p>
+          <ul className="mt-2 space-y-1">
+            {mismatches.map((mismatch) => (
+              <li
+                key={mismatch.entryId}
+                className="flex flex-wrap items-baseline justify-between gap-2 text-sm"
+              >
+                <span className="text-muted-foreground">
+                  Ledger row {mismatch.entryId} — IRIS line 1008 gets the ledger
+                  figure; the engine split says something else.
+                </span>
+                <span className="font-medium tabular-nums">
+                  {money(mismatch.ledgerAmount)} vs {money(mismatch.engineSplitTotal)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function WizardPacketStep({
   draftId,
@@ -81,11 +242,13 @@ export function WizardPacketStep({
   generatingPacket,
   generatingPdf,
   packetError,
+  packetUnmappedSources,
   onGeneratePacket,
   onGeneratePdf,
   irisLoginConfirmed,
   onIrisLoginChange,
 }: WizardPacketStepProps) {
+  const [acceptUnmapped, setAcceptUnmapped] = useState(false);
   const taxCalculationReady =
     filingSummary?.taxCalculationStatus === "ESTIMATE";
   const money = (value: number | null | undefined) =>
@@ -126,7 +289,11 @@ export function WizardPacketStep({
         <div className="flex flex-wrap justify-end gap-2">
           <Button
             type="button"
-            onClick={onGeneratePacket}
+            onClick={() =>
+              void onGeneratePacket(
+                packetUnmappedSources.length > 0 && acceptUnmapped ? true : false,
+              )
+            }
             disabled={generatingPacket || !draftId}
             className="gap-2 bg-[#376952] text-white hover:bg-[#2e5a44]"
           >
@@ -171,6 +338,39 @@ export function WizardPacketStep({
         </div>
       )}
 
+      {packetUnmappedSources.length > 0 && (
+        <div
+          role="group"
+          aria-label="Packet coverage override"
+          className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 text-sm"
+        >
+          <label className="flex cursor-pointer items-start gap-3">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={acceptUnmapped}
+              onChange={(event) => setAcceptUnmapped(event.target.checked)}
+            />
+            <span>
+              <span className="font-medium text-amber-800 dark:text-amber-300">
+                Generate anyway — I will enter these in IRIS myself.
+              </span>{" "}
+              <span className="text-muted-foreground">
+                {packetUnmappedSources
+                  .map(
+                    (gap) =>
+                      `${gap.category.replaceAll("_", " ")} PKR ${gap.totalAmount.toLocaleString()}`,
+                  )
+                  .join(", ")}{" "}
+                will be recorded in the snapshot as manual-entry amounts, so nothing
+                is dropped silently. The desktop agent will not fill them, and they
+                stay your responsibility before you save or submit.
+              </span>
+            </span>
+          </label>
+        </div>
+      )}
+
       <WorkflowKpiStrip maxColumns={2}>
         <WorkflowKpiCard
           label="Packet version"
@@ -204,6 +404,8 @@ export function WizardPacketStep({
           accent="mizan"
         />
       </WorkflowKpiStrip>
+
+      <PortalMappingGapNotice gaps={filingPacket?.mappingGaps} />
 
       {breakdown.length > 0 && (
         <div className="overflow-hidden rounded-xl border border-border">

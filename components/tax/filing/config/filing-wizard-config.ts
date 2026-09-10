@@ -158,6 +158,47 @@ export type FilingSummary = {
   collectionTaxDue?: number;
 };
 
+/**
+ * What the packet could NOT put on IRIS, reported by `buildPortalFieldMap`
+ * (lib/tax/portal-field-map.ts) and stored inside the packet snapshot. Kept as a
+ * local structural type so this client-facing module does not import the server
+ * mapper — the shape is asserted against it by scripts/verify-portal-field-map.cjs.
+ */
+export type PortalMappingGaps = {
+  /** Ledger categories with no verified IRIS line item: nothing was queued for these. */
+  unmappedCategories: {
+    category: string;
+    entryIds: string[];
+    totalAmount: number;
+    reason: string;
+  }[];
+  /** IRIS codes deliberately skipped because the row is computed, not entered. */
+  skippedComputedCodes: { code: string; description: string; amount: number }[];
+  /**
+   * Codes with no captured proof that IRIS renders an ENTERABLE row for them
+   * (as opposed to `skippedComputedCodes`, which are known to be computed).
+   * These are manual entry today and become fillable the day a portal capture
+   * proves the row — see `npm run inventory:portal-coverage`.
+   */
+  captureUnverified?: {
+    code: string;
+    description: string;
+    category: string;
+    amount: number;
+    reason: string;
+  }[];
+  /**
+   * Pension exempt/taxable splits from the engine that do not add up to the ledger
+   * row they belong to. IRIS carries one figure on line 1008, so a disagreement is
+   * reported rather than resolved silently. `difference` is derived here.
+   */
+  pensionSplitMismatch?: {
+    entryId: string;
+    ledgerAmount: number;
+    engineSplitTotal: number;
+  }[];
+};
+
 export type FilingPacketSummary = {
   id: string;
   version: number;
@@ -167,6 +208,8 @@ export type FilingPacketSummary = {
   refundDue: number;
   pdfUrl?: string | null;
   createdAt: string | Date;
+  /** Portal-mapping gaps for this packet version; absent on pre-1.1.0 packets. */
+  mappingGaps?: PortalMappingGaps | null;
 };
 
 export type FilingActionResult = {

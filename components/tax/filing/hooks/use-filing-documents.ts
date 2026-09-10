@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { describeCnicProfilePlan } from "@/lib/tax/cnic-profile";
 
 import { uploadFilingDocumentAction } from "@/app/actions/documents";
 import {
@@ -64,6 +65,10 @@ export function useFilingDocuments({
   const [documentUploadError, setDocumentUploadError] = useState<string | null>(
     null,
   );
+  // What an approved CNIC actually changed on the profile. Not an error: when a
+  // field is deliberately left alone (a name the human already typed) the operator
+  // needs to know that, or the upload looks like it did nothing.
+  const [profileSyncNote, setProfileSyncNote] = useState<string | null>(null);
   const uploadFileInputsRef = useRef<Record<string, HTMLInputElement | null>>(
     {},
   );
@@ -80,6 +85,7 @@ export function useFilingDocuments({
     if (!file) return;
 
     setDocumentUploadError(null);
+    setProfileSyncNote(null);
     setUploadedDocuments((prev) => ({ ...prev, [documentType]: file.name }));
     setSelectedDocumentFiles((prev) => ({ ...prev, [documentType]: file }));
 
@@ -128,6 +134,7 @@ export function useFilingDocuments({
 
     setExtractingDocumentId(record.id);
     setDocumentUploadError(null);
+    setProfileSyncNote(null);
     const result = await extractDocumentWithGeminiAction(record.id);
     setExtractingDocumentId(null);
 
@@ -174,6 +181,7 @@ export function useFilingDocuments({
 
     setReviewingDocumentId(record.id);
     setDocumentUploadError(null);
+    setProfileSyncNote(null);
     const result = await getDocumentExtractionAction(record.id);
     setReviewingDocumentId(null);
 
@@ -235,6 +243,7 @@ export function useFilingDocuments({
 
     setSavingDocumentReviewId(record.id);
     setDocumentUploadError(null);
+    setProfileSyncNote(null);
     const result = await updateDocumentExtractionAction(record.id, payload);
     setSavingDocumentReviewId(null);
 
@@ -255,6 +264,7 @@ export function useFilingDocuments({
 
     setMappingDocumentId(record.id);
     setDocumentUploadError(null);
+    setProfileSyncNote(null);
     const extracted = extractedByDocumentId[record.id];
     if (!extracted) {
       setMappingDocumentId(null);
@@ -281,6 +291,16 @@ export function useFilingDocuments({
       return;
     }
 
+    setProfileSyncNote(
+      describeCnicProfilePlan(
+        (
+          result as {
+            profilePlan?: { filled?: string[]; skipped?: { field: string }[] };
+          }
+        ).profilePlan,
+      ),
+    );
+
     setDocumentRecords((previous) => ({
       ...previous,
       [documentType]: { ...record, extractionStatus: "MAPPED" },
@@ -305,6 +325,8 @@ export function useFilingDocuments({
     selectedDocumentFiles,
     uploadingDocumentType,
     documentUploadError,
+    profileSyncNote,
+    setProfileSyncNote,
     uploadFileInputsRef,
     setUploadedDocuments,
     setDocumentRecords,

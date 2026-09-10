@@ -64,6 +64,7 @@ type WizardDocumentsStepProps = Readonly<{
   savingDocumentReviewId: string | null;
   mappingDocumentId: string | null;
   documentUploadError: string | null;
+  profileSyncNote: string | null;
   uploadFileInputsRef: React.MutableRefObject<
     Record<string, HTMLInputElement | null>
   >;
@@ -100,6 +101,7 @@ export function WizardDocumentsStep({
   savingDocumentReviewId,
   mappingDocumentId,
   documentUploadError,
+  profileSyncNote,
   uploadFileInputsRef,
   triggerDocumentUpload,
   handleDocumentFileSelected,
@@ -127,6 +129,15 @@ export function WizardDocumentsStep({
         title="Upload your documents"
         description="Upload each document one at a time, then review Gemini's extracted data before mapping it."
       />
+
+      {profileSyncNote && (
+        <div
+          role="status"
+          className="rounded-lg border border-amanah/25 bg-amanah/5 p-3 text-sm text-amanah"
+        >
+          {profileSyncNote}
+        </div>
+      )}
 
       {documentUploadError && (
         <div

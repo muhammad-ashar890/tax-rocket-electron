@@ -16,6 +16,7 @@ import { toMoneyAmount, toMoneyNumber, type MoneyInput } from "@/lib/money";
 import {
   buildPacketRouteMetadata,
   buildPortalFieldMap,
+  describeUnmappedPortalSources,
 } from "@/lib/tax/portal-field-map";
 
 async function getOwnedDraft(draftId: string) {
@@ -171,8 +172,24 @@ export async function getLatestFilingPacketAction(draftId: string) {
         refundDue: true,
         fileUrl: true,
         createdAt: true,
+        snapshotJson: true,
       },
     });
+
+    // The mapping gaps live INSIDE the snapshot; re-reading them on fetch means the
+    // practitioner sees the same "manual entry required" list on the packet step
+    // whether the packet was just generated or was loaded from a previous session.
+    let mappingGaps: unknown = null;
+    if (packet) {
+      try {
+        const snapshot = JSON.parse(packet.snapshotJson) as {
+          portalFieldMap?: { mappingGaps?: unknown };
+        };
+        mappingGaps = snapshot.portalFieldMap?.mappingGaps ?? null;
+      } catch {
+        mappingGaps = null;
+      }
+    }
 
     return {
       success: true,
@@ -182,6 +199,7 @@ export async function getLatestFilingPacketAction(draftId: string) {
         ? {
             ...serializePacketMoney(packet),
             pdfUrl: packet.fileUrl ? `/api/packets/${packet.id}` : null,
+            mappingGaps,
           }
         : null,
     };
@@ -191,7 +209,17 @@ export async function getLatestFilingPacketAction(draftId: string) {
   }
 }
 
-export async function generateFilingPacketAction(draftId: string) {
+/**
+ * `acceptUnmappedPortalSources` is the practitioner's explicit override of the
+ * coverage gate: the packet is generated, the amounts that IRIS will not be filled
+ * for stay listed in the snapshot, and the wizard says so. Without it the gate
+ * refuses, because a packet that quietly omits priced income is worse than no
+ * packet.
+ */
+export async function generateFilingPacketAction(
+  draftId: string,
+  options?: { acceptUnmappedPortalSources?: boolean },
+) {
   try {
     const draft = await getOwnedDraft(draftId);
     const [draftData, documents, ledgerEntries, latestPacket, taxCredits] =
@@ -361,6 +389,29 @@ export async function generateFilingPacketAction(draftId: string) {
       incomeSources: parsedIncomeSources,
     });
 
+    // A packet whose income the portal cannot carry must not be filed as if it
+    // were complete. `unmappedCategories` means the ENGINE priced that income (so
+    // taxCalculationStatus is ESTIMATE and every money gate above passes) while
+    // the PORTAL map has no verified IRIS line for it — a business/services/
+    // capital-gains taxpayer would otherwise generate a salary-only packet, have
+    // the agent fill it cleanly, and file a return that quietly omits income.
+    const coverageGate = describeUnmappedPortalSources(
+      portalFieldMap.mappingGaps,
+    );
+    if (
+      coverageGate.blocked.length > 0 &&
+      !options?.acceptUnmappedPortalSources
+    ) {
+      return {
+        success: false,
+        error: coverageGate.refusal,
+        // The UI offers the override from these same numbers, never from its own
+        // copy of them.
+        unmappedPortalSources: coverageGate.blocked,
+      };
+    }
+    const coverage = coverageGate.coverage;
+
     const snapshot = {
       generatedAt: new Date().toISOString(),
       filing: {
@@ -377,6 +428,7 @@ export async function generateFilingPacketAction(draftId: string) {
       taxCredits,
       routeMetadata,
       portalFieldMap,
+      coverage,
     };
 
     const snapshotJson = JSON.stringify(snapshot);
@@ -440,7 +492,15 @@ export async function generateFilingPacketAction(draftId: string) {
     });
 
     // Same boundary as the fetch action: the client receives numbers.
-    return { success: true, packet: serializePacketMoney(packet) };
+    // The mapping gaps ride along so the practitioner sees, BEFORE approving,
+    // which income the portal will not be filled for — the alternative is finding
+    // out from an empty IRIS grid during a filing window.
+    const mappingGaps =
+      (snapshot.portalFieldMap && snapshot.portalFieldMap.mappingGaps) || null;
+    return {
+      success: true,
+      packet: { ...serializePacketMoney(packet), mappingGaps, coverage },
+    };
   } catch (error) {
     console.error("Error generating filing packet:", error);
     return { success: false, error: "Failed to generate filing packet" };

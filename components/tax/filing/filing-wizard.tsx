@@ -13,10 +13,13 @@ import {
   approveAndMapExtractedDocumentAction,
   extractDocumentWithGeminiAction,
   getDocumentExtractionAction,
+  carryForwardIdentityDocumentsAction,
   getFilingDocumentsAction,
   updateDocumentExtractionAction,
 } from "@/app/actions/extraction";
+import { describeIdentityCarryForward } from "@/lib/tax/cnic-profile";
 import { getFilingSummaryAction } from "@/app/actions/filing-summary";
+import { isFbrAgentCompleted } from "@/lib/tax/filing-status";
 import { getBankTransactionsAction } from "@/app/actions/bank-transactions";
 import { getBankStatementAction } from "@/app/actions/bank-statements";
 import { validateBankTransactionReviewAction } from "@/app/actions/bank-classification";
@@ -267,6 +270,8 @@ export function FilingWizard({
     selectedDocumentFiles,
     uploadingDocumentType,
     documentUploadError,
+    profileSyncNote,
+    setProfileSyncNote,
     uploadFileInputsRef,
     setUploadedDocuments,
     setDocumentRecords,
@@ -383,7 +388,20 @@ export function FilingWizard({
     if (!draftId) return;
 
     let isMounted = true;
-    getFilingDocumentsAction(draftId).then((result) => {
+
+    const load = async () => {
+      // An approved CNIC belongs to the person, not to one tax year: pull it onto
+      // this draft before the slot list is built, so the same card is not uploaded
+      // again for every new filing.
+      try {
+        const carried = await carryForwardIdentityDocumentsAction(draftId);
+        const note = describeIdentityCarryForward(carried.results);
+        if (isMounted && note) setProfileSyncNote(note);
+      } catch {
+        // Reuse is an optimisation; the ordinary upload path still runs.
+      }
+
+      const result = await getFilingDocumentsAction(draftId);
       if (!isMounted || !result.success) return;
 
       const nextRecords: Record<string, FilingDocumentRecord> = {};
@@ -396,7 +414,9 @@ export function FilingWizard({
 
       setDocumentRecords(nextRecords);
       setUploadedDocuments(nextNames);
-    });
+    };
+
+    void load();
 
     return () => {
       isMounted = false;
@@ -949,6 +969,7 @@ export function FilingWizard({
     generatingPacket,
     generatingPdf,
     packetError,
+    packetUnmappedSources,
     setApprovalConfirmed,
     setFilingPacket,
     setWithholdingWarning,
@@ -1231,7 +1252,10 @@ export function FilingWizard({
                 : key === "filing_packet"
                   ? Boolean(filingPacket)
                   : key === "fbr_connect"
-                    ? fbrConnectionStatus === "COMPLETED"
+                    ? // The agent writes FILING_COMPLETED / DRY_RUN_COMPLETED;
+                      // the old `=== "COMPLETED"` compared against a status that
+                      // nothing ever writes, so this step could never complete.
+                      isFbrAgentCompleted(fbrConnectionStatus)
                     : true;
         // The persisted boundary gates every green check, including dynamic
         // subcategories whose selected values intentionally remain saved.
@@ -1951,6 +1975,7 @@ export function FilingWizard({
         savingDocumentReviewId={savingDocumentReviewId}
         mappingDocumentId={mappingDocumentId}
         documentUploadError={documentUploadError}
+        profileSyncNote={profileSyncNote}
         uploadFileInputsRef={uploadFileInputsRef}
         triggerDocumentUpload={triggerDocumentUpload}
         handleDocumentFileSelected={handleDocumentFileSelected}
@@ -2054,6 +2079,7 @@ export function FilingWizard({
         generatingPacket={generatingPacket}
         generatingPdf={generatingPdf}
         packetError={packetError}
+        packetUnmappedSources={packetUnmappedSources}
         onGeneratePacket={handleGeneratePacket}
         onGeneratePdf={handleGeneratePacketPdf}
         irisLoginConfirmed={irisLoginConfirmed}

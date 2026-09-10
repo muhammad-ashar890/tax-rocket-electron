@@ -58,20 +58,60 @@ function getRealAutofillMode() {
     .trim()
     .toLowerCase();
   if (raw === "dry" || raw === "dryrun" || raw === "dry-run") return "dry";
-  if (raw === "1" || raw === "true" || raw === "on" || raw === "yes")
+  if (raw === "1" || raw === "true" || raw === "on" || raw === "yes" || raw === "live")
     return "live";
   return "off";
 }
+
+/**
+ * The env var is the OPERATOR's switch; `livePilot.automaticFilingEnabled` is the
+ * deployment's. The flag used to be declared in `lib/tax/fbr-agent-config.ts` and
+ * read by nothing, which is worse than absent: everyone assumed it controlled
+ * something. Now it does, with kill-switch semantics —
+ *
+ *   automaticFilingEnabled === false  → live is downgraded to dry, whatever env says
+ *   automaticFilingEnabled === true   → the env var is still required (no new capability)
+ *   absent/null                       → env only, i.e. current behaviour
+ *
+ * "Only false blocks" is deliberate: the shipped default in the config builder is
+ * false, so a deployment that has not opted in cannot write to IRIS even with
+ * TAXROCKET_REAL_AUTOFILL=live, and this is logged rather than silent.
+ */
+function resolveAutofillMode(jobContext) {
+  const envMode = getRealAutofillMode();
+  const livePilot = jobContext?.taxAutomationConfig?.livePilot;
+  const gate = livePilot && livePilot.automaticFilingEnabled;
+  if (envMode === "live" && gate === false) {
+    return {
+      mode: "dry",
+      downgradedFrom: "live",
+      note:
+        "livePilot.automaticFilingEnabled=false in the job config: writes are blocked " +
+        "by the deployment, so this run is DRY. Enable the flag to allow live entry.",
+    };
+  }
+  return { mode: envMode, downgradedFrom: null, note: null };
+}
 // Independent controller stamp: a new navigator must not make an OLD main
 // process appear fully updated (the mixed fix10/fix11 rollout hid this).
-const AGENT_BUILD_TAG = "fix16-new-return-setup-20260908";
+const AGENT_BUILD_TAG = "fix17-setup-continue-20260910";
 function getAgentBuildLabel() {
-  return `${AGENT_BUILD_TAG} | navigator: ${irisNavigation.BUILD_TAG}`;
+  return `${AGENT_BUILD_TAG} | navigator: ${irisNavigation.BUILD_TAG} | filler: ${irisRowFiller.BUILD_TAG}`;
 }
 function assertNavigatorBuild() {
-  if (irisNavigation.BUILD_TAG !== AGENT_BUILD_TAG) {
+  const mismatched = [
+    ["iris-navigation.js", irisNavigation.BUILD_TAG],
+    // The filler decides which cell a value lands in; a stale copy of it is as
+    // dangerous as a stale navigator, and it ships as a loose file too.
+    ["iris-row-filler.js", irisRowFiller.BUILD_TAG],
+  ].filter(([, tag]) => tag !== AGENT_BUILD_TAG);
+  if (mismatched.length) {
     throw new Error(
-      "Desktop files are mixed versions. Replace main.js and iris-navigation.js from the same fix15 patch and fully restart the agent.",
+      `Desktop files are mixed versions (${mismatched
+        .map(([name, tag]) => `${name}: ${tag || "untagged"}`)
+        .join(", ")} vs main: ${AGENT_BUILD_TAG}). Replace ${mismatched
+        .map(([name]) => name)
+        .join(" and ")} from the same patch as main.js and fully restart the agent.`,
     );
   }
 }
@@ -842,12 +882,28 @@ async function navigateIris2DashboardFlow(windowInstance, formLabel) {
     }
   }
 
+  // Readiness is the WORKSPACE, not the presence of inputs: the
+  // Summary-of-Economic-Transactions gate also renders ten visible inputs, and
+  // treating that as "form ready" is how a job can start filling the wrong page.
+  let readiness = { returnWorkspace: false, inputs: formOpen, probeFailed: true };
+  if (formOpen > 0) {
+    readiness = await windowInstance.webContents
+      .executeJavaScript(irisNavigation.RETURN_WORKSPACE_PROBE)
+      .then((value) => (value && typeof value === "object" ? value : readiness))
+      .catch(() => readiness);
+  }
+
   return {
     steps: [`iris2_${how}${editFallbackTried ? "+edit_ctl" : ""}`],
-    formReady: formOpen > 0,
-    detail:
-      `IRIS 2.0 dashboard strategy: "${how}"${rowText}` +
-      `${editFallbackTried ? " + row action control" : ""}, visible form fields: ${formOpen}.`,
+    formReady: Boolean(readiness.returnWorkspace),
+    readiness,
+    detail: readiness.returnWorkspace
+      ? `IRIS 2.0 dashboard strategy: "${how}"${rowText}` +
+        `${editFallbackTried ? " + row action control" : ""}, return workspace confirmed ` +
+        `(year/document/registration header present, ${readiness.inputs ?? formOpen} visible inputs).`
+      : `IRIS 2.0 dashboard strategy: "${how}"${rowText} — ${formOpen} visible input(s) but no ` +
+        `app-nitr-workflow header proving the return is open (tax-year/document/registration). ` +
+        `Held instead of filling an unconfirmed page.`,
   };
 }
 
@@ -871,8 +927,18 @@ async function navigateToIrisForm(
         detail: iris2.detail,
       };
     }
-    // Fall through to the legacy chain — it will fail and the job failure
-    // now carries DOM evidence to build the real selector bundle.
+    // Do NOT fall through to the legacy chain on the live portal. Its
+    // selectors (`#iris-return-form-ready`, `#return-tax-form`,
+    // `a[href*='IncomeTaxReturn']`) match 0 of 13 captured IRIS 2.0 pages, so
+    // the fall-through only burns ~30s of per-selector timeouts and then throws
+    // a message containing the word "selector" — which is how a readiness miss
+    // used to get mislabelled as selector drift. The mock keeps the chain below.
+    return {
+      steps: iris2.steps,
+      formReady: false,
+      readiness: iris2.readiness,
+      detail: iris2.detail,
+    };
   }
 
   // Step 1: Navigate top menu
@@ -1723,25 +1789,55 @@ function inferLikelySelectorGroup(errorMessage, executionLog) {
   return "unknown_selector_group";
 }
 
-function buildSelectorDriftDiagnostics(errorMessage, executionLog, jobContext) {
+/**
+ * Evidence about the portal's own shape lives in the navigation module, next to the
+ * section lists it depends on — main.js delegates so the two cannot disagree.
+ */
+const buildPortalEvidenceDiagnostics =
+  irisNavigation.buildPortalEvidenceDiagnostics;
+
+function buildSelectorDriftDiagnostics(
+  errorMessage,
+  executionLog,
+  jobContext,
+  evidence = null,
+) {
   const message = String(errorMessage || "").toLowerCase();
+  // The word "selector" in a message is not evidence of drift, and neither is a
+  // readiness miss: the live pilot's `0/27 refused` run was labelled
+  // "update your selectors" because this function only string-matched.
   const selectorLikeFailure =
     message.includes("selector") ||
     message.includes("timed out waiting for selector") ||
-    message.includes("missing selector") ||
-    message.includes("target form was not detected as ready");
+    message.includes("missing selector");
 
   if (!selectorLikeFailure) {
     return null;
   }
+  // With a capture in hand, only missing rows justify calling it drift.
+  if (evidence && evidence.state !== "rows_missing" && evidence.state !== "no_evidence") {
+    return null;
+  }
 
+  const rowsMissing = Boolean(evidence && evidence.state === "rows_missing");
   return {
-    reasonCode: "selector_drift_suspected",
+    reasonCode: rowsMissing
+      ? "selector_drift_confirmed_by_capture"
+      : "selector_drift_suspected",
     likelySelectorGroup: inferLikelySelectorGroup(message, executionLog),
     selectorBundle: getSelectorBundleSignal(jobContext),
+    evidence: evidence
+      ? {
+          state: evidence.state,
+          driftedSections: evidence.drifted,
+          unverifiedSections: evidence.unverified,
+        }
+      : null,
     recommendedActions: [
       "Capture a fresh screenshot of the failed IRIS screen on the trusted device.",
-      "Update the affected selector group in the active selector bundle.",
+      rowsMissing
+        ? `These sections rendered zero rows although their panels were found: ${evidence.drifted.join(", ")}. Update only the selectors that open them.`
+        : "Update the affected selector group in the active selector bundle.",
       "Re-run the job from the latest approved packet after bundle update.",
     ],
   };
@@ -1758,15 +1854,78 @@ function looksLikeSessionReconnectNeeded(errorMessage) {
   );
 }
 
+/**
+ * A fill that the portal REFUSED (derived column, computed row, no matching row) is a
+ * mapping problem, not selector drift. That distinction is the whole point of this
+ * branch: the live pilot parked a job on `selector_bundle_update` for what was really
+ * 24 `column_disabled` refusals, because the classifier only string-matched the word
+ * "selector" out of the thrown message. Telling an operator to rewrite selectors
+ * instead of fixing the packet's column target wastes the one thing this pilot has
+ * scarce of — a real filing window.
+ */
+function buildMappingRefusalDiagnostics(executionLog) {
+  const steps = Array.isArray(executionLog) ? executionLog : [];
+  const refusals = [];
+  for (const entry of steps) {
+    if (entry?.step !== "real_autofill_skip") continue;
+    refusals.push(String(entry.detail || ""));
+  }
+  if (!refusals.length) return null;
+
+  const counts = new Map();
+  for (const line of refusals) {
+    const status = line.split("->")[1]?.trim().split(" ")[0] || "unknown";
+    counts.set(status, (counts.get(status) || 0) + 1);
+  }
+  const derived = (counts.get("column_disabled") || 0) + (counts.get("no_editable_cell") || 0);
+  const unplaced = counts.get("row_not_found") || 0;
+  return {
+    reasonCode: "portal_mapping_refused",
+    refusalCount: refusals.length,
+    byStatus: Object.fromEntries(counts),
+    likelyCause:
+      derived >= unplaced
+        ? "The packet targeted IRIS-derived columns or computed rows. IRIS derives Total/Final/Exemption/Normal itself; only the entered column may be written."
+        : "The packet carries IRIS codes that this taxpayer's return does not render. Each one must be a named mapping gap, not a fallback row.",
+    recommendedActions: [
+      "Rebuild the packet so portalFieldMap is version 1.1.0 or newer (aggregated, entered-column targeting, mappingGaps reported).",
+      "Treat portalFieldMap.mappingGaps entries as manual-entry work, not as a selector problem.",
+      "Re-run in dry mode and confirm 'no refusal is left behind' before going live.",
+    ],
+    refusals: refusals.slice(0, 40),
+  };
+}
+
 function classifyRecoverableAssistedIssue(
   errorMessage,
   executionLog,
   jobContext,
+  portalEvidence = null,
 ) {
+  const mappingRefusal = buildMappingRefusalDiagnostics(executionLog);
+  if (mappingRefusal) {
+    return {
+      requiredAction: "portal_mapping_review",
+      message:
+        "IRIS refused the packet's field mapping; no selector bundle change can fix that.",
+      pauseReason:
+        `${mappingRefusal.refusalCount} field(s) were refused by the portal (${Object.entries(
+          mappingRefusal.byStatus,
+        )
+          .map(([status, count]) => `${count} ${status}`)
+          .join(", ")}).`,
+      userInstruction:
+        "Review the packet mapping gaps and re-approve. The portal was not modified.",
+      selectorDriftDiagnostics: null,
+      mappingRefusalDiagnostics: mappingRefusal,
+    };
+  }
+
   const selectorDriftDiagnostics = buildSelectorDriftDiagnostics(
     errorMessage,
     executionLog,
     jobContext,
+    portalEvidence,
   );
   if (selectorDriftDiagnostics) {
     return {
@@ -1777,6 +1936,22 @@ function classifyRecoverableAssistedIssue(
       userInstruction:
         "Update the affected selector bundle entry, then confirm to retry this phase.",
       selectorDriftDiagnostics,
+    };
+  }
+
+  // The tour found the panels but could not bind headers to rows. That is a
+  // verification gap, not a broken selector: say so, with the per-section numbers,
+  // instead of pointing the operator at the selector bundle.
+  if (portalEvidence && portalEvidence.state === "structure_unverified") {
+    return {
+      requiredAction: "portal_structure_review",
+      message:
+        "IRIS rendered the sections but the agent could not verify their column/row binding, so nothing was written into them.",
+      pauseReason: `Unverified structure in: ${portalEvidence.unverified.join(", ")}.`,
+      userInstruction:
+        "Either re-run the inspection so the grids are expanded, or enter these sections manually. The selector bundle does not need changing.",
+      selectorDriftDiagnostics: null,
+      portalEvidence,
     };
   }
 
@@ -3652,6 +3827,44 @@ async function runRealIrisAutofill(jobContext, job, mode) {
     return { paused: false, executionLog, result: { filled: 0, results: [] } };
   }
 
+  // The tour drives navigation section by section from whatever is on screen, and
+  // it only works inside the return. After a resume — or a start where the draft
+  // row's dblclick did not open anything — the window can be sitting on the
+  // dashboard or the economic-transactions gate, and every section lookup would
+  // then report `row_not_found` and the operator would read that as "the packet is
+  // wrong". Prove the workspace first; hold with the reason if it is not there.
+  const workspace = await windowInstance.webContents
+    .executeJavaScript(irisNavigation.RETURN_WORKSPACE_PROBE)
+    .catch((error) => ({
+      returnWorkspace: false,
+      reason: `probe_failed: ${error instanceof Error ? error.message : String(error)}`,
+    }));
+  onStep(
+    workspace?.returnWorkspace
+      ? "real_autofill_workspace_confirmed"
+      : "real_autofill_workspace_missing",
+    workspace?.returnWorkspace
+      ? `Return workspace confirmed (${workspace.inputs ?? "?"} entered inputs).`
+      : `No return workspace on screen (${workspace?.reason || "unknown"}). ` +
+        `Open the intended 114(1)/116 return so the tax-year header is visible, then resume — ` +
+        `nothing was filled and no section tour was attempted.`,
+  );
+  if (!workspace?.returnWorkspace) {
+    return {
+      paused: true,
+      pauseAction: "portal_state_confirmation",
+      pauseMessage:
+        "The agent could not prove the return is open, so it held instead of filling.",
+      executionLog,
+      result: {
+        mode,
+        workspace,
+        summary: { total: coded.length, filled: 0, skipped: 0, byStatus: {} },
+        results: [],
+      },
+    };
+  }
+
   // Phase 2a. The section tour leaves the portal on its last view (Attachment,
   // which has no data rows), and the filler only sees the section on screen.
   // Walk the sections that actually own these codes, filling each in place.
@@ -3693,10 +3906,34 @@ async function runRealIrisAutofill(jobContext, job, mode) {
       "real_autofill_section",
       `${group.sectionId}: ${moved.status}; filling ${group.fields.length} field(s).`,
     );
+    // The tour reports, per section, whether the header/row binding was proven
+    // (`mappingVerified`). In the live capture only `salary` had it — six of seven
+    // sections came back unverified because their grids render more than one
+    // heading bar. Writing into a section whose structure we could not prove is
+    // exactly how a wrong number reaches a return, so live mode refuses.
+    const sectionVerified = Boolean(
+      sectionTour?.sections?.find((entry) => entry?.id === group.sectionId)
+        ?.mappingVerified,
+    );
+    if (mode !== "dry" && !sectionVerified) {
+      onStep(
+        "real_autofill_section_unverified",
+        `${group.sectionId}: the section tour could not verify its header/row binding, so ${group.fields.length} field(s) were left untouched. Re-run the inspection (or use dry mode) to review the targets.`,
+      );
+      results = results.concat(
+        group.fields.map((field) => ({
+          ...field,
+          status: irisRowFiller.FILL_STATUS.UNVERIFIED_TARGET,
+          sectionId: group.sectionId,
+          sectionStatus: "section_mapping_unverified",
+        })),
+      );
+      continue;
+    }
     const outcome = await irisRowFiller.fillIrisRows(
       windowInstance,
       group.fields,
-      { dryRun: mode === "dry" },
+      { dryRun: mode === "dry", sectionVerified },
     );
     results = results.concat(
       outcome.results.map((entry) => ({
@@ -3768,7 +4005,14 @@ async function finishNavigationOnly(navigation, job) {
 
 async function runLocalTaxDryRunFlow(jobContext) {
   if (realPortalMode) {
-    const autofillMode = getRealAutofillMode();
+    const {
+      mode: autofillMode,
+      downgradedFrom,
+      note: autofillGateNote,
+    } = resolveAutofillMode(jobContext);
+    if (downgradedFrom && autofillGateNote) {
+      pushStatus("progress", autofillGateNote);
+    }
     // Navigation check first: it drives the taxpayer to the right return and
     // is where all the login/route/pause handling lives. Only once it reports
     // an un-paused, ready form does filling make sense.
@@ -4153,7 +4397,14 @@ async function pauseAssistedPilot(job, windowInstance, input) {
 
 async function runLocalTaxAssistedFilingFlow(jobContext, job) {
   if (realPortalMode) {
-    const autofillMode = getRealAutofillMode();
+    const {
+      mode: autofillMode,
+      downgradedFrom,
+      note: autofillGateNote,
+    } = resolveAutofillMode(jobContext);
+    if (downgradedFrom && autofillGateNote) {
+      pushStatus("progress", autofillGateNote);
+    }
     const navigation = await runLocalIrisNavigationCheck(jobContext, job);
     if (autofillMode === "off" || navigation?.paused) {
       return await finishNavigationOnly(navigation, job);
@@ -4161,6 +4412,24 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
     // Assisted filing still stops before Save/Submit — this only populates the
     // data grid for the supervising user to review.
     const autofill = await runRealIrisAutofill(jobContext, job, autofillMode);
+    if (autofill?.paused) {
+      // A held autofill is not a completed job: it must reach the operator as
+      // awaiting_user_action, which finishNavigationOnly only does for a paused
+      // navigation — hence the synthesised navigation object here.
+      return await finishNavigationOnly(
+        {
+          paused: false,
+          pauseAction: autofill.pauseAction,
+          pauseMessage: autofill.pauseMessage,
+          executionLog: [
+            ...(navigation?.executionLog || []),
+            ...(autofill.executionLog || []),
+          ],
+          result: { ...(navigation?.result || {}), autofill: autofill.result },
+        },
+        job,
+      );
+    }
     return {
       ...navigation,
       paused: false,
@@ -4221,6 +4490,7 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
       detail:
         "Desktop worker validated the trusted local Iris session before entering the live pilot.",
     });
+
 
     // IRIS 2.0 shows a promotional popup over the dashboard after login.
     // It must be dismissed or it swallows every later click.
@@ -4989,14 +5259,22 @@ async function processLocalJob(job) {
         detail: message,
       },
     ];
+    const portalEvidence = buildPortalEvidenceDiagnostics(
+      domEvidence?.sectionTour || lastSectionTour,
+    );
     const recoverableAssistedIssue =
       job.type === "tax_assisted_filing"
         ? classifyRecoverableAssistedIssue(
             message,
             failureExecutionLog,
             context,
+            portalEvidence,
           )
         : null;
+    const autofillSummaryForRecovery =
+      failureExecutionLog
+        .filter((entry) => entry?.step === "real_autofill_result")
+        .pop()?.detail || null;
 
     if (recoverableAssistedIssue) {
       await updateLocalJobStatus(job.id, "awaiting_user_action", {
@@ -5008,6 +5286,10 @@ async function processLocalJob(job) {
           selectorBundle: getSelectorBundleSignal(context),
           selectorDriftDiagnostics:
             recoverableAssistedIssue.selectorDriftDiagnostics,
+          mappingRefusalDiagnostics:
+            recoverableAssistedIssue.mappingRefusalDiagnostics || null,
+          portalEvidence,
+          autofillSummary: autofillSummaryForRecovery,
           domEvidence,
           recoveryActions: buildRecoveryActions(message, {
             selectorDriftDiagnostics:
@@ -5028,6 +5310,10 @@ async function processLocalJob(job) {
           userInstruction: recoverableAssistedIssue.userInstruction,
           selectorDriftDiagnostics:
             recoverableAssistedIssue.selectorDriftDiagnostics,
+          mappingRefusalDiagnostics:
+            recoverableAssistedIssue.mappingRefusalDiagnostics || null,
+          portalEvidence,
+          autofillSummary: autofillSummaryForRecovery,
           domEvidence,
         },
       });
@@ -5045,12 +5331,22 @@ async function processLocalJob(job) {
       message,
       failureExecutionLog,
       context,
+      portalEvidence,
     );
+    // The autofill counts belong on the FAILED record too: `0/27 filled` was only
+    // ever readable in latest-job.json, never in the job the operator sees.
+    const autofillSummary =
+      failureExecutionLog
+        .filter((entry) => entry?.step === "real_autofill_result")
+        .pop()?.detail || null;
+
     await updateLocalJobStatus(job.id, "failed", {
       errorMessage: messageWithDump,
       result: {
         selectorBundle: getSelectorBundleSignal(context),
         selectorDriftDiagnostics,
+        portalEvidence,
+        autofillSummary,
         domEvidence,
         recoveryActions: buildRecoveryActions(message, {
           selectorDriftDiagnostics,

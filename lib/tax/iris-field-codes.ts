@@ -90,13 +90,19 @@ export const CATEGORY_TO_IRIS_MAP: Record<string, { incomeCode: string; taxCode?
     { incomeCode: IRIS_CODES.SALARY_INCOME.code, description: "Salary main" },
     { incomeCode: IRIS_CODES.SALARY_PAY_WAGES.code, description: "Pay/Wages breakdown" },
   ],
+  // ONE IRIS line (1008) carries the pension figure; the engine's exempt/taxable split
+  // stays internal. The old double mapping (1008 + 5007) wrote the same pension amount
+  // into two schedules, i.e. counted it twice.
   PENSION: [
-    { incomeCode: IRIS_CODES.SALARY_PENSION_ANNUITY.code, description: "Pension in Salary" },
-    { incomeCode: IRIS_CODES.OTHER_SOURCES_ANNUITY_PENSION.code, description: "Pension in Other Sources fallback" },
+    { incomeCode: IRIS_CODES.SALARY_PENSION_ANNUITY.code, description: "Pension / Annuity u/s 12(2)(f) — whole figure; IRIS derives the split" },
   ],
-  BANK_PROFIT: [
-    { incomeCode: IRIS_CODES.OTHER_SOURCES_PROFIT_DEBT.code, taxCode: IRIS_CODES.ADJ_PROFIT_DEBT_BANK_151_B.code, description: "Bank profit" },
+  PENSION_OTHER_SOURCES: [
+    { incomeCode: IRIS_CODES.OTHER_SOURCES_ANNUITY_PENSION.code, description: "Annuity/pension reported under Other Sources (explicit only — never automatic)" },
   ],
+  // Verified line items only. BANK_PROFIT / PROFIT_ON_DEBT / DIVIDEND are final-tax
+  // routes: their AMOUNT belongs in Other Sources → 'Subject to Final Tax' (a column
+  // with no live capture yet) and their TAX arrives through the 151(a)/(b) taxCredit.
+  // Pointing the amount at 500312 + a normal-tax column under-stated the final tax.
   RENT: [
     { incomeCode: IRIS_CODES.PROPERTY_RENT_RECEIVED.code, taxCode: IRIS_CODES.ADJ_RENT_155.code, description: "Rent" },
   ],
@@ -106,27 +112,13 @@ export const CATEGORY_TO_IRIS_MAP: Record<string, { incomeCode: string; taxCode?
   PROPERTY_RENT: [
     { incomeCode: IRIS_CODES.PROPERTY_RENT_RECEIVED.code, taxCode: IRIS_CODES.ADJ_RENT_155.code, description: "Property Rent" },
   ],
-  DIVIDEND: [
-    { incomeCode: IRIS_CODES.OTHER_SOURCES_OTHER_RECEIPTS.code, description: "Dividend fallback to Other Receipts (need exact code from full IRIS)" },
-  ],
-  BUSINESS: [
-    { incomeCode: IRIS_CODES.OTHER_SOURCES_OTHER_RECEIPTS.code, description: "Business - needs detailed mapping" },
-  ],
-  CAPITAL_GAIN: [
-    { incomeCode: IRIS_CODES.CGT_GAINS.code, description: "Capital Gains" },
-  ],
-  CAPITAL_GAINS: [
-    { incomeCode: IRIS_CODES.CGT_GAINS.code, description: "Capital Gains plural" },
-  ],
-  OTHER_INCOME: [
-    { incomeCode: IRIS_CODES.OTHER_SOURCES_OTHER_RECEIPTS.code, description: "Other Income" },
-  ],
-  FOREIGN: [
-    { incomeCode: IRIS_CODES.FOREIGN_INCOME.code, description: "Foreign Income" },
-  ],
-  AGRICULTURE: [
-    { incomeCode: IRIS_CODES.AGRI_INCOME.code, description: "Agriculture Income" },
-  ],
+  // Intentionally unmapped — reported in `portalFieldMap.mappingGaps` instead of
+  // being guessed onto a code that does not exist on this taxpayer's return:
+  //   DIVIDEND, BUSINESS, SERVICES, OTHER_INCOME  (5028 "Other Receipts" is not a
+  //     substitute for an unknown source; it produced 3 × row_not_found live)
+  //   CAPITAL_GAIN / CAPITAL_GAINS (4000 is a Summary row — IRIS computes it)
+  //   FOREIGN (6000 is a Summary row), AGRICULTURE (sheet never captured)
+  //   BANK_PROFIT / PROFIT_ON_DEBT (final-tax placement above)
   // Advance tax categories - from our WHT Rate Card
   ADVANCE_TAX_236C: [
     { incomeCode: IRIS_CODES.ADJ_PROPERTY_TRANSFER_236C.code, description: "Property Transfer 236C" },
