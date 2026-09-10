@@ -46,7 +46,7 @@ const DESCRIPTION_SELECTOR = ".row-description-text";
  * a stale copy is a correctness risk, not a cosmetic one — main.js refuses to run
  * the real-portal flow when the three files disagree.
  */
-const BUILD_TAG = "fix17-setup-continue-20260910";
+const BUILD_TAG = "fix18-setup-continue-overlay-20260910";
 
 /** Outcome reason codes. `filled` is the only success. */
 const FILL_STATUS = {
@@ -312,17 +312,27 @@ function buildInPageFillScript(fields, options) {
         step += 1;
       }
       if (!out.length) {
-        // Nothing in the row's own container: fall back to the panels around it,
-        // still ranked by DOM order so the nearest table wins.
-        const owner =
-          row.closest("mat-expansion-panel-body") ||
-          row.closest("mat-expansion-panel");
-        const scope = owner || row.parentElement;
-        if (scope) {
+        // Some live IRIS sections render the sticky header in a sibling card,
+        // not in the row's own parent or a mat-expansion-panel. Walk upward to
+        // the nearest ancestor that owns heading bars. This is still scoped to
+        // the row's section; it does not search the whole document, so a salary
+        // row cannot borrow a header from another active section.
+        let scope = row.parentElement;
+        let depth = 0;
+        while (scope && scope !== document.body) {
           const bars = barsFor(scope);
-          bars.forEach((bar, index) => {
-            out.push({ bar, distance: 100 + index, side: "owner" });
-          });
+          if (bars.length) {
+            bars.forEach((bar, index) => {
+              out.push({
+                bar,
+                distance: 100 + depth * 10 + index,
+                side: "owner",
+              });
+            });
+            break;
+          }
+          scope = scope.parentElement;
+          depth += 1;
         }
       }
       return out;
@@ -617,7 +627,9 @@ async function fillIrisRows(windowInstance, portalFieldMap, options = {}) {
       label: f.label,
       requestedColumn: f.column,
       status:
-        f.value === null || f.value === undefined || String(f.value).trim() === ""
+        f.value === null ||
+        f.value === undefined ||
+        String(f.value).trim() === ""
           ? FILL_STATUS.EMPTY_VALUE
           : f.amountReason,
     }));

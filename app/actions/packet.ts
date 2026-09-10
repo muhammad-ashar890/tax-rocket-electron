@@ -395,13 +395,8 @@ export async function generateFilingPacketAction(
     // the PORTAL map has no verified IRIS line for it — a business/services/
     // capital-gains taxpayer would otherwise generate a salary-only packet, have
     // the agent fill it cleanly, and file a return that quietly omits income.
-    const coverageGate = describeUnmappedPortalSources(
-      portalFieldMap.mappingGaps,
-    );
-    if (
-      coverageGate.blocked.length > 0 &&
-      !options?.acceptUnmappedPortalSources
-    ) {
+    const coverageGate = describeUnmappedPortalSources(portalFieldMap.mappingGaps);
+    if (coverageGate.blocked.length > 0 && !options?.acceptUnmappedPortalSources) {
       return {
         success: false,
         error: coverageGate.refusal,

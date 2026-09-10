@@ -7,7 +7,7 @@
 // TY2026+ return setup steps that do not require legal/financial judgement.
 // Create/Save/Submit/payment controls and all financial inputs remain off
 // limits until the engine/mapping audit is resolved.
-const BUILD_TAG = "fix17-setup-continue-20260910";
+const BUILD_TAG = "fix18-setup-continue-overlay-20260910";
 const DEFAULT_HOSTS = ["iris.fbr.gov.pk"];
 const SECTION_TOUR = Object.freeze([
   { id: "salary", group: "Employment", tab: "Salary" },
@@ -121,7 +121,9 @@ function classifyNewReturnSetupStage(input = {}) {
   // says "Period"/"Tax Year". All three are the same stage — this used to be the
   // only reason the agent stopped at the dialog without clicking Continue.
   if (
-    (prompts.has("tax year") || prompts.has("period") || prompts.has("tax period")) &&
+    (prompts.has("tax year") ||
+      prompts.has("period") ||
+      prompts.has("tax period")) &&
     actions.has("continue")
   )
     return "period";
@@ -258,11 +260,9 @@ function portalProbe(options = {}) {
       return "residency";
     if (actions.has("accept and continue")) return "accept_continue";
     if (
-      (
-        prompts.has("tax year") ||
+      (prompts.has("tax year") ||
         prompts.has("period") ||
-        prompts.has("tax period")
-      ) &&
+        prompts.has("tax period")) &&
       actions.has("continue")
     )
       return "period";
@@ -284,7 +284,8 @@ function portalProbe(options = {}) {
       .filter(visible)
       .some((input) => {
         const type = input.getAttribute("type") || "text";
-        if (/^(?:radio|checkbox|button|submit|hidden)$/i.test(type)) return false;
+        if (/^(?:radio|checkbox|button|submit|hidden)$/i.test(type))
+          return false;
         // An OTP/password box is a human question even when the page happens to
         // show a setup caption next to it and the box is already filled.
         if (
@@ -2265,15 +2266,31 @@ function portalProbe(options = {}) {
       }
       if (matches.length > 1) actionResult.status = "ambiguous";
       else if (matches.length === 1) {
-        if (!clickable(matches[0])) actionResult.status = "not_interactable";
+        const setupAdvanceAction =
+          setupAdvanceAllowed && options.action === "new-return-continue";
+        const hitTestPassed = clickable(matches[0]);
+        // IRIS opens a period suggestion list over the setup dialog. The exact
+        // Continue button is still the safe, allowlisted action, but a strict
+        // elementFromPoint hit-test sees that suggestion panel and labels the
+        // button "obstructed". Do not weaken hit-testing for normal navigation;
+        // only a recognised setup advance may use the DOM click fallback.
+        if (
+          !hitTestPassed &&
+          !(setupAdvanceAction && interaction?.reason === "obstructed")
+        )
+          actionResult.status = "not_interactable";
         else if (options.action === "declaration-hover") {
-          matches[0].dispatchEvent(
-            new MouseEvent("mouseover", { bubbles: true }),
-          );
-          matches[0].dispatchEvent(
-            new MouseEvent("mouseenter", { bubbles: false }),
-          );
-          actionResult.status = "hovered";
+          if (!hitTestPassed) {
+            actionResult.status = "not_interactable";
+          } else {
+            matches[0].dispatchEvent(
+              new MouseEvent("mouseover", { bubbles: true }),
+            );
+            matches[0].dispatchEvent(
+              new MouseEvent("mouseenter", { bubbles: false }),
+            );
+            actionResult.status = "hovered";
+          }
         } else {
           matches[0].click();
           actionResult.status = "clicked";
@@ -3583,7 +3600,6 @@ async function inspectNavigation(
   return { inspection: await read(), requiredAction: "portal_navigation" };
 }
 
-
 /**
  * "Selector drift" has to be an evidenced conclusion, not a string match.
  *
@@ -3608,7 +3624,9 @@ function buildPortalEvidenceDiagnostics(sectionTour, rowBearingIds) {
     status: (section && section.status) || null,
     transition: (section && section.transition) || null,
     rowCount: Array.isArray(section && section.rows) ? section.rows.length : 0,
-    gridCount: Array.isArray(section && section.grids) ? section.grids.length : 0,
+    gridCount: Array.isArray(section && section.grids)
+      ? section.grids.length
+      : 0,
     mappingVerified: Boolean(section && section.mappingVerified),
   }));
 
@@ -3695,7 +3713,6 @@ const RETURN_WORKSPACE_PROBE = `(() => {
     inputs: countInputs(workflow),
   };
 })()`;
-
 
 module.exports = {
   BUILD_TAG,

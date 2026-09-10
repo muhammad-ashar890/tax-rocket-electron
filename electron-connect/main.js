@@ -58,7 +58,13 @@ function getRealAutofillMode() {
     .trim()
     .toLowerCase();
   if (raw === "dry" || raw === "dryrun" || raw === "dry-run") return "dry";
-  if (raw === "1" || raw === "true" || raw === "on" || raw === "yes" || raw === "live")
+  if (
+    raw === "1" ||
+    raw === "true" ||
+    raw === "on" ||
+    raw === "yes" ||
+    raw === "live"
+  )
     return "live";
   return "off";
 }
@@ -94,7 +100,7 @@ function resolveAutofillMode(jobContext) {
 }
 // Independent controller stamp: a new navigator must not make an OLD main
 // process appear fully updated (the mixed fix10/fix11 rollout hid this).
-const AGENT_BUILD_TAG = "fix17-setup-continue-20260910";
+const AGENT_BUILD_TAG = "fix18-setup-continue-overlay-20260910";
 function getAgentBuildLabel() {
   return `${AGENT_BUILD_TAG} | navigator: ${irisNavigation.BUILD_TAG} | filler: ${irisRowFiller.BUILD_TAG}`;
 }
@@ -111,7 +117,9 @@ function assertNavigatorBuild() {
         .map(([name, tag]) => `${name}: ${tag || "untagged"}`)
         .join(", ")} vs main: ${AGENT_BUILD_TAG}). Replace ${mismatched
         .map(([name]) => name)
-        .join(" and ")} from the same patch as main.js and fully restart the agent.`,
+        .join(
+          " and ",
+        )} from the same patch as main.js and fully restart the agent.`,
     );
   }
 }
@@ -885,7 +893,11 @@ async function navigateIris2DashboardFlow(windowInstance, formLabel) {
   // Readiness is the WORKSPACE, not the presence of inputs: the
   // Summary-of-Economic-Transactions gate also renders ten visible inputs, and
   // treating that as "form ready" is how a job can start filling the wrong page.
-  let readiness = { returnWorkspace: false, inputs: formOpen, probeFailed: true };
+  let readiness = {
+    returnWorkspace: false,
+    inputs: formOpen,
+    probeFailed: true,
+  };
   if (formOpen > 0) {
     readiness = await windowInstance.webContents
       .executeJavaScript(irisNavigation.RETURN_WORKSPACE_PROBE)
@@ -1815,7 +1827,11 @@ function buildSelectorDriftDiagnostics(
     return null;
   }
   // With a capture in hand, only missing rows justify calling it drift.
-  if (evidence && evidence.state !== "rows_missing" && evidence.state !== "no_evidence") {
+  if (
+    evidence &&
+    evidence.state !== "rows_missing" &&
+    evidence.state !== "no_evidence"
+  ) {
     return null;
   }
 
@@ -1877,7 +1893,9 @@ function buildMappingRefusalDiagnostics(executionLog) {
     const status = line.split("->")[1]?.trim().split(" ")[0] || "unknown";
     counts.set(status, (counts.get(status) || 0) + 1);
   }
-  const derived = (counts.get("column_disabled") || 0) + (counts.get("no_editable_cell") || 0);
+  const derived =
+    (counts.get("column_disabled") || 0) +
+    (counts.get("no_editable_cell") || 0);
   const unplaced = counts.get("row_not_found") || 0;
   return {
     reasonCode: "portal_mapping_refused",
@@ -1908,12 +1926,11 @@ function classifyRecoverableAssistedIssue(
       requiredAction: "portal_mapping_review",
       message:
         "IRIS refused the packet's field mapping; no selector bundle change can fix that.",
-      pauseReason:
-        `${mappingRefusal.refusalCount} field(s) were refused by the portal (${Object.entries(
-          mappingRefusal.byStatus,
-        )
-          .map(([status, count]) => `${count} ${status}`)
-          .join(", ")}).`,
+      pauseReason: `${mappingRefusal.refusalCount} field(s) were refused by the portal (${Object.entries(
+        mappingRefusal.byStatus,
+      )
+        .map(([status, count]) => `${count} ${status}`)
+        .join(", ")}).`,
       userInstruction:
         "Review the packet mapping gaps and re-approve. The portal was not modified.",
       selectorDriftDiagnostics: null,
@@ -3846,8 +3863,8 @@ async function runRealIrisAutofill(jobContext, job, mode) {
     workspace?.returnWorkspace
       ? `Return workspace confirmed (${workspace.inputs ?? "?"} entered inputs).`
       : `No return workspace on screen (${workspace?.reason || "unknown"}). ` +
-        `Open the intended 114(1)/116 return so the tax-year header is visible, then resume — ` +
-        `nothing was filled and no section tour was attempted.`,
+          `Open the intended 114(1)/116 return so the tax-year header is visible, then resume — ` +
+          `nothing was filled and no section tour was attempted.`,
   );
   if (!workspace?.returnWorkspace) {
     return {
@@ -4490,7 +4507,6 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
       detail:
         "Desktop worker validated the trusted local Iris session before entering the live pilot.",
     });
-
 
     // IRIS 2.0 shows a promotional popup over the dashboard after login.
     // It must be dismissed or it swallows every later click.
