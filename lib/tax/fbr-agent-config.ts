@@ -53,6 +53,17 @@ export function isClassicPortalRoute(routeFamily: IrisRouteFamily): boolean {
 
 // ─── Desktop Auth Config ───────────────────────────────────
 
+const REAL_FBR_ROOT = "https://iris.fbr.gov.pk/";
+
+function isOfficialFbrUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "iris.fbr.gov.pk";
+  } catch {
+    return false;
+  }
+}
+
 export type FbrDesktopAuthConfig = {
   loginUrl: string;
   readySelector: string;
@@ -62,32 +73,26 @@ export type FbrDesktopAuthConfig = {
 };
 
 export function getFbrDesktopAuthConfig(): FbrDesktopAuthConfig {
-  const useMockIris =
-    (process.env.FBR_USE_MOCK_IRIS?.trim() || "false").toLowerCase() === "true";
-  const loginUrl =
-    process.env.FBR_IRIS_LOGIN_URL?.trim() ||
-    // Real IRIS root opens the Taxpayer login screen directly.
-    (useMockIris ? "mock-iris://login" : "https://iris.fbr.gov.pk/");
-
-  if (useMockIris !== loginUrl.startsWith("mock-iris://")) {
-    throw new Error(
-      "FBR_USE_MOCK_IRIS and FBR_IRIS_LOGIN_URL disagree. Explicitly choose one environment.",
-    );
-  }
-  if (!useMockIris && !loginUrl.startsWith("https://")) {
-    throw new Error("Real IRIS requires an HTTPS login URL.");
-  }
+  // The desktop agent is production-facing: it may connect only to the real
+  // FBR portal. Keep the compatibility boolean in the handoff shape so older
+  // agents fail closed, but never derive it from an environment variable or a
+  // URL supplied by a stale job.
+  const configuredLoginUrl = process.env.FBR_IRIS_LOGIN_URL?.trim() || "";
+  const loginUrl = isOfficialFbrUrl(configuredLoginUrl)
+    ? configuredLoginUrl
+    : REAL_FBR_ROOT;
   return {
     loginUrl,
-    readySelector:
-      process.env.FBR_IRIS_READY_SELECTOR?.trim() ||
-      (useMockIris ? "#iris-dashboard-ready" : "#homeLink"),
+    // SEMANTICS: "a logged-in FBR page exists", NOT "the return is open".
+    // `#homeLink` is present on the dashboard and on every return page, so it
+    // confirms the session only. Return readiness is proven separately by the
+    // worker's return-workspace probes.
+    readySelector: process.env.FBR_IRIS_READY_SELECTOR?.trim() || "#homeLink",
     readyRejectSelector:
-      process.env.FBR_IRIS_READY_REJECT_SELECTOR?.trim() ||
-      (useMockIris ? "#iris-password-reset-required" : null),
+      process.env.FBR_IRIS_READY_REJECT_SELECTOR?.trim() || null,
     readyUrlPattern:
-      process.env.FBR_IRIS_READY_URL_PATTERN?.trim() || "/dashboard",
-    useMockIris,
+      process.env.FBR_IRIS_READY_URL_PATTERN?.trim() || "iris.fbr.gov.pk",
+    useMockIris: false,
   };
 }
 
@@ -122,8 +127,8 @@ export type FbrSelectorBundleSummary = {
 
 export type FbrPortalAutomationConfig = {
   livePilot: {
-    mode: "navigation_inspection_only";
-    automaticFilingEnabled: false;
+    mode: "navigation_inspection_only" | "supervised_live_filing";
+    automaticFilingEnabled: boolean;
   };
   portalHostAllowlist: string[];
   readiness: {
@@ -274,6 +279,31 @@ function splitHosts(value: string | undefined) {
     .filter(Boolean);
 }
 
+/**
+ * The deployment's own consent for letting the agent type into IRIS.
+ *
+ * The operator has `TAXROCKET_REAL_AUTOFILL` in the agent's shell; this is the
+ * second, independent half — a value the SHIPPED app decides, so a stale copy of
+ * the desktop agent, or an operator who exported the env var in a hurry, cannot on
+ * its own write into a government return. Unset, empty or unrecognised means off:
+ * the only accepted spellings are `true`, `1`, `on`, `yes` (same set the agent's
+ * own parser accepts, so the two switches cannot disagree about what "on" means).
+ *
+ * It lives in the server environment because the server builds the job context:
+ * there is no DB table for it, which is deliberate — a row that silently enables
+ * writes would outlive the deployment that set it.
+ */
+export const LIVE_FILING_ENV_VAR = "TAXROCKET_ALLOW_LIVE_FILING";
+
+const LIVE_FILING_ON_VALUES = new Set(["true", "1", "on", "yes"]);
+
+export function isLiveFilingEnabledByDeployment(): boolean {
+  const raw = String(process.env[LIVE_FILING_ENV_VAR] ?? "")
+    .trim()
+    .toLowerCase();
+  return LIVE_FILING_ON_VALUES.has(raw);
+}
+
 export async function getFbrPortalAutomationConfig(input?: {
   routeFamily?: IrisRouteFamily | null;
 }): Promise<FbrPortalAutomationConfig> {
@@ -287,10 +317,12 @@ export async function getFbrPortalAutomationConfig(input?: {
   // Real IRIS is a SPA with no stable static routes for the supervised
   // checkpoints (password reset, OTP/PIN, payment, final review). When the
   // pilot runs against the real portal, every checkpoint stays on the IRIS
-  // root (the post-login dashboard) instead of the local mock fixtures.
-  const realIrisRoot = "https://iris.fbr.gov.pk/";
-  const stageUrl = (mockDefault: string, envValue?: string) =>
-    envValue?.trim() || (desktop.useMockIris ? mockDefault : realIrisRoot);
+  // root (the post-login dashboard) instead of local test pages.
+  const realIrisRoot = REAL_FBR_ROOT;
+  const stageUrl = (envValue?: string) => {
+    const url = envValue?.trim() || realIrisRoot;
+    return isOfficialFbrUrl(url) ? url : realIrisRoot;
+  };
 
   const routeSelector =
     input?.routeFamily &&
@@ -298,10 +330,18 @@ export async function getFbrPortalAutomationConfig(input?: {
       ? DEFAULT_SELECTOR_BUNDLE.routeSelectors[input.routeFamily]
       : null;
 
+  const liveFilingEnabled = isLiveFilingEnabledByDeployment();
+
   return {
+    // `automaticFilingEnabled` is read by the agent (main.js:resolveAutofillMode):
+    // an explicit `false` downgrades TAXROCKET_REAL_AUTOFILL=live to a dry run, so
+    // this is a deployment-level kill switch rather than a decorative flag. It is
+    // only honoured when present as a boolean — `true` does NOT enable writes by
+    // itself, the operator's env var still has to opt in. Both halves are required,
+    // and `mode` carries which half is which so a log line says it out loud.
     livePilot: {
-      mode: "navigation_inspection_only",
-      automaticFilingEnabled: false,
+      mode: liveFilingEnabled ? "supervised_live_filing" : "navigation_inspection_only",
+      automaticFilingEnabled: liveFilingEnabled,
     },
     portalHostAllowlist: allowlist,
     readiness: {
@@ -311,10 +351,7 @@ export async function getFbrPortalAutomationConfig(input?: {
       readyUrlPattern: desktop.readyUrlPattern,
     },
     dryRun: {
-      entryUrl: stageUrl(
-        "mock-iris://return",
-        process.env.FBR_IRIS_DRY_RUN_URL,
-      ),
+      entryUrl: stageUrl(process.env.FBR_IRIS_DRY_RUN_URL),
       reviewGateSelector:
         process.env.FBR_IRIS_REVIEW_GATE_SELECTOR?.trim() ||
         "#dry-run-review-gate",
@@ -328,44 +365,17 @@ export async function getFbrPortalAutomationConfig(input?: {
         "Dry-run reached the final review gate. Final submit stays user controlled.",
     },
     assistedFiling: {
-      readinessUrl: stageUrl(
-        "mock-iris://dashboard",
-        process.env.FBR_IRIS_ASSISTED_READINESS_URL,
-      ),
-      passwordResetUrl: stageUrl(
-        "mock-iris://password-reset",
-        process.env.FBR_IRIS_PASSWORD_RESET_URL,
-      ),
-      otpCaptchaUrl: stageUrl(
-        "mock-iris://otp-captcha",
-        process.env.FBR_IRIS_OTP_CAPTCHA_URL,
-      ),
-      paymentUrl: stageUrl(
-        "mock-iris://payment",
-        process.env.FBR_IRIS_PAYMENT_URL,
-      ),
-      finalReviewUrl: stageUrl(
-        "mock-iris://final-review",
-        process.env.FBR_IRIS_FINAL_REVIEW_URL,
-      ),
-      completedTasksUrl: stageUrl(
-        "mock-iris://completed",
-        process.env.FBR_IRIS_COMPLETED_TASKS_URL,
-      ),
+      readinessUrl: stageUrl(process.env.FBR_IRIS_ASSISTED_READINESS_URL),
+      passwordResetUrl: stageUrl(process.env.FBR_IRIS_PASSWORD_RESET_URL),
+      otpCaptchaUrl: stageUrl(process.env.FBR_IRIS_OTP_CAPTCHA_URL),
+      paymentUrl: stageUrl(process.env.FBR_IRIS_PAYMENT_URL),
+      finalReviewUrl: stageUrl(process.env.FBR_IRIS_FINAL_REVIEW_URL),
+      completedTasksUrl: stageUrl(process.env.FBR_IRIS_COMPLETED_TASKS_URL),
     },
     classicAssistedFiling: {
-      finalReviewUrl: stageUrl(
-        "mock-iris://classic-portal",
-        process.env.FBR_IRIS_CLASSIC_FINAL_REVIEW_URL,
-      ),
-      pinEntryUrl: stageUrl(
-        "mock-iris://classic-pin",
-        process.env.FBR_IRIS_CLASSIC_PIN_URL,
-      ),
-      completedTasksUrl: stageUrl(
-        "mock-iris://classic-fixed-final-tax",
-        process.env.FBR_IRIS_CLASSIC_COMPLETED_TASKS_URL,
-      ),
+      finalReviewUrl: stageUrl(process.env.FBR_IRIS_CLASSIC_FINAL_REVIEW_URL),
+      pinEntryUrl: stageUrl(process.env.FBR_IRIS_CLASSIC_PIN_URL),
+      completedTasksUrl: stageUrl(process.env.FBR_IRIS_CLASSIC_COMPLETED_TASKS_URL),
     },
     routeSelector,
     selectorBundle: {

@@ -52,7 +52,11 @@ export function evaluateSimplifiedReturnEligibility(
     );
   }
 
-  if (metadata.residencyDaysInPakistan === "unsure") {
+  if (
+    !metadata.residencyStatus &&
+    metadata.residencyDaysInPakistan !== "yes" &&
+    metadata.residencyDaysInPakistan !== "no"
+  ) {
     reasons.push("Residency status needs confirmation before final routing.");
   }
 

@@ -49,7 +49,7 @@ export function WizardFbrStep({
     <div className="space-y-6">
       <StepHeading
         title="File with FBR"
-        description="Open the desktop agent, start filing, then confirm OTP, PIN, or payment on this computer."
+        description="Connect to FBR, start filing, and complete any OTP, CAPTCHA, PIN, or payment step on this computer."
       />
 
       <div className="rounded-xl border border-amanah/20 bg-amanah/5 p-5">
@@ -57,11 +57,11 @@ export function WizardFbrStep({
           <ShieldCheck className="h-5 w-5" />
         </div>
         <p className="font-semibold text-foreground">
-          FBR Connect — supervised filing
+          FBR filing
         </p>
         <p className="mt-1 text-sm text-muted-foreground">
           TaxRocket never sees your OTP, CAPTCHA, or PIN. Complete those steps
-          in the desktop agent, then press Continue here.
+          in the FBR window, then press Continue here.
         </p>
       </div>
 

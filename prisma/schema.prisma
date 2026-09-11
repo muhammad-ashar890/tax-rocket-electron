@@ -101,6 +101,9 @@ model FilingDraft {
   // SQLite doesn't support arrays, so we store stringified JSON
   incomeSources    String  @default("[]")
   salaryPercentage String?
+  // Explicit IRIS tax-residency choice. Null is intentional for legacy/incomplete
+  // drafts; packet generation and the desktop agent must pause until it is set.
+  residencyStatus  String?
 
   // SQLite doesn't support arrays, so we store stringified JSON
   readinessChecks             String                     @default("[]")

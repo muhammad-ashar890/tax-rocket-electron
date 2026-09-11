@@ -13,10 +13,13 @@ import {
   approveAndMapExtractedDocumentAction,
   extractDocumentWithGeminiAction,
   getDocumentExtractionAction,
+  carryForwardIdentityDocumentsAction,
   getFilingDocumentsAction,
   updateDocumentExtractionAction,
 } from "@/app/actions/extraction";
+import { describeIdentityCarryForward } from "@/lib/tax/cnic-profile";
 import { getFilingSummaryAction } from "@/app/actions/filing-summary";
+import { isFbrAgentCompleted } from "@/lib/tax/filing-status";
 import { getBankTransactionsAction } from "@/app/actions/bank-transactions";
 import { getBankStatementAction } from "@/app/actions/bank-statements";
 import { validateBankTransactionReviewAction } from "@/app/actions/bank-classification";
@@ -125,6 +128,27 @@ export function FilingWizard({
   // upstream data change. Ordinary Back/rail navigation changes `step` but
   // deliberately leaves this value alone.
   const [furthestStepReached, setFurthestStepReached] = useState(0);
+  // Keep the reset boundary and current location available to async handlers
+  // immediately. React state updates are batched, so a quick Continue after an
+  // upstream edit must not send the old completion boundary to the server.
+  const wizardCompletionStepRef = useRef(0);
+  const currentStepRef = useRef(0);
+  // A persisted ESTIMATE remains valid when the user only navigates Back.
+  // This ref is set only for a real upstream edit/reset, so returning to
+  // Review does not force a needless recalculation while changed data cannot
+  // accidentally reuse the old tax result.
+  const taxCalculationInvalidatedRef = useRef(false);
+  const pendingPipelineResetRef = useRef<Promise<
+    Awaited<ReturnType<typeof invalidateFilingPipelineAction>>
+  > | null>(null);
+
+  useEffect(() => {
+    wizardCompletionStepRef.current = furthestStepReached;
+  }, [furthestStepReached]);
+
+  useEffect(() => {
+    currentStepRef.current = step;
+  }, [step]);
 
   const [submitting, setSubmitting] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
@@ -214,9 +238,11 @@ export function FilingWizard({
   const highProfitOnDebt = "unsure";
   const filingIntent = "original";
 
-  // ── Tax year & residency ──
+  // ── Tax year & explicit IRIS residency context ──
   const [taxYear, setTaxYear] = useState(currentTaxYear);
-  const residencyDays = "yes";
+  const [residencyStatus, setResidencyStatus] = useState<
+    "resident" | "non_resident" | null
+  >(null);
 
   useEffect(() => {
     if (resumeDraftId) return;
@@ -267,6 +293,8 @@ export function FilingWizard({
     selectedDocumentFiles,
     uploadingDocumentType,
     documentUploadError,
+    profileSyncNote,
+    setProfileSyncNote,
     uploadFileInputsRef,
     setUploadedDocuments,
     setDocumentRecords,
@@ -329,6 +357,12 @@ export function FilingWizard({
         ),
       ]);
       setTaxYear(existing.taxYear);
+      setResidencyStatus(
+        existing.residencyStatus === "resident" ||
+          existing.residencyStatus === "non_resident"
+          ? existing.residencyStatus
+          : null,
+      );
       // Drop retired readiness values (CNIC/Iris/Mobile left the
       // checklist - they are hard requirements now, not taps).
       setReadinessCompleted(
@@ -367,6 +401,8 @@ export function FilingWizard({
       // Wait for React to finish rendering states above before forcefully setting step
       setTimeout(() => {
         if (isMounted) {
+          wizardCompletionStepRef.current = completionStep;
+          currentStepRef.current = jumpStep;
           setFurthestStepReached(completionStep);
           setStep(jumpStep);
         }
@@ -383,7 +419,20 @@ export function FilingWizard({
     if (!draftId) return;
 
     let isMounted = true;
-    getFilingDocumentsAction(draftId).then((result) => {
+
+    const load = async () => {
+      // An approved CNIC belongs to the person, not to one tax year: pull it onto
+      // this draft before the slot list is built, so the same card is not uploaded
+      // again for every new filing.
+      try {
+        const carried = await carryForwardIdentityDocumentsAction(draftId);
+        const note = describeIdentityCarryForward(carried.results);
+        if (isMounted && note) setProfileSyncNote(note);
+      } catch {
+        // Reuse is an optimisation; the ordinary upload path still runs.
+      }
+
+      const result = await getFilingDocumentsAction(draftId);
       if (!isMounted || !result.success) return;
 
       const nextRecords: Record<string, FilingDocumentRecord> = {};
@@ -396,7 +445,9 @@ export function FilingWizard({
 
       setDocumentRecords(nextRecords);
       setUploadedDocuments(nextNames);
-    });
+    };
+
+    void load();
 
     return () => {
       isMounted = false;
@@ -451,6 +502,7 @@ export function FilingWizard({
     resetStep: number,
     preserveReconciliation = false,
   ) {
+    taxCalculationInvalidatedRef.current = true;
     setFilingPacket(null);
     setApprovalConfirmed(false);
     setFbrConnectionStatus("NOT_STARTED");
@@ -464,10 +516,20 @@ export function FilingWizard({
       setBankTransactionsReviewed(false);
     }
 
-    setFurthestStepReached((currentCompletionStep) =>
-      shrinkWizardCompletion(currentCompletionStep, resetStep),
+    const nextCompletionStep = shrinkWizardCompletion(
+      wizardCompletionStepRef.current,
+      resetStep,
     );
-    setStep((currentStep) => clampWizardLocation(currentStep, resetStep));
+    const nextCurrentStep = clampWizardLocation(
+      currentStepRef.current,
+      resetStep,
+    );
+    // Update refs before scheduling React state so a Continue event that fires
+    // in the same tick still uses the reset boundary and location.
+    wizardCompletionStepRef.current = nextCompletionStep;
+    currentStepRef.current = nextCurrentStep;
+    setFurthestStepReached(nextCompletionStep);
+    setStep(nextCurrentStep);
 
     if (!preserveReconciliation) {
       setReconciliationMethod(null);
@@ -476,13 +538,53 @@ export function FilingWizard({
       setReconciliationPreview(null);
     }
 
-    if (draftId) {
-      void invalidateFilingPipelineAction(
-        draftId,
-        resetStep,
-        preserveReconciliation,
+    // Clear the displayed estimate immediately as well as in the database.
+    // This prevents a summary fetch that was already in flight from making an
+    // invalidated tax result look current again.
+    setFilingSummary((currentSummary) =>
+      currentSummary
+        ? {
+            ...currentSummary,
+            taxCalculationStatus: "NOT_CALCULATED",
+            taxableIncome: null,
+            taxPayable: null,
+            refundDue: null,
+            taxBreakdown: [],
+            collectionBreakdown: [],
+            finalTaxDue: undefined,
+            assessableTaxDue: undefined,
+            collectionTaxDue: undefined,
+          }
+        : currentSummary,
+    );
+
+    if (!draftId) return Promise.resolve({ success: true } as const);
+
+    // Reset requests can overlap with auto-save and Continue. Queue them so a
+    // later, deeper reset cannot overwrite an earlier, more restrictive one.
+    const previousReset = pendingPipelineResetRef.current;
+    const queuedReset = (previousReset ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(() =>
+        invalidateFilingPipelineAction(
+          draftId,
+          resetStep,
+          preserveReconciliation,
+        ),
       );
-    }
+    let trackedReset: Promise<
+      Awaited<ReturnType<typeof invalidateFilingPipelineAction>>
+    >;
+    trackedReset = queuedReset.finally(() => {
+      if (pendingPipelineResetRef.current === trackedReset) {
+        pendingPipelineResetRef.current = null;
+      }
+    });
+    pendingPipelineResetRef.current = trackedReset;
+    void trackedReset.catch((error) =>
+      console.error("Error resetting downstream filing steps:", error),
+    );
+    return trackedReset;
   }
 
   function resetForSetupChange() {
@@ -506,7 +608,7 @@ export function FilingWizard({
       .filter((r) => !readinessCompleted.includes(r.value))
       .map((r) => r.value),
     complexityScore: 0,
-    residencyDaysInPakistan: residencyDays as "yes" | "no" | "unsure",
+    residencyStatus: residencyStatus ?? undefined,
     employerCount: employerCount as "single" | "multiple" | "unsure",
     hasServicesIncome: hasServicesIncome as "yes" | "no" | "unsure",
     hasForeignIncomeOrAssets: hasForeignIncomeOrAssets as
@@ -690,7 +792,7 @@ export function FilingWizard({
     const formData = new FormData();
     formData.set("taxYear", String(taxYear));
     formData.set("taxpayerType", taxpayerType);
-    formData.set("residencyDaysInPakistan", residencyDays);
+    formData.set("residencyStatus", residencyStatus ?? "");
     formData.set("filerType", filerType ?? "");
     formData.set("businessStructure", businessStructure ?? "");
     formData.set("salaryPercentage", salaryPercentage ?? "");
@@ -712,6 +814,7 @@ export function FilingWizard({
     return formData;
   }, [
     taxYear,
+    residencyStatus,
     step,
     furthestStepReached,
     taxpayerType,
@@ -779,7 +882,12 @@ export function FilingWizard({
     if (filerType === "my_business" && !businessStructure)
       return ["who", "structure"];
 
-    const tail: SetupStepKey[] = ["tax_year", ...subcategorySteps, "readiness"];
+    const tail: SetupStepKey[] = [
+      "tax_year",
+      "residency",
+      ...subcategorySteps,
+      "readiness",
+    ];
 
     if (isMyself) {
       return [
@@ -870,10 +978,18 @@ export function FilingWizard({
 
     const missingIndex = combinedSteps.indexOf(missingSetupKey);
     if (missingIndex < 0 || step <= missingIndex) return;
-    setFurthestStepReached((currentCompletionStep) =>
-      shrinkWizardCompletion(currentCompletionStep, missingIndex),
+    const missingCompletionStep = shrinkWizardCompletion(
+      wizardCompletionStepRef.current,
+      missingIndex,
     );
-    setStep((currentStep) => clampWizardLocation(currentStep, missingIndex));
+    const missingCurrentStep = clampWizardLocation(
+      currentStepRef.current,
+      missingIndex,
+    );
+    wizardCompletionStepRef.current = missingCompletionStep;
+    currentStepRef.current = missingCurrentStep;
+    setFurthestStepReached(missingCompletionStep);
+    setStep(missingCurrentStep);
   }, [
     resumeDraftId,
     draftId,
@@ -949,6 +1065,7 @@ export function FilingWizard({
     generatingPacket,
     generatingPdf,
     packetError,
+    packetUnmappedSources,
     setApprovalConfirmed,
     setFilingPacket,
     setWithholdingWarning,
@@ -963,7 +1080,12 @@ export function FilingWizard({
     setSavingDraft,
     setFilingActionError,
     setFilingSummary,
-    onDownstreamInvalidated: () => setFbrConnectionStatus("NOT_STARTED"),
+    onDownstreamInvalidated: () => {
+      // This callback runs after a fresh tax calculation succeeds. It is not
+      // the same as an upstream reset, which marks the ref true above.
+      taxCalculationInvalidatedRef.current = false;
+      setFbrConnectionStatus("NOT_STARTED");
+    },
   });
 
   useEffect(() => {
@@ -1021,6 +1143,7 @@ export function FilingWizard({
     }
     if (currentStepKey === "salary_split") return Boolean(salaryPercentage);
     if (currentStepKey === "tax_year") return Boolean(taxYear);
+    if (currentStepKey === "residency") return Boolean(residencyStatus);
     if (currentStepKey === "bank_accounts") {
       return (
         bankAccounts.length > 0 &&
@@ -1065,6 +1188,7 @@ export function FilingWizard({
     incomeSubcategorySelections,
     salaryPercentage,
     taxYear,
+    residencyStatus,
     bankAccounts,
     readinessCompleted,
     bankIntelligenceClassified,
@@ -1157,6 +1281,7 @@ export function FilingWizard({
     }
     if (showsSalarySplit && !salaryPercentage) return false;
     if (!taxYear) return false;
+    if (!residencyStatus) return false;
     if (
       requiresBankAccounts &&
       (bankAccounts.length === 0 ||
@@ -1177,6 +1302,7 @@ export function FilingWizard({
     showsSalarySplit,
     salaryPercentage,
     taxYear,
+    residencyStatus,
     requiresBankAccounts,
     bankAccounts,
     readinessCompleted.length,
@@ -1231,7 +1357,10 @@ export function FilingWizard({
                 : key === "filing_packet"
                   ? Boolean(filingPacket)
                   : key === "fbr_connect"
-                    ? fbrConnectionStatus === "COMPLETED"
+                    ? // The agent writes FILING_COMPLETED / DRY_RUN_COMPLETED;
+                      // the old `=== "COMPLETED"` compared against a status that
+                      // nothing ever writes, so this step could never complete.
+                      isFbrAgentCompleted(fbrConnectionStatus)
                     : true;
         // The persisted boundary gates every green check, including dynamic
         // subcategories whose selected values intentionally remain saved.
@@ -1283,6 +1412,15 @@ export function FilingWizard({
         value: (businessStructure ?? "").replace("_", " "),
       });
     rows.push({ label: "Tax year", value: String(taxYear) });
+    rows.push({
+      label: "Residency",
+      value:
+        residencyStatus === "resident"
+          ? "Resident"
+          : residencyStatus === "non_resident"
+            ? "Non-Resident"
+            : "Not selected",
+    });
 
     if (needsIncomeSourceSelection && selectedIncomeSources.length > 0) {
       const details = selectedIncomeSources.map((s) => ({
@@ -1408,6 +1546,7 @@ export function FilingWizard({
     showStructureRow,
     businessStructure,
     taxYear,
+    residencyStatus,
     needsIncomeSourceSelection,
     incomeSources,
     incomeSubcategorySelections,
@@ -1446,6 +1585,7 @@ export function FilingWizard({
       }
       if (showsSalarySplit && !salaryPercentage) b.push("Specify salary share");
       if (!taxYear) b.push("Select tax year");
+      if (!residencyStatus) b.push("Select Resident or Non-Resident");
       if (
         requiresBankAccounts &&
         (bankAccounts.length === 0 ||
@@ -1542,6 +1682,7 @@ export function FilingWizard({
     showsSalarySplit,
     salaryPercentage,
     taxYear,
+    residencyStatus,
     requiresBankAccounts,
     bankAccounts,
     readinessCompleted.length,
@@ -1557,13 +1698,40 @@ export function FilingWizard({
   // ── Navigation ────────────────────────────────────────────────────
 
   function goBack() {
-    setStep((s) => Math.max(0, s - 1));
+    const previousStep = Math.max(0, currentStepRef.current - 1);
+    currentStepRef.current = previousStep;
+    setStep(previousStep);
   }
 
   async function goNext() {
     if (navigationLockedRef.current) return;
 
-    if (currentStepKey === "documents") {
+    const pendingReset = pendingPipelineResetRef.current;
+    if (pendingReset) {
+      const resetResult = await pendingReset;
+      if (!resetResult.success) {
+        setFilingActionError(
+          resetResult.error ?? "Failed to reset downstream filing steps",
+        );
+        return;
+      }
+    }
+
+    const navigationStep = currentStepRef.current;
+    const navigationStepKey = combinedSteps[navigationStep] ?? "who";
+    const navigationCompletionStep = wizardCompletionStepRef.current;
+    // The documents screen is the first pipeline screen after Review & create.
+    // An older draft may still persist Review as its completion boundary even
+    // though its required documents are already visible. Treat Review as the
+    // authoritative prior boundary while advancing from Documents; otherwise
+    // the compare-and-set recovery correctly (but incorrectly for this case)
+    // sends the user back to Review instead of Bank Intelligence.
+    const persistedCompletionStep =
+      navigationStepKey === "documents"
+        ? Math.max(0, navigationStep - 1)
+        : navigationCompletionStep;
+
+    if (navigationStepKey === "documents") {
       // Required documents must be reviewed before leaving this step. Bank
       // statements and salary certificates additionally require Save &
       // Approve Map because their data feeds downstream ledgers.
@@ -1601,14 +1769,18 @@ export function FilingWizard({
       setFilingActionError(null);
     }
 
-    if (currentStepKey === "filing_packet" && !filingPacket) {
+    if (navigationStepKey === "filing_packet" && !filingPacket) {
       setFilingActionError(
         "Generate the latest filing packet before continuing.",
       );
       return;
     }
 
-    if (currentStepKey === "pipeline_review" && !taxCalculatedInSession) {
+    const hasCurrentTaxEstimate =
+      !taxCalculationInvalidatedRef.current &&
+      (taxCalculatedInSession ||
+        filingSummary?.taxCalculationStatus === "ESTIMATE");
+    if (navigationStepKey === "pipeline_review" && !hasCurrentTaxEstimate) {
       setFilingActionError(
         "Calculate the tax estimate before continuing to approval.",
       );
@@ -1619,7 +1791,7 @@ export function FilingWizard({
     // the duplicate-withholding warning stands unconfirmed, the filing must
     // not move to approval (the server would refuse the packet anyway).
     if (
-      currentStepKey === "pipeline_review" &&
+      navigationStepKey === "pipeline_review" &&
       withholdingWarning &&
       !withholdingConfirmed
     ) {
@@ -1629,7 +1801,7 @@ export function FilingWizard({
       return;
     }
 
-    if (currentStepKey === "bank_intelligence") {
+    if (navigationStepKey === "bank_intelligence") {
       // Validate against the persisted database record as well as local UI
       // state. This prevents a stale/resumed wizard from moving to Mizan
       // with only extracted form values and no saved BankStatement row.
@@ -1672,7 +1844,7 @@ export function FilingWizard({
       }
     }
 
-    if (currentStepKey === "bank_accounts" && draftId) {
+    if (navigationStepKey === "bank_accounts" && draftId) {
       const accountSaveResult = await saveBankAccountsAction(
         draftId,
         bankAccounts.map(({ clientId: _clientId, ...account }) => account),
@@ -1687,8 +1859,8 @@ export function FilingWizard({
 
     if (!canGoNext) return;
     setFilingActionError(null);
-    const nextIndex = Math.min(totalSteps - 1, step + 1);
-    if (currentStepKey === "pipeline_review") {
+    const nextIndex = Math.min(totalSteps - 1, navigationStep + 1);
+    if (navigationStepKey === "pipeline_review") {
       setTaxCalculatedInSession(false);
     }
 
@@ -1698,7 +1870,7 @@ export function FilingWizard({
     }, 400);
 
     // DB state save logic for setup and pipeline steps
-    if (draftId && nextIndex > step) {
+    if (draftId && nextIndex > navigationStep) {
       setSavingDraft(true);
       // Auto-save form data + step. Keep tax year and empty arrays in sync too.
       // Step navigation itself never grants an approval status; guarded packet
@@ -1707,8 +1879,9 @@ export function FilingWizard({
         taxYear,
         filerType,
         businessStructure,
-        currentStep: step,
-        wizardCompletionStep: furthestStepReached,
+        residencyStatus,
+        currentStep: navigationStep,
+        wizardCompletionStep: persistedCompletionStep,
         incomeSources,
         incomeSubcategorySelections,
         salaryPercentage,
@@ -1726,7 +1899,7 @@ export function FilingWizard({
       const stepResult = await updateFilingStepAction(
         draftId,
         nextIndex,
-        furthestStepReached,
+        persistedCompletionStep,
       );
 
       if (!stepResult.success) {
@@ -1735,13 +1908,32 @@ export function FilingWizard({
         return;
       }
 
+      // A reset from another request/tab may have won just before Continue.
+      // The server returns the authoritative boundary so the wizard can
+      // resync locally instead of showing a stale-state error.
+      if ("resynced" in stepResult && stepResult.resynced) {
+        const resetStep = stepResult.resetStep ?? navigationStep;
+        const resetCompletion = stepResult.completionStep ?? resetStep;
+        wizardCompletionStepRef.current = resetCompletion;
+        currentStepRef.current = resetStep;
+        setFurthestStepReached(resetCompletion);
+        setStep(resetStep);
+        setSavingDraft(false);
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        return;
+      }
+
       setSavingDraft(false);
     }
 
     setStep(nextIndex);
-    setFurthestStepReached((currentCompletionStep) =>
-      advanceWizardCompletion(currentCompletionStep, nextIndex),
+    const nextCompletionStep = advanceWizardCompletion(
+      navigationCompletionStep,
+      nextIndex,
     );
+    currentStepRef.current = nextIndex;
+    wizardCompletionStepRef.current = nextCompletionStep;
+    setFurthestStepReached(nextCompletionStep);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -1844,13 +2036,15 @@ export function FilingWizard({
       }
 
       const documentsStepIndex = setupSteps.length;
+      currentStepRef.current = documentsStepIndex;
+      wizardCompletionStepRef.current = documentsStepIndex;
       setStep(documentsStepIndex);
       setFurthestStepReached(documentsStepIndex);
 
       const stepResult = await updateFilingStepAction(
         createdDraftId,
         documentsStepIndex,
-        documentsStepIndex,
+        Math.max(0, documentsStepIndex - 1),
       );
 
       if (!stepResult.success) {
@@ -1895,6 +2089,7 @@ export function FilingWizard({
         bankAccounts={bankAccounts}
         salaryPercentage={salaryPercentage}
         taxYear={taxYear}
+        residencyStatus={residencyStatus}
         readinessCompleted={readinessCompleted}
         showStructureRow={showStructureRow}
         needsIncomeSourceSelection={needsIncomeSourceSelection}
@@ -1932,6 +2127,11 @@ export function FilingWizard({
           if (value !== 2026) setIncomeSubcategorySelections([]);
           setTaxYear(value);
         }}
+        onResidencyStatusChange={(value) => {
+          setFilingActionError(null);
+          resetForSetupChange();
+          setResidencyStatus(value);
+        }}
         onReadinessToggle={toggleReadiness}
       />
     );
@@ -1951,6 +2151,7 @@ export function FilingWizard({
         savingDocumentReviewId={savingDocumentReviewId}
         mappingDocumentId={mappingDocumentId}
         documentUploadError={documentUploadError}
+        profileSyncNote={profileSyncNote}
         uploadFileInputsRef={uploadFileInputsRef}
         triggerDocumentUpload={triggerDocumentUpload}
         handleDocumentFileSelected={handleDocumentFileSelected}
@@ -2054,6 +2255,7 @@ export function FilingWizard({
         generatingPacket={generatingPacket}
         generatingPdf={generatingPdf}
         packetError={packetError}
+        packetUnmappedSources={packetUnmappedSources}
         onGeneratePacket={handleGeneratePacket}
         onGeneratePdf={handleGeneratePacketPdf}
         irisLoginConfirmed={irisLoginConfirmed}
@@ -2081,6 +2283,7 @@ export function FilingWizard({
     bank_accounts: renderSetup,
     salary_split: renderSetup,
     tax_year: renderSetup,
+    residency: renderSetup,
     subcategory_imports: renderSetup,
     subcategory_pension: renderSetup,
     subcategory_property_rent: renderSetup,
@@ -2121,7 +2324,10 @@ export function FilingWizard({
         railItems={railItems}
         summaryRows={summaryRows}
         blockers={currentBlockers}
-        onRailItemClick={(index) => setStep(index)}
+        onRailItemClick={(index) => {
+          currentStepRef.current = index;
+          setStep(index);
+        }}
       >
         {filingActionError && (
           <div

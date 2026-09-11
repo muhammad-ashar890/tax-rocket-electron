@@ -41,6 +41,7 @@ function NewFilingPageContent() {
     const filerType = formData.get("filerType");
     const businessStructure = formData.get("businessStructure");
     const salaryPercentage = formData.get("salaryPercentage");
+    const residencyStatus = formData.get("residencyStatus");
     const currentStep = Number(formData.get("currentStep"));
     const wizardCompletionStep = Number(formData.get("wizardCompletionStep"));
     const incomeSubcategorySelections = formData
@@ -69,6 +70,10 @@ function NewFilingPageContent() {
       filerType: filerType ? String(filerType) : null,
       businessStructure: businessStructure ? String(businessStructure) : null,
       salaryPercentage: salaryPercentage ? String(salaryPercentage) : null,
+      residencyStatus:
+        residencyStatus === "resident" || residencyStatus === "non_resident"
+          ? residencyStatus
+          : null,
       currentStep:
         Number.isInteger(currentStep) && currentStep >= 0
           ? currentStep

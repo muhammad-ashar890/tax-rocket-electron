@@ -3,6 +3,9 @@ import { getServerSession } from "next-auth/next";
 import { ShieldCheck } from "lucide-react";
 
 import { getFbrConnectionAction } from "@/app/actions/fbr";
+import { toMoneyAmount } from "@/lib/money";
+import { isFbrAgentCompleted } from "@/lib/tax/filing-status";
+import { isLiveFilingEnabledByDeployment } from "@/lib/tax/fbr-agent-config";
 import FbrConnectClient from "@/components/tax/fbr-connect-client";
 import { Card, CardContent } from "@/components/ui/card";
 import { TaxRocketLogo } from "@/components/tax/taxrocket-logo";
@@ -10,7 +13,6 @@ import { WizardSummaryPanel } from "@/components/tax/wizard-ui";
 import { DashboardSidebar } from "@/components/tax/dashboard-sidebar";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { toMoneyAmount } from "@/lib/money";
 
 type FbrConnectPageProps = Readonly<{
   searchParams: {
@@ -41,6 +43,16 @@ export default async function FbrConnectPage({
             id: draftId,
             userId: user.id,
           },
+          include: {
+            // The final gate shows the numbers the taxpayer is about to submit;
+            // without this the standalone page renders the gate blind.
+            filingPackets: {
+              where: { approvalStatus: "APPROVED" },
+              orderBy: { version: "desc" },
+              take: 1,
+              select: { version: true, taxPayable: true, refundDue: true },
+            },
+          },
         })
       : null;
 
@@ -55,6 +67,11 @@ export default async function FbrConnectPage({
         ? "NEEDS_RULES"
         : "IN_PROGRESS"
     : null;
+
+  const connectionResult = draftId
+    ? await getFbrConnectionAction(draftId)
+    : { success: true as const, connection: null };
+  const connection = connectionResult.success ? connectionResult.connection : null;
 
   const summaryRows = draft
     ? [
@@ -71,12 +88,18 @@ export default async function FbrConnectPage({
           label: "Status",
           value: currentStatus?.replaceAll("_", " ") ?? "Not started",
         },
+        {
+          // Same centralized predicate the wizard rail uses — never re-list the
+          // agent's status strings here, or the two views drift again.
+          label: "FBR connection",
+          value: connection?.status
+            ? isFbrAgentCompleted(connection.status)
+              ? "Filing completed"
+              : connection.status.replaceAll("_", " ")
+            : "Not connected",
+        },
       ]
     : [];
-
-  const connectionResult = draftId
-    ? await getFbrConnectionAction(draftId)
-    : { success: true as const, connection: null };
 
   return (
     <div className="grid gap-6 lg:grid-cols-[220px_1fr]">
@@ -90,7 +113,7 @@ export default async function FbrConnectPage({
               FBR Connect
             </h1>
             <p className="text-xs text-muted-foreground">
-              Supervised filing hand-off to FBR Iris.
+              Secure filing with FBR.
             </p>
           </div>
         </div>
@@ -103,8 +126,8 @@ export default async function FbrConnectPage({
                   File with FBR
                 </h2>
                 <p className="text-sm text-muted-foreground sm:text-base">
-                  A local agent on your own computer connects securely to FBR
-                  Iris. You stay in control of every OTP, CAPTCHA, and PIN.
+                  Connect securely to FBR on your own computer. You stay in control of
+                  every OTP, CAPTCHA, and PIN.
                 </p>
               </div>
 
@@ -123,9 +146,19 @@ export default async function FbrConnectPage({
 
               <FbrConnectClient
                 draftId={draftId}
-                initialConnection={
-                  connectionResult.success ? connectionResult.connection : null
+                initialConnection={connection}
+                taxPayable={
+                  draft && draft.taxPayable != null
+                    ? toMoneyAmount(draft.taxPayable)
+                    : null
                 }
+                refundDue={
+                  draft && draft.refundDue != null
+                    ? toMoneyAmount(draft.refundDue)
+                    : null
+                }
+                packetVersion={draft?.filingPackets?.[0]?.version}
+                liveFilingEnabled={isLiveFilingEnabledByDeployment()}
               />
             </CardContent>
           </Card>

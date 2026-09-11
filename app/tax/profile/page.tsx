@@ -17,6 +17,7 @@ import {
 
 import { DashboardSidebar } from "@/components/tax/dashboard-sidebar";
 import { SUPPORTED_TAX_YEARS } from "@/lib/tax/tax-year-period";
+import { normalizeIdentityName } from "@/lib/tax/cnic-profile";
 import {
   getUserProfile,
   removeUserAvatarAction,
@@ -69,11 +70,31 @@ export default function ProfilePage() {
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Pre-fill form from Google Session and Database
+  // The database profile is authoritative after a CNIC approval. The session
+  // name is only an immediate fallback while the profile request is loading;
+  // it must never win over the name read from the user's CNIC.
   useEffect(() => {
     let isMounted = true;
 
-    // First, set what we immediately know from the session
+    const refreshProfileFromDatabase = async () => {
+      if (!session?.user) return;
+      const res = await getUserProfile();
+      if (!isMounted || !res.success || !res.user) return;
+
+      setForm((prev) => ({
+        ...prev,
+        ...res.user,
+        fullName: res.user.fullName?.trim() || prev.fullName,
+        email: res.user.email || prev.email,
+      }));
+      setNameLocked(
+        Boolean((res.user.fullName || session.user?.name || "").trim()),
+      );
+      if (res.user.image) {
+        setAvatarUrl(res.user.image);
+      }
+    };
+
     if (session?.user) {
       setForm((prev) => ({
         ...prev,
@@ -84,29 +105,20 @@ export default function ProfilePage() {
       if (session.user.image && !avatarUrl) {
         setAvatarUrl(session.user.image);
       }
-
-      // Then fetch saved data from DB (CNIC, NTN, etc.)
-      getUserProfile().then((res) => {
-        if (isMounted && res.success && res.user) {
-          setForm((prev) => ({
-            ...prev,
-            ...res.user, // Merge DB data
-            // ensure we don't overwrite name/email with empty strings if session has them
-            fullName: res.user.fullName || prev.fullName,
-            email: res.user.email || prev.email,
-          }));
-          setNameLocked(
-            Boolean((res.user.fullName || session.user?.name || "").trim()),
-          );
-          if (res.user.image) {
-            setAvatarUrl(res.user.image);
-          }
-        }
-      });
+      void refreshProfileFromDatabase();
     }
+
+    const handleProfileUpdated = () => {
+      void refreshProfileFromDatabase();
+    };
+    window.addEventListener("taxrocket-profile-updated", handleProfileUpdated);
 
     return () => {
       isMounted = false;
+      window.removeEventListener(
+        "taxrocket-profile-updated",
+        handleProfileUpdated,
+      );
     };
   }, [session, avatarUrl]);
 
@@ -337,17 +349,21 @@ export default function ProfilePage() {
                     placeholder="Enter full name"
                     value={form.fullName}
                     disabled={nameLocked}
-                    onChange={(e) => set("fullName", e.target.value)}
+                    onChange={(e) =>
+                      set("fullName", normalizeIdentityName(e.target.value))
+                    }
                   />
                   {errors.fullName ? (
                     <p className={errCls}>{errors.fullName}</p>
+                  ) : nameLocked ? (
+                    <p className={hintCls}>
+                      This name comes from your saved profile and is updated
+                      from an approved CNIC.
+                    </p>
                   ) : (
-                    !nameLocked && (
-                      <p className={hintCls}>
-                        No name found on your Google account — please type
-                        it.
-                      </p>
-                    )
+                    <p className={hintCls}>
+                      No name found on your account — please type it.
+                    </p>
                   )}
                 </div>
                 <div className="grid grid-cols-2 gap-3">

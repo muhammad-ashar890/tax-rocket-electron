@@ -19,7 +19,7 @@ const DOC_MAP: Record<
     {
       documentType: "salary_certificate",
       label: "Salary Certificate",
-      reason: "Required for salary income.",
+      reason: "Required for salary income and Section 149 tax-deducted evidence; the mapped amount feeds IRIS Tax Deductions row 64020004.",
     },
   ],
   pension: [

@@ -452,7 +452,7 @@ try {
   );
   includes(
     filingWizard,
-    "wizardCompletionStep: furthestStepReached",
+    "wizardCompletionStep: navigationCompletionStep",
     "Forward saves carry the expected completion boundary",
   );
   excludes(
@@ -495,17 +495,17 @@ try {
   );
   includes(
     filingAction,
-    "dataToUpdate.wizardCompletionStep = shrinkWizardCompletion(",
-    "Auto-save can only shrink the authoritative completion boundary",
+    "delete dataToUpdate.wizardCompletionStep",
+    "Ordinary auto-save does not write the completion boundary directly",
   );
   includes(
     filingAction,
-    "wizardCompletionStep: expectedCompletionStep",
+    "wizardCompletionStep: completionStep",
     "Forward completion uses compare-and-set race protection",
   );
   includes(
     filingAction,
-    "wizardCompletionStep: shrinkWizardCompletion(",
+    "wizardCompletionStep: resetTarget",
     "Explicit invalidation cannot re-grow a prior upstream reset",
   );
 

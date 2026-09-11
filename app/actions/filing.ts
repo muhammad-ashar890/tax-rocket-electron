@@ -79,6 +79,7 @@ type ParsedFilingDraftInput = {
   filerType: string | null;
   businessStructure: string | null;
   salaryPercentage: string | null;
+  residencyStatus: "resident" | "non_resident" | null;
   incomeSources: string[];
   incomeSubcategorySelections: Ty2026IncomeSelectionInput[];
   readinessCompleted: string[];
@@ -103,6 +104,20 @@ function parseFilingDraftInput(
   const salaryPercentageValue = String(
     formData.get("salaryPercentage") ?? "",
   ).trim();
+  const residencyStatusValue = String(
+    formData.get("residencyStatus") ?? "",
+  )
+    .trim()
+    .toLowerCase();
+  if (
+    residencyStatusValue &&
+    residencyStatusValue !== "resident" &&
+    residencyStatusValue !== "non_resident"
+  ) {
+    return {
+      error: "Residency status must be Resident or Non-Resident",
+    } as const;
+  }
 
   const incomeSources = formData.getAll("incomeSources").map(String);
   const rawSelections: Ty2026IncomeSelectionInput[] = [];
@@ -154,6 +169,11 @@ function parseFilingDraftInput(
     filerType: filerTypeValue || null,
     businessStructure: businessStructureValue || null,
     salaryPercentage: salaryPercentageValue || null,
+    residencyStatus:
+      residencyStatusValue === "resident" ||
+      residencyStatusValue === "non_resident"
+        ? residencyStatusValue
+        : null,
     incomeSources,
     incomeSubcategorySelections: normalizedSelections,
     readinessCompleted: formData.getAll("readinessCompleted").map(String),
@@ -238,6 +258,7 @@ async function upsertFilingDraft(
         filerType: input.filerType,
         businessStructure: input.businessStructure,
         salaryPercentage: input.salaryPercentage,
+        residencyStatus: input.residencyStatus,
         incomeSources: JSON.stringify(input.incomeSources),
         readinessChecks: JSON.stringify(input.readinessCompleted),
         currentStep,
@@ -252,6 +273,7 @@ async function upsertFilingDraft(
         filerType: input.filerType,
         businessStructure: input.businessStructure,
         salaryPercentage: input.salaryPercentage,
+        residencyStatus: input.residencyStatus,
         incomeSources: JSON.stringify(input.incomeSources),
         readinessChecks: JSON.stringify(input.readinessCompleted),
         currentStep,
@@ -362,6 +384,13 @@ export async function createFilingDraftAction(formData: FormData) {
     const input = parsedResult.value;
     if (!input.filerType) {
       return { success: false, error: "Select who is filing" };
+    }
+
+    if (!input.residencyStatus) {
+      return {
+        success: false,
+        error: "Select Resident or Non-Resident before creating the filing",
+      };
     }
 
     if (input.filerType === "my_business" && !input.businessStructure) {
@@ -733,11 +762,6 @@ export async function invalidateFilingPipelineAction(
       await tx.filingDraft.update({
         where: { id: ownedDraftId },
         data: {
-          currentStep: clampWizardLocation(currentDraft.currentStep, resetStep),
-          wizardCompletionStep: shrinkWizardCompletion(
-            currentDraft.wizardCompletionStep,
-            resetStep,
-          ),
           status: "IN_PROGRESS",
           ...(preserveReconciliation
             ? {}
@@ -760,6 +784,21 @@ export async function invalidateFilingPipelineAction(
           packetApprovalConfirmed: false,
           packetApprovalAt: null,
           packetApprovalByUserId: null,
+        },
+      });
+
+      // Shrink the boundary only when it is still above this reset point.
+      // If another reset already won, do not write its current location back
+      // downstream. This makes concurrent edits monotonic and preserves the
+      // most restrictive reset boundary.
+      await tx.filingDraft.updateMany({
+        where: {
+          id: ownedDraftId,
+          wizardCompletionStep: { gt: resetStep },
+        },
+        data: {
+          currentStep: clampWizardLocation(currentDraft.currentStep, resetStep),
+          wizardCompletionStep: resetStep,
         },
       });
 
@@ -821,33 +860,95 @@ export async function updateFilingStepAction(
 
     const userId = await getCurrentUserId();
     const ownedDraftId = await getOwnedDraftId(draftId, userId);
-    // The expected boundary makes forward navigation compare-and-set. If an
-    // upstream reset wins the race first, this stale request cannot re-grow
-    // completion and resurrect downstream checkmarks.
-    const update = await prisma.filingDraft.updateMany({
-      where: {
-        id: ownedDraftId,
-        wizardCompletionStep: expectedCompletionStep,
-      },
-      data: {
-        currentStep: newStep,
-        wizardCompletionStep: advanceWizardCompletion(
-          expectedCompletionStep,
+
+    // Read the boundary inside the same transaction as the write. A reset may
+    // finish between the draft auto-save and this action; in that case the
+    // lower boundary is authoritative and the wizard should resync there, not
+    // expose a compare-and-set error to the user. A boundary that is ahead is
+    // safe to keep: another tab has simply progressed farther.
+    const update = await prisma.$transaction(async (tx) => {
+      // Keep the compare-and-set protection, but recover instead of returning
+      // the old stale-state error. The conditional write also protects the
+      // read from a reset that commits between the read and the write.
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const currentDraft = await tx.filingDraft.findUnique({
+          where: { id: ownedDraftId },
+          select: { currentStep: true, wizardCompletionStep: true },
+        });
+        if (!currentDraft) {
+          return { success: false as const, error: "Filing draft not found" };
+        }
+
+        if (currentDraft.wizardCompletionStep < expectedCompletionStep) {
+          const resetStep = currentDraft.wizardCompletionStep;
+          const safeCurrentStep = clampWizardLocation(
+            currentDraft.currentStep,
+            resetStep,
+          );
+          await tx.filingDraft.updateMany({
+            where: {
+              id: ownedDraftId,
+              wizardCompletionStep: currentDraft.wizardCompletionStep,
+            },
+            data: { currentStep: safeCurrentStep },
+          });
+          return {
+            success: true as const,
+            resynced: true as const,
+            resetStep,
+            completionStep: resetStep,
+          };
+        }
+
+        const completionStep = advanceWizardCompletion(
+          currentDraft.wizardCompletionStep,
           newStep,
-        ),
-      },
-    });
-    if (update.count !== 1) {
+        );
+        const write = await tx.filingDraft.updateMany({
+          where: {
+            id: ownedDraftId,
+            wizardCompletionStep: currentDraft.wizardCompletionStep,
+          },
+          data: {
+            currentStep: newStep,
+            wizardCompletionStep: completionStep,
+          },
+        });
+        if (write.count === 1) {
+          return { success: true as const, completionStep };
+        }
+        // A concurrent reset or forward navigation changed the boundary.
+        // Re-read it and handle the new authoritative value on the next pass.
+      }
+
+      // The short retry loop is intentionally user-safe: if another request
+      // keeps moving the boundary, resync to the latest persisted location
+      // rather than showing a stale compare-and-set error.
+      const latestDraft = await tx.filingDraft.findUnique({
+        where: { id: ownedDraftId },
+        select: { currentStep: true, wizardCompletionStep: true },
+      });
+      if (!latestDraft) {
+        return { success: false as const, error: "Filing draft not found" };
+      }
+      const resetStep = Math.min(
+        latestDraft.currentStep,
+        latestDraft.wizardCompletionStep,
+      );
       return {
-        success: false,
-        error: "Filing details changed. Please continue from the reset step.",
+        success: true as const,
+        resynced: true as const,
+        resetStep,
+        completionStep: latestDraft.wizardCompletionStep,
       };
-    }
+    });
+
+    if (!update.success) return update;
 
     revalidatePath("/tax/dashboard");
     revalidatePath("/tax/filings");
 
-    return { success: true };
+    return update;
   } catch (error) {
     console.error("Error updating filing step:", error);
     return { success: false, error: "Failed to update step" };
@@ -979,6 +1080,7 @@ export type FilingDraftUpdateInput = Readonly<{
   filerType?: string | null;
   businessStructure?: string | null;
   salaryPercentage?: string | null;
+  residencyStatus?: "resident" | "non_resident" | null;
   currentStep?: number;
   wizardCompletionStep?: number;
   incomeSources?: string[];
@@ -1000,6 +1102,7 @@ export async function updateFilingDraftAction(
       filerType?: string | null;
       businessStructure?: string | null;
       salaryPercentage?: string | null;
+      residencyStatus?: "resident" | "non_resident" | null;
       currentStep?: number;
       wizardCompletionStep?: number;
       incomeSources?: string;
@@ -1027,6 +1130,19 @@ export async function updateFilingDraftAction(
     }
     if (formData.salaryPercentage !== undefined) {
       dataToUpdate.salaryPercentage = formData.salaryPercentage || null;
+    }
+    if (formData.residencyStatus !== undefined) {
+      if (
+        formData.residencyStatus !== null &&
+        formData.residencyStatus !== "resident" &&
+        formData.residencyStatus !== "non_resident"
+      ) {
+        return {
+          success: false,
+          error: "Residency status must be Resident or Non-Resident",
+        };
+      }
+      dataToUpdate.residencyStatus = formData.residencyStatus || null;
     }
     if (formData.currentStep !== undefined) {
       if (!Number.isInteger(formData.currentStep) || formData.currentStep < 0) {
@@ -1062,6 +1178,7 @@ export async function updateFilingDraftAction(
       where: { id: ownedDraftId },
       select: {
         taxYear: true,
+        residencyStatus: true,
         wizardCompletionStep: true,
         incomeSources: true,
         incomeSelections: {
@@ -1168,19 +1285,22 @@ export async function updateFilingDraftAction(
       previousIncomeSources.some(
         (source, index) => source !== nextIncomeSources[index],
       );
-    const classificationChanged = selectionsChanged || sourcesChanged;
+    const residencyChanged =
+      formData.residencyStatus !== undefined &&
+      formData.residencyStatus !== currentDraft.residencyStatus;
+    const classificationChanged =
+      selectionsChanged || sourcesChanged || residencyChanged;
     // Auto-save may race with the explicit pipeline invalidation request.
-    // Persisting only a shrink here makes the reset boundary authoritative:
-    // stale/later saves cannot re-grow it, while normal Back navigation keeps
-    // the already-reached boundary unchanged.
+    // Never put the completion boundary in the ordinary update below: an old
+    // request could otherwise write a stale, larger value after a reset. The
+    // boundary/current-step write is done later with a guarded updateMany.
     const requestedCompletionReset =
       formData.wizardCompletionStep ??
       (classificationChanged ? formData.currentStep : undefined);
+    const currentStepToSave = dataToUpdate.currentStep;
     if (requestedCompletionReset !== undefined) {
-      dataToUpdate.wizardCompletionStep = shrinkWizardCompletion(
-        currentDraft.wizardCompletionStep,
-        requestedCompletionReset,
-      );
+      delete dataToUpdate.currentStep;
+      delete dataToUpdate.wizardCompletionStep;
     }
 
     await prisma.$transaction(async (tx) => {
@@ -1246,6 +1366,55 @@ export async function updateFilingDraftAction(
             completedAt: null,
           },
         });
+      }
+
+      if (requestedCompletionReset !== undefined) {
+        // A classification/document edit may request a reset at the current
+        // step. If another reset already lowered the boundary, this condition
+        // fails and the later request cannot move the boundary or location
+        // back downstream.
+        const resetTarget = Math.min(
+          currentDraft.wizardCompletionStep,
+          requestedCompletionReset,
+          classificationChanged
+            ? (formData.currentStep ?? currentDraft.wizardCompletionStep)
+            : currentDraft.wizardCompletionStep,
+        );
+        const guardedCurrentStep =
+          currentStepToSave === undefined
+            ? undefined
+            : clampWizardLocation(currentStepToSave, resetTarget);
+
+        if (resetTarget < currentDraft.wizardCompletionStep) {
+          await tx.filingDraft.updateMany({
+            where: {
+              id: ownedDraftId,
+              wizardCompletionStep: { gt: resetTarget },
+            },
+            data: {
+              wizardCompletionStep: resetTarget,
+              ...(guardedCurrentStep === undefined
+                ? {}
+                : { currentStep: guardedCurrentStep }),
+            },
+          });
+        } else if (currentStepToSave !== undefined) {
+          // Ordinary Back navigation still persists the location, but only if
+          // the boundary is the one read at the start of this request. A
+          // concurrent reset then wins without being overwritten.
+          await tx.filingDraft.updateMany({
+            where: {
+              id: ownedDraftId,
+              wizardCompletionStep: currentDraft.wizardCompletionStep,
+            },
+            data: {
+              currentStep: clampWizardLocation(
+                currentStepToSave,
+                currentDraft.wizardCompletionStep,
+              ),
+            },
+          });
+        }
       }
     });
 

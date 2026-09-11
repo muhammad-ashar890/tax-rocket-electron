@@ -14,6 +14,11 @@ import {
   detectImageSignature,
   sanitizeDownloadFileName,
 } from "@/lib/safe-file-types";
+import { parseTaxpayerDateOfBirth } from "@/lib/tax/taxpayer-age";
+import {
+  formatCnicNumber,
+  normalizeIdentityName,
+} from "@/lib/tax/cnic-profile";
 import { isSupportedTaxYear } from "@/lib/tax/tax-year-period";
 
 export async function getUserProfile() {
@@ -33,7 +38,7 @@ export async function getUserProfile() {
         fullName: user.name || "",
         email: user.email || "",
         image: user.image || "",
-        cnic: user.cnic || "",
+        cnic: user.cnic ? formatCnicNumber(user.cnic) : "",
         ntn: user.ntn || "",
         phone: user.phone || "",
         address: user.address || "",
@@ -234,7 +239,29 @@ export async function updateUserProfile(data: {
     const session = await getServerSession(authOptions);
     if (!session?.user?.email) return { success: false, error: "Unauthorized" };
 
-    const dob = data.dateOfBirth ? new Date(data.dateOfBirth) : null;
+    const normalizedName = normalizeIdentityName(data.fullName);
+    if (!normalizedName || !/\p{L}/u.test(normalizedName)) {
+      return { success: false, error: "Enter a valid name using letters only" };
+    }
+
+    const normalizedCnic = data.cnic ? formatCnicNumber(data.cnic) : "";
+    if (data.cnic && !/^\d{5}-\d{7}-\d$/.test(normalizedCnic)) {
+      return {
+        success: false,
+        error: "Enter a valid 13-digit CNIC in XXXXX-XXXXXXX-X format",
+      };
+    }
+
+    const dob = data.dateOfBirth
+      ? parseTaxpayerDateOfBirth(data.dateOfBirth)
+      : null;
+    if (data.dateOfBirth && !dob) {
+      return {
+        success: false,
+        error: "Enter a valid date of birth",
+      };
+    }
+
     const taxYear = data.taxYear ? parseInt(data.taxYear, 10) : null;
 
     if (taxYear !== null && !isSupportedTaxYear(taxYear)) {
@@ -247,8 +274,8 @@ export async function updateUserProfile(data: {
     await prisma.user.update({
       where: { email: session.user.email },
       data: {
-        name: data.fullName,
-        cnic: data.cnic || null,
+        name: normalizedName,
+        cnic: normalizedCnic || null,
         ntn: data.ntn || null,
         phone: data.phone || null,
         dateOfBirth: dob,

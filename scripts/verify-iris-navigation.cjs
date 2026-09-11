@@ -288,6 +288,17 @@ function functionSource(name) {
   return found.getText(ast);
 }
 function sandbox(names, extras = {}) {
+  // Both real-portal flows now read the effective autofill mode through one
+  // resolver, so any test that exercises `getRealAutofillMode` must be given the
+  // resolver too — otherwise the sandbox throws on a symbol the shipped code
+  // defines at module scope.
+  const autofillFlows = ["runLocalTaxAssistedFilingFlow", "runLocalTaxDryRunFlow"];
+  if (
+    autofillFlows.some((flow) => names.includes(flow)) &&
+    !names.includes("resolveAutofillMode")
+  ) {
+    names = [...names, "resolveAutofillMode"];
+  }
   const ctx = vm.createContext({
     console,
     Promise,
@@ -521,15 +532,19 @@ test("legacy menu helper clicks the successfully resolved selector", async () =>
 test("context failures are reported and logged instead of leaving a job silently queued", async () => {
   const calls = [];
   const ctx = sandbox(["processLocalJob"], {
+    buildPortalEvidenceDiagnostics: navigation.buildPortalEvidenceDiagnostics,
     loadLocalJobContext: async () => {
       throw new Error("Queued approved packet unavailable");
     },
     saveFailureDump: async () => null,
     captureDomEvidence: async () => ({ frames: [] }),
     workerWindow: null,
+    lastSectionTour: null,
     activeJobExecutionLog: null,
     STANDARD_LOG_STEPS: { FAILURE: "failure" },
     classifyRecoverableAssistedIssue: () => null,
+    // The REAL evidence builder, not a stub: a job that fails must still record
+    // what the capture proved (here: nothing) instead of inventing drift.
     buildSelectorDriftDiagnostics: () => null,
     getSelectorBundleSignal: () => null,
     buildRecoveryActions: () => [],
@@ -660,6 +675,55 @@ const gate = ({ checked = false, residency = false, enabled = false } = {}) =>
 </div></app-summary-economic-transactions>
 <script>window.actions=[]</script></body></html>`;
 
+// ─── P3: what actually proves "the return is open" ───────────────────────────
+// Structure taken from `IRIS 2.0 form3.html`: app-nitr-workflow > container-fluid
+// > ... > app-wf-header, with Year / 114(1) / Registration No: inside the header.
+
+const returnWorkspace = () =>
+  `<!doctype html><html><body><app-nitr-workflow class="ng-star-inserted"><div class="container-fluid">
+<div class="row"><div class="col-sm-12"><app-wf-header><div class="row">
+<div class="col-9"><div class="col-12"><h6 class="font-purple margin-0">Year 2026</h6>
+<p class="margin-0 font-13"><span> 114(1) (Return of Income filed voluntarily for complete year) </span></p></div></div>
+<div class="col-6"><p class="margin-0"><b>Full Name:</b> PRIVATE TEST TAXPAYER NAME</p>
+<p class="margin-0"><b>Registration No:</b> 4220144218163</p></div>
+</div></app-wf-header></div></div>
+<div class="tableRows dataRow" id="1009"><div class="data-middle-child-wapper"><input type="text" value="0"></div></div>
+</div></app-nitr-workflow><script>window.actions=[]</script></body></html>`;
+
+test("P3: the return-workspace probe separates the gate from an open return", async () => {
+  await withPage(returnWorkspace(), async (page, windowInstance) => {
+    const out = await windowInstance.webContents.executeJavaScript(
+      navigation.RETURN_WORKSPACE_PROBE,
+    );
+    assert.equal(out.returnWorkspace, true, JSON.stringify(out));
+    assert.deepEqual(out.evidence, {
+      year: true,
+      returnDocument: true,
+      registration: true,
+    });
+    assert.ok(out.inputs >= 1, "the entered cell is counted for context");
+  });
+
+  await withPage(gate(), async (page, windowInstance) => {
+    const out = await windowInstance.webContents.executeJavaScript(
+      navigation.RETURN_WORKSPACE_PROBE,
+    );
+    // This is the exact false positive the count-visible-inputs readiness had:
+    // the gate is full of inputs but is NOT a return that can be filled.
+    assert.equal(out.inputs > 0, true, "the gate does expose visible inputs");
+    assert.equal(out.returnWorkspace, false, JSON.stringify(out));
+    assert.equal(out.reason, "app-nitr-workflow-absent");
+  });
+
+  await withPage(dashboard(), async (page, windowInstance) => {
+    const out = await windowInstance.webContents.executeJavaScript(
+      navigation.RETURN_WORKSPACE_PROBE,
+    );
+    assert.equal(out.returnWorkspace, false, "the dashboard is not a return either");
+    assert.equal(out.reason, "app-nitr-workflow-absent");
+  });
+});
+
 test("Phase 1.5b: the unanswered gate is recognised, authenticated, and lists what is missing", async () => {
   await withPage(gate(), async (page, win) => {
     const steps = [];
@@ -746,6 +810,13 @@ test("Phase 1.5: the in-page stage classifier mirror cannot drift from the modul
     { prompts: ["Resident"], expected: "residency" },
     { actions: ["Accept and Continue"], expected: "accept_continue" },
     { prompts: ["Period"], actions: ["Continue"], expected: "period" },
+    // The live 2026-09-10 dialog. Its caption is "Tax Period", which is what the
+    // agent used to miss, so it stopped at a dialog with nothing left to type.
+    {
+      prompts: ["Person", "Tax Period", "Normal Return (Ind/AOP/COY)"],
+      actions: ["Cancel", "Continue"],
+      expected: "period",
+    },
     { prompts: ["Something else"], expected: null },
     {
       documentPresent: true,
@@ -1058,7 +1129,14 @@ test("Phase 2a: autofill walks each owning section and never fills the last-view
   const visited = [];
   const filled = [];
   const ctx = sandbox(["runRealIrisAutofill"], {
-    ensureWorkerWindow: async () => ({ isDestroyed: () => false }),
+    ensureWorkerWindow: async () => ({
+      isDestroyed: () => false,
+      // Autofill now proves the return workspace is open before it touches a
+      // section, so the stub window has to answer that probe.
+      webContents: {
+        executeJavaScript: async () => ({ returnWorkspace: true, inputs: 12 }),
+      },
+    }),
     launchState: { accountReference: "1234567890123" },
     activeJobExecutionLog: null,
     pushStatus: () => {},
@@ -1126,7 +1204,14 @@ test("Phase 2a: autofill walks each owning section and never fills the last-view
 
 test("Phase 2a: a section that will not open leaves its fields untouched", async () => {
   const ctx = sandbox(["runRealIrisAutofill"], {
-    ensureWorkerWindow: async () => ({ isDestroyed: () => false }),
+    ensureWorkerWindow: async () => ({
+      isDestroyed: () => false,
+      // Autofill now proves the return workspace is open before it touches a
+      // section, so the stub window has to answer that probe.
+      webContents: {
+        executeJavaScript: async () => ({ returnWorkspace: true, inputs: 12 }),
+      },
+    }),
     launchState: { accountReference: "1234567890123" },
     activeJobExecutionLog: null,
     pushStatus: () => {},
@@ -1208,4 +1293,503 @@ test("Phase 2a: navigateToSection unlocks the navigation allowlist (openReturn)"
       true,
       "every probe must carry openReturn or portalProbe refuses the click",
     );
+});
+
+// ─── P2: drift must be EVIDENCE, not a substring ────────────────────────────
+// Shapes copied from the operator's live capture (latest-portal-inspection.json):
+// every section "captured" with rows, six of seven `structure_changed`.
+
+const liveTourSections = (overrides = {}) => ({
+  sections: [
+    { id: "salary", status: "captured", transition: "salary_verified", rows: new Array(8), grids: [{}], mappingVerified: true },
+    { id: "tax_deductions", status: "captured", transition: "structure_changed", rows: new Array(9), grids: [{}, {}, {}], mappingVerified: false },
+    { id: "allowance_credits", status: "captured", transition: "structure_changed", rows: new Array(3), grids: [{}, {}, {}], mappingVerified: false },
+    { id: "withholding", status: "captured", transition: "structure_changed", rows: new Array(7), grids: [{}, {}, {}, {}], mappingVerified: false },
+    { id: "computations", status: "captured", transition: "structure_changed", rows: new Array(7), grids: [{}], mappingVerified: false },
+    { id: "payment", status: "captured", transition: "structure_changed", rows: [], grids: [], mappingVerified: false },
+    { id: "attachment", status: "captured", transition: "structure_changed", rows: [], grids: [], mappingVerified: false },
+    ...(overrides.extraSections || []),
+  ],
+});
+
+test("P2: the live pilot's refusal run is NOT selector drift", () => {
+  const build = navigation.buildPortalEvidenceDiagnostics;
+  const ctx = sandbox([
+    "buildSelectorDriftDiagnostics",
+    "buildMappingRefusalDiagnostics",
+    "classifyRecoverableAssistedIssue",
+    "looksLikeSessionReconnectNeeded",
+    "inferLikelySelectorGroup",
+    "getSelectorBundleSignal",
+  ]);
+
+  const evidence = build(liveTourSections());
+  assert.equal(evidence.state, "structure_unverified", JSON.stringify(evidence));
+  assert.deepEqual(evidence.drifted, [], "rows were present everywhere → no drift");
+  // payment/attachment render no grids by design: they must not count as drift.
+  assert.ok(!evidence.sections.some((s) => s.id === "payment" && evidence.drifted.includes("payment")));
+
+  const refusalLog = [
+    { step: "real_autofill_skip", detail: '1000 "Total Income from Salary" -> column_disabled (column: Total Amount)' },
+    { step: "real_autofill_skip", detail: '1009 "Pay, Wages" -> column_disabled (column: Total Amount)' },
+    { step: "real_autofill_skip", detail: '5028 "Other Receipts" -> row_not_found' },
+  ];
+  const classified = ctx.classifyRecoverableAssistedIssue(
+    'Field fill failed: selector "#1000 input" matched nothing.',
+    refusalLog,
+    {},
+    evidence,
+  );
+  assert.equal(classified.requiredAction, "portal_mapping_review");
+  assert.equal(classified.selectorDriftDiagnostics, null);
+  assert.equal(classified.mappingRefusalDiagnostics.refusalCount, 3);
+
+  // Even with no refusals, the mere word "selector" plus an intact structure
+  // must not produce a drift verdict.
+  const driftless = ctx.buildSelectorDriftDiagnostics(
+    'selector "#1000 input" did not resolve',
+    [],
+    {},
+    evidence,
+  );
+  assert.equal(driftless, null, "intact structure ⇒ not drift, whatever the message says");
+});
+
+test("P2: rows that must exist but are missing IS drift, and the message is specific", () => {
+  const build = navigation.buildPortalEvidenceDiagnostics;
+  const ctx = sandbox([
+    "buildSelectorDriftDiagnostics",
+    "buildMappingRefusalDiagnostics",
+    "classifyRecoverableAssistedIssue",
+    "looksLikeSessionReconnectNeeded",
+    "inferLikelySelectorGroup",
+    "getSelectorBundleSignal",
+  ]);
+  const collapsed = build(
+    liveTourSections({
+      extraSections: [
+        { id: "salary", status: "captured", transition: "structure_changed", rows: [], grids: [], mappingVerified: false },
+      ],
+    }),
+  );
+  assert.equal(collapsed.state, "rows_missing");
+  assert.deepEqual(collapsed.drifted, ["salary"]);
+
+  const drift = ctx.buildSelectorDriftDiagnostics(
+    "Timed out waiting for selector #1009",
+    [],
+    { job: { payload: { selectorBundle: { bundleId: "b1" } } } },
+    collapsed,
+  );
+  assert.equal(drift.reasonCode, "selector_drift_confirmed_by_capture");
+  assert.match(drift.recommendedActions.join(" "), /rendered zero rows/s);
+
+  // No capture at all → honest "suspected", never "confirmed".
+  const blind = ctx.buildSelectorDriftDiagnostics(
+    "Timed out waiting for selector #1009",
+    [],
+    {},
+    build(null),
+  );
+  assert.equal(blind.reasonCode, "selector_drift_suspected");
+  // main.js must not grow its own copy of the section rules.
+  assert.match(mainSource, /const buildPortalEvidenceDiagnostics =\s*irisNavigation\.buildPortalEvidenceDiagnostics;/);
+  assert.ok(
+    !/const ROW_BEARING_SECTION_IDS = \[/.test(mainSource),
+    "row-bearing section rules live in iris-navigation.js only",
+  );
+});
+
+// ─── P4/P3: the config flag is a kill switch, live needs verified structure ──
+
+test("P4.2: livePilot.automaticFilingEnabled downgrades live to dry", () => {
+  // The REAL getRealAutofillMode, fed by env — the resolver is worthless if its
+  // own input is stubbed away.
+  const env = { TAXROCKET_REAL_AUTOFILL: "live" };
+  const ctx = sandbox(["resolveAutofillMode", "getRealAutofillMode"], {
+    process: { env },
+  });
+  const blocked = ctx.resolveAutofillMode({
+    taxAutomationConfig: { livePilot: { automaticFilingEnabled: false } },
+  });
+  assert.equal(blocked.mode, "dry");
+  assert.equal(blocked.downgradedFrom, "live");
+  assert.match(blocked.note, /automaticFilingEnabled=false/);
+
+  const allowed = ctx.resolveAutofillMode({
+    taxAutomationConfig: { livePilot: { automaticFilingEnabled: true } },
+  });
+  assert.equal(allowed.mode, "live", "the flag never enables writes on its own");
+  assert.equal(allowed.downgradedFrom, null);
+
+  // Absent/null must not block — the mock and older bundles omit the whole shape.
+  for (const context of [
+    {},
+    { taxAutomationConfig: {} },
+    { taxAutomationConfig: { livePilot: { automaticFilingEnabled: null } } },
+  ]) {
+    assert.equal(
+      ctx.resolveAutofillMode(context).mode,
+      "live",
+      `${JSON.stringify(context)} must leave the env var authoritative`,
+    );
+  }
+
+  // "off" is never upgraded, and dry is never downgraded further.
+  env.TAXROCKET_REAL_AUTOFILL = "off";
+  const off = sandbox(["resolveAutofillMode", "getRealAutofillMode"], {
+    process: { env },
+  }).resolveAutofillMode({
+    taxAutomationConfig: { livePilot: { automaticFilingEnabled: true } },
+  });
+  assert.equal(off.mode, "off");
+});
+
+test("P1 gate: live refuses a section the tour could not verify, dry still reports it", async () => {
+  const tour = {
+    complete: true,
+    sections: [
+      {
+        id: "salary",
+        rows: [{ code: "1009" }],
+        mappingVerified: false,
+        status: "captured",
+        transition: "structure_changed",
+      },
+    ],
+  };
+  const makeCtx = (fillerStub) =>
+    sandbox(["runRealIrisAutofill"], {
+      ensureWorkerWindow: async () => ({
+        isDestroyed: () => false,
+        webContents: {
+          executeJavaScript: async () => ({ returnWorkspace: true, inputs: 12 }),
+        },
+      }),
+      launchState: { accountReference: "1234567890123" },
+      activeJobExecutionLog: null,
+      pushStatus: () => {},
+      captureWindowScreenshot: async () => null,
+      lastSectionTour: tour,
+      irisNavigation: {
+        ...navigation,
+        navigateToSection: async () => ({ ok: true, status: "switched" }),
+      },
+      irisRowFiller: {
+        FILL_STATUS: {
+          FILLED: "filled",
+          ROW_NOT_FOUND: "row_not_found",
+          UNVERIFIED_TARGET: "unverified_target",
+        },
+        summarise: (results) => ({
+          total: results.length,
+          filled: results.filter((r) => r.status === "filled").length,
+          skipped: results.filter((r) => r.status !== "filled").length,
+        }),
+        describeFillSummary: () => "summary",
+        ...fillerStub,
+      },
+    });
+  const packet = () => ({
+    filingPacket: {
+      taxYear: 2026,
+      snapshot: { portalFieldMap: [{ irisCode: "1009", column: "Total Amount", value: "1000" }] },
+    },
+  });
+
+  let fillCalls = 0;
+  const live = await makeCtx({
+    fillIrisRows: async () => {
+      fillCalls += 1;
+      return { results: [], summary: {} };
+    },
+  }).runRealIrisAutofill(packet(), { id: "job-1" }, "live");
+  assert.equal(fillCalls, 0, "live must not inject into an unverified section");
+  assert.equal(live.result.results[0].status, "unverified_target");
+  assert.equal(live.result.summary.filled, 0);
+
+  let dryCalls = 0;
+  await makeCtx({
+    fillIrisRows: async () => {
+      dryCalls += 1;
+      return { results: [], summary: {} };
+    },
+  }).runRealIrisAutofill(packet(), { id: "job-1" }, "dry");
+  assert.equal(dryCalls, 1, "a dry run exists precisely to inspect unverified targets");
+});
+
+test("P3.2: real-portal readiness never falls through to the mock-era selector chain", () => {
+  assert.match(
+    mainSource,
+    /if \(realPortalMode\) \{[\s\S]{0,700}?return \{\s*steps: iris2\.steps,\s*formReady: false,/,
+    "the real-portal branch must return, not fall through",
+  );
+  assert.ok(
+    !/Fall through to the legacy chain/.test(mainSource),
+    "the old fall-through comment/behaviour is gone",
+  );
+});
+
+test("P4.4: mapping gaps ride from the packet to the approval screen", () => {
+  const action = fs
+    .readFileSync(path.join(__dirname, "../app/actions/packet.ts"), "utf8")
+    .replace(/\s+/g, " ");
+  assert.match(
+    action,
+    /const mappingGaps = \(snapshot\.portalFieldMap && snapshot\.portalFieldMap\.mappingGaps\) \|\| null;/,
+    "generate must read the gaps off the snapshot it just built",
+  );
+  assert.match(
+    action,
+    /packet: \{ \.\.\.serializePacketMoney\(packet\), mappingGaps, coverage \}/,
+    "generate must return the gaps and the coverage verdict with them",
+  );
+  // The override only means anything if the record of it travels with the packet.
+  assert.match(
+    action,
+    /const coverage = coverageGate\.coverage;/,
+    "the verdict the gate reached is the verdict the snapshot stored",
+  );
+  assert.match(
+    action,
+    /mappingGaps = snapshot\.portalFieldMap\?\.mappingGaps \?\? null;/,
+    "fetch must re-read them from the stored snapshot",
+  );
+
+  const config = fs
+    .readFileSync(
+      path.join(__dirname, "../components/tax/filing/config/filing-wizard-config.ts"),
+      "utf8",
+    )
+    .replace(/\s+/g, " ");
+  assert.match(config, /mappingGaps\?: PortalMappingGaps \| null;/, "summary type carries the gaps");
+
+  const step = fs
+    .readFileSync(path.join(__dirname, "../components/tax/filing/wizard-packet-step.tsx"), "utf8")
+    .replace(/\s+/g, " ");
+  assert.match(step, /<PortalMappingGapNotice gaps=\{filingPacket\?\.mappingGaps\} \/>/);
+  assert.match(step, /Manual entry still required/);
+});
+
+test("P3.4: autofill holds when the return workspace cannot be proven", async () => {
+  let fillCalls = 0;
+  let sectionVisits = 0;
+  const probes = [];
+  const ctx = sandbox(["runRealIrisAutofill"], {
+    ensureWorkerWindow: async () => ({
+      isDestroyed: () => false,
+      webContents: {
+        executeJavaScript: async (script) => {
+          probes.push(String(script));
+          return { returnWorkspace: false, reason: "app-nitr-workflow-absent" };
+        },
+      },
+    }),
+    launchState: { accountReference: "1234567890123" },
+    activeJobExecutionLog: null,
+    pushStatus: () => {},
+    captureWindowScreenshot: async () => null,
+    lastSectionTour: tourFixture,
+    irisNavigation: {
+      ...navigation,
+      navigateToSection: async () => {
+        sectionVisits += 1;
+        return { ok: true, status: "switched" };
+      },
+    },
+    irisRowFiller: {
+      FILL_STATUS: { FILLED: "filled", ROW_NOT_FOUND: "row_not_found" },
+      summarise: (results) => ({ total: results.length, filled: 0, skipped: results.length }),
+      describeFillSummary: () => "summary",
+      fillIrisRows: async () => {
+        fillCalls += 1;
+        return { results: [], summary: {} };
+      },
+    },
+  });
+
+  const held = await ctx.runRealIrisAutofill(
+    {
+      filingPacket: {
+        taxYear: 2026,
+        snapshot: {
+          portalFieldMap: [
+            { irisCode: "1009", column: "Total Amount", value: "1000" },
+          ],
+        },
+      },
+    },
+    { id: "job-1" },
+    "dry",
+  );
+
+  assert.equal(held.paused, true);
+  assert.equal(held.pauseAction, "portal_state_confirmation");
+  assert.equal(fillCalls, 0, "nothing may be written into an unproven page");
+  assert.equal(sectionVisits, 0, "the section tour is pointless off the return");
+  assert.ok(
+    probes.length === 1 && /app-nitr-workflow/.test(probes[0]),
+    "the shared RETURN_WORKSPACE_PROBE is what decided this",
+  );
+  assert.match(
+    held.executionLog.map((entry) => entry.detail).join(" "),
+    /nothing was filled and no section tour was attempted/,
+  );
+
+  // The flow must turn that hold into a job the operator can act on, not a
+  // "completed" run that filled nothing.
+  const statuses = [];
+  const flowCtx = sandbox(
+    [
+      "runLocalTaxAssistedFilingFlow",
+      "finishNavigationOnly",
+      "resolveAutofillMode",
+      "getRealAutofillMode",
+    ],
+    {
+      process: { env: { TAXROCKET_REAL_AUTOFILL: "live" } },
+      realPortalMode: true,
+      updateLocalJobStatus: async (_id, status) => statuses.push(status),
+      runLocalIrisNavigationCheck: async () => ({ paused: false, executionLog: [], result: {} }),
+      runRealIrisAutofill: async () => ({
+        paused: true,
+        pauseAction: "portal_state_confirmation",
+        pauseMessage: "Return workspace not proven.",
+        executionLog: [],
+        result: {},
+      }),
+    },
+  );
+  const flowOut = await flowCtx.runLocalTaxAssistedFilingFlow({}, { id: "job-1" });
+  assert.equal(flowOut.paused, true);
+  assert.deepEqual(statuses, ["awaiting_user_action"], "the hold is recorded, not swallowed");
+});
+
+// The dialog from the operator's screenshot, reproduced structurally: Material
+// renders field captions as <mat-label> (never a bare <label>), the Person box is
+// disabled, Tax Period is already filled by IRIS, and the dialog sits on its own
+// overlay backdrop. Every one of those facts defeated a different guard.
+const returnSetupDialog = ({ period = "2026", filled = true, extra = "" } = {}) =>
+  `
+<div class="modal-backdrop" id="backdrop"></div>
+<section role="dialog" class="mat-mdc-dialog-container">
+<h2 class="mdc-dialog__title">Normal Return (Ind/AOP/COY)</h2>
+<div class="mat-mdc-form-field"><mat-label>Person</mat-label>
+<input class="mdc-text-field__input" value="4220144218163" disabled></div>
+<div class="mat-mdc-form-field"><mat-label>Tax Period</mat-label>
+<input class="mdc-text-field__input" id="period" value="${filled ? period : ""}"></div>
+${extra}
+<button onclick="actions.push('CANCEL')">Cancel</button>
+<button onclick="actions.push('CONTINUE')">Continue</button>
+</section>`;
+
+const setupProbeOptions = {
+  taxYear: 2026,
+  taxpayerIdentifier: "4220144218163",
+  openReturn: true,
+};
+
+test("a prefilled TY2026 new-return dialog is recognised as a setup stage", async () => {
+  await withPage(dashboard(returnSetupDialog()), async (page, win) => {
+    const frame = (await navigation.probeFrames(win, { taxYear: 2026 })).frames[0];
+    assert.equal(
+      frame.newReturnSetup.prompts.includes("Tax Period"),
+      true,
+      "the caption must reach the classifier at all",
+    );
+    assert.equal(frame.setupDialogOnly, true, "one recognised setup dialog, nothing else");
+    // Conservative for everyone else: the overlay is still reported as blocking.
+    assert.equal(frame.hasBlockingOverlay, true);
+  });
+});
+
+test("the agent advances the setup dialog by clicking Continue", async () => {
+  await withPage(dashboard(returnSetupDialog()), async (page, win) => {
+    const frame = (
+      await navigation.probeFrames(win, {
+        ...setupProbeOptions,
+        action: "new-return-continue",
+      })
+    ).frames[0];
+    assert.equal(
+      frame.actionResult.status,
+      "clicked",
+      "the dialog's own backdrop must not deadlock its Continue button",
+    );
+    assert.deepEqual(await page.evaluate("actions"), ["CONTINUE"]);
+  });
+});
+
+test("a period suggestion panel cannot block the recognised setup Continue", async () => {
+  await withPage(
+    dashboard(
+      returnSetupDialog({
+        extra: `<div style="position:fixed;inset:0;z-index:40;background:transparent"></div>`,
+      }),
+    ),
+    async (page, win) => {
+      const frame = (
+        await navigation.probeFrames(win, {
+          ...setupProbeOptions,
+          action: "new-return-continue",
+        })
+      ).frames[0];
+      assert.equal(frame.actionResult.status, "clicked");
+      assert.deepEqual(await page.evaluate("actions"), ["CONTINUE"]);
+    },
+  );
+});
+
+test("a setup dialog with a box left empty is not advanced", async () => {
+  await withPage(
+    dashboard(returnSetupDialog({ filled: false })),
+    async (page, win) => {
+      const frame = (
+        await navigation.probeFrames(win, {
+          ...setupProbeOptions,
+          action: "new-return-continue",
+        })
+      ).frames[0];
+      assert.equal(frame.setupDialogOnly, false, "an empty field is a human question");
+      assert.equal(frame.actionResult.status, "blocked_by_dialog");
+      assert.deepEqual(await page.evaluate("actions"), []);
+    },
+  );
+});
+
+test("a setup dialog naming a different tax year is not advanced", async () => {
+  await withPage(
+    dashboard(returnSetupDialog({ period: "2025" })),
+    async (page, win) => {
+      const frame = (
+        await navigation.probeFrames(win, {
+          ...setupProbeOptions,
+          action: "new-return-continue",
+        })
+      ).frames[0];
+      assert.equal(
+        frame.actionResult.status,
+        "blocked_by_dialog",
+        "opening 2025 instead of the packet's 2026 would file the wrong return",
+      );
+      assert.deepEqual(await page.evaluate("actions"), []);
+    },
+  );
+});
+
+test("verification dialogs keep blocking even beside a recognised setup caption", async () => {
+  await withPage(
+    dashboard(returnSetupDialog({ extra: `<input type="password" value="x">` })),
+    async (page, win) => {
+      const frame = (
+        await navigation.probeFrames(win, {
+          ...setupProbeOptions,
+          action: "new-return-continue",
+        })
+      ).frames[0];
+      assert.equal(frame.setupDialogOnly, false);
+      assert.equal(frame.actionResult.status, "blocked_by_dialog");
+      assert.deepEqual(await page.evaluate("actions"), []);
+    },
+  );
 });

@@ -149,10 +149,31 @@ try {
     /key === "filing_packet"[\s\S]{0,80}\? Boolean\(filingPacket\)/,
     "Packet rail uses current packet state",
   );
+  // "COMPLETED" was the OLD assertion — and the bug: nothing ever writes that
+  // value to FbrConnection (see app/api/local-agent/jobs/[jobId]/status), so the
+  // rail could never light up. The check must go through the shared predicate.
   matches(
     wizard,
-    /key === "fbr_connect"[\s\S]{0,80}\? fbrConnectionStatus === "COMPLETED"/,
-    "FBR rail uses current connection state",
+    /key === "fbr_connect"[\s\S]{0,160}\?\s*\/\/[^]*?isFbrAgentCompleted\(fbrConnectionStatus\)/,
+    "FBR rail uses the shared agent-completion predicate",
+  );
+  matches(
+    wizard,
+    /import \{ isFbrAgentCompleted \} from "@\/lib\/tax\/filing-status"/,
+    "FBR rail imports the predicate instead of restating strings",
+  );
+  matches(
+    fs.readFileSync(path.join(root, "lib", "tax", "filing-status.ts"), "utf8"),
+    /FBR_AGENT_COMPLETED_STATUSES = \[\s*"FILING_COMPLETED",\s*"DRY_RUN_COMPLETED",?\s*\]/,
+    "agent completion statuses are centralised",
+  );
+  matches(
+    fs.readFileSync(
+      path.join(root, "app", "api", "local-agent", "jobs", "[jobId]", "status", "route.ts"),
+      "utf8",
+    ),
+    /"DRY_RUN_COMPLETED"[\s\S]{0,40}"FILING_COMPLETED"|"FILING_COMPLETED"[\s\S]{0,40}"DRY_RUN_COMPLETED"/,
+    "the route writes the statuses the predicate accepts",
   );
   includes(
     wizard,

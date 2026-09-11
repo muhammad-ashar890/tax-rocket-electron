@@ -47,7 +47,6 @@ npm run desktop-installer:upload
 
 - GCS bucket for installer hosting (or use local)
 - IRIS selectors for real portal (1000, 2001, 500312, 64020004, 64150301, 64151101 etc)
-- Mock IRIS pages for testing (if available from old repo)
 - Windows code signing cert for production
 
 ## Known Issues from worker.md
@@ -56,10 +55,53 @@ npm run desktop-installer:upload
 - Classic pause actions `classic_final_review` and `classic_pin_entry` normalized to `final_review` and `pin_required` in backend
 - `fbr-connect-client.tsx` was not mounted - FIXED in Phase 1
 
+## New-return setup dialog (TY2026+)
+
+IRIS opens a modal titled "Normal Return (Ind/AOP/COY)" with a prefilled Person box and a Tax
+Period box. The agent recognises that caption (`Tax Year`, `Period` or `Tax Period` + exactly one
+`Continue`/`Accept and Continue`) and clicks Continue, because nothing is left for a human to
+answer. It refuses and leaves a Retry checkpoint when any editable box is still empty, when a
+4-digit period names a year other than the packet's, or when the dialog contains a
+password/one-time-code field. The Summary of Economic Transactions screen is handled separately:
+when the pinned approved packet contains income sources, residency and wealth-statement context,
+the agent selects only the exact captured IRIS options and Start Return Filling control. If the
+packet is incomplete or the live choices cannot be reconciled, it pauses. It never invents an
+answer and never touches Create/Save/Submit.
+
 ## Env Vars
 
 ```
-FBR_USE_MOCK_IRIS=false
+# THE switch for touching the real portal. Read once per job (main.js:getRealAutofillMode).
+#   off  (unset) — navigation only; the agent never resolves or writes a field
+#   dry          — locates every IRIS target and reports what it WOULD write; writes nothing
+#   live (or 1/true/on/yes) — actually writes, and only into cells whose column header
+#                             and section structure were verified by the section tour
+TAXROCKET_REAL_AUTOFILL=dry
+```
+
+The mode is echoed in every autofill log line (`real_autofill_start`), and a job that
+filled 0 fields is reported as such — do not treat `dry` as "the filing worked".
+
+`live` here is only half the switch. The web app decides the other half
+(`TAXROCKET_ALLOW_LIVE_FILING`), and this process reads no `.env` at all — exporting the variable
+in the shell that launches `npm run dev` is what counts. When the deployment has not opted in, the
+agent says so in the job log and runs the job as `dry`. This is not a bug to work around: see
+"Two keys are needed…" in the repository README.
+
+One more thing can downgrade it: `taxAutomationConfig.livePilot.automaticFilingEnabled`
+is a **deployment kill switch** (`main.js:resolveAutofillMode`). When it is explicitly
+`false`, a `live` request runs as `dry` and the job log says so. It never *enables*
+writes, and when the field is absent or null the env var decides alone.
+
+Two safety rails are deliberate and should stay:
+- **Derived cells are never written.** IRIS computes `Total Income`, `Subject to Final
+  Tax`, `Subject to Exemption` and `Subject to Normal Tax` itself and renders them
+  `disabled`; only the entered column may be filled.
+- **A guessed cell is never written in `live`.** If a column can only be located by
+  position (`position_fallback` / `sole_editable`), the field is refused as
+  `unverified_target`. Set `payload.allowUnverifiedTargets` only for a supervised one-off.
+
+```
 FBR_IRIS_LOGIN_URL=https://iris.fbr.gov.pk/
 FBR_IRIS_READY_SELECTOR=body
 FBR_IRIS_READY_URL_PATTERN=iris.fbr.gov.pk

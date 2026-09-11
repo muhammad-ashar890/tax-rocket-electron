@@ -79,10 +79,10 @@ const detailedMap = {
   wealthFields: [],
 };
 function contextHarness({
-  mock = false,
   routeFamily,
   packetAvailable = true,
   payloadOverride,
+  liveFiling,
 } = {}) {
   const calls = {};
   const payload = {
@@ -132,7 +132,12 @@ function contextHarness({
   };
   const load = moduleLoader(
     { "@/lib/prisma": { prisma } },
-    { FBR_USE_MOCK_IRIS: String(mock) },
+    {
+      // The deployment's own consent, exactly as it arrives from the server env.
+      ...(liveFiling === undefined
+        ? {}
+        : { TAXROCKET_ALLOW_LIVE_FILING: String(liveFiling) }),
+    },
   );
   const route = load("app/api/local-agent/jobs/[jobId]/context/route.ts");
   return {
@@ -195,6 +200,110 @@ test("real context pins approved packet, flattens the worker map, and preserves 
     response.data.taxAutomationConfig.livePilot.automaticFilingEnabled,
     false,
   );
+  assert.equal(
+    response.data.taxAutomationConfig.livePilot.mode,
+    "navigation_inspection_only",
+  );
+});
+
+/* ------------------------------------------------------------------ *
+ * the deployment's own consent for typing into IRIS                    *
+ * ------------------------------------------------------------------ */
+
+test("writes stay off unless the server env says otherwise, whatever a stray value is", async () => {
+  for (const value of [undefined, "", "maybe", "0", "no", "false", "live-ish", "TRUEish"]) {
+    const response = await contextHarness({
+      routeFamily: "normal_individual_114",
+      liveFiling: value,
+    }).run();
+    const pilot = response.data.taxAutomationConfig.livePilot;
+    assert.equal(
+      pilot.automaticFilingEnabled,
+      false,
+      `TAXROCKET_ALLOW_LIVE_FILING=${JSON.stringify(value)} must not enable writes`,
+    );
+    assert.equal(pilot.mode, "navigation_inspection_only");
+  }
+});
+
+test("an explicit on-value enables supervised entry, and says so in the mode", async () => {
+  // The same spellings the agent's own parser accepts, so the two switches cannot
+  // disagree about what "on" means.
+  for (const value of ["true", "TRUE", " 1 ", "on", "yes"]) {
+    const response = await contextHarness({
+      routeFamily: "normal_individual_114",
+      liveFiling: value,
+    }).run();
+    const pilot = response.data.taxAutomationConfig.livePilot;
+    assert.equal(pilot.automaticFilingEnabled, true, String(value));
+    assert.equal(pilot.mode, "supervised_live_filing", String(value));
+  }
+});
+
+test("enabling the deployment flag does not by itself run anything else differently", async () => {
+  const off = await contextHarness({ routeFamily: "normal_individual_114" }).run();
+  const on = await contextHarness({
+    routeFamily: "normal_individual_114",
+    liveFiling: "true",
+  }).run();
+
+  // The packet, the flattened map and the readiness contract are untouched: this
+  // flag only answers "may the agent type", never what it types or where.
+  assert.deepEqual(
+    plain(on.data.snapshot.portalFieldMap),
+    plain(off.data.snapshot.portalFieldMap),
+  );
+  assert.deepEqual(
+    plain(on.data.taxAutomationConfig.readiness),
+    plain(off.data.taxAutomationConfig.readiness),
+  );
+  assert.deepEqual(
+    plain(on.data.taxAutomationConfig.dryRun),
+    plain(off.data.taxAutomationConfig.dryRun),
+  );
+});
+
+test("the operator is told live entry is on, and never by a silent default", () => {
+  const client = fs.readFileSync(
+    path.join(root, "components/tax/fbr-connect-client.tsx"),
+    "utf8",
+  );
+  const page = fs.readFileSync(
+    path.join(root, "app/tax/fbr-connect/page.tsx"),
+    "utf8",
+  );
+  const config = fs.readFileSync(
+    path.join(root, "lib/tax/fbr-agent-config.ts"),
+    "utf8",
+  );
+
+  // The page asks the same function the job context uses — one source of truth,
+  // so the banner cannot disagree with what the agent was told.
+  assert.match(page, /liveFilingEnabled=\{isLiveFilingEnabledByDeployment\(\)\}/);
+  assert.match(config, /automaticFilingEnabled: liveFilingEnabled/);
+  assert.match(config, /const liveFilingEnabled = isLiveFilingEnabledByDeployment\(\)/);
+
+  assert.match(client, /liveFilingEnabled = false/, "off is the default in the component");
+  assert.match(
+    client,
+    /role="alert"[\s\S]{0,700}Your filing is ready for supervised entry/,
+    "the enabled state is announced, not whispered",
+  );
+  assert.match(
+    client,
+    /Nothing\s+is saved or submitted until you explicitly confirm/,
+    "the limits of live mode are stated in the same breath",
+  );
+  assert.match(client, /Start filing/, "the button uses taxpayer language");
+
+  // The UI can turn the deployment flag on; it cannot loosen WHICH cell a value
+  // goes into. That rule stays in the filler, where the captures prove it.
+  assert.equal(
+    client.includes("allowUnverifiedTargets"),
+    false,
+    "no web-side bypass of the verified-target rule",
+  );
+  assert.match(config, /new Set\(\["true", "1", "on", "yes"\]\)/);
 });
 
 test("packet builder metadata marks supported original individual filings as normal 114 route", () => {
@@ -264,19 +373,6 @@ test("unknown form is an explicit identification checkpoint, not an assumed norm
   );
 });
 
-test("mock context alone receives fixture selectors", async () => {
-  const response = await contextHarness({ mock: true }).run();
-  assert.equal(Array.isArray(response.data.snapshot.portalFieldMap), true);
-  assert.equal(
-    response.data.snapshot.portalFieldMap[0].selector,
-    '[data-tax-field-key="return.tax_year"]',
-  );
-  assert.equal(
-    response.data.taxAutomationConfig.readiness.loginUrl,
-    "mock-iris://login",
-  );
-});
-
 test("missing or superseded queued packet cannot silently become latest packet", async () => {
   assert.equal(
     (await contextHarness({ packetAvailable: false }).run()).status,
@@ -287,48 +383,36 @@ test("missing or superseded queued packet cannot silently become latest packet",
   assert.equal(missing.calls.packetQuery, undefined);
 });
 
-test("desktop handoff and job use the SAME real/mock authentication configuration", () => {
-  for (const mock of [false, true]) {
-    const load = moduleLoader(
-      {},
-      {
-        FBR_USE_MOCK_IRIS: String(mock),
-        NEXTAUTH_URL: "http://localhost:3000",
-      },
-    );
-    const desktop = load("lib/tax/fbr-desktop.ts");
-    const auth = load("lib/tax/fbr-agent-config.ts").getFbrDesktopAuthConfig();
-    const session = desktop.buildDesktopSessionConfig({
-      launchToken: "test-launch",
-      partitionKey: "test-partition",
-      deviceTokenHash: "test-hash",
-      accountReference: "35202-1234567-1",
-    });
-    const url = new URL(session.deepLink);
-    assert.equal(url.searchParams.get("loginUrl"), auth.loginUrl);
-    assert.equal(url.searchParams.get("useMockIris"), String(mock));
-    assert.equal(url.searchParams.get("accountReference"), "35202-1234567-1");
-    assert.equal(session.irisReadySelector, auth.readySelector);
-    assert.equal(session.localhostUrl, "http://127.0.0.1:37219/connect");
-    assert.equal(
-      desktop.generatePartitionKey("user-one"),
-      desktop.generatePartitionKey("user-one"),
-    );
-    assert.notEqual(
-      desktop.generatePartitionKey("user-one"),
-      desktop.generatePartitionKey("user-two"),
-    );
-  }
+test("desktop handoff always targets the real FBR portal", () => {
   const load = moduleLoader(
     {},
     {
-      FBR_USE_MOCK_IRIS: "true",
-      FBR_IRIS_LOGIN_URL: "https://iris.fbr.gov.pk/",
+      NEXTAUTH_URL: "http://localhost:3000",
     },
   );
-  assert.throws(
-    () => load("lib/tax/fbr-agent-config.ts").getFbrDesktopAuthConfig(),
-    /disagree/,
+  const desktop = load("lib/tax/fbr-desktop.ts");
+  const auth = load("lib/tax/fbr-agent-config.ts").getFbrDesktopAuthConfig();
+  const session = desktop.buildDesktopSessionConfig({
+    launchToken: "test-launch",
+    partitionKey: "test-partition",
+    deviceTokenHash: "test-hash",
+    accountReference: "35202-1234567-1",
+  });
+  const url = new URL(session.deepLink);
+  assert.equal(url.searchParams.get("loginUrl"), auth.loginUrl);
+  assert.equal(url.searchParams.get("loginUrl"), "https://iris.fbr.gov.pk/");
+  assert.equal(url.searchParams.get("useMockIris"), null);
+  assert.equal(url.searchParams.get("accountReference"), "35202-1234567-1");
+  assert.equal(session.irisReadySelector, auth.readySelector);
+  assert.equal(session.localhostUrl, "http://127.0.0.1:37219/connect");
+  assert.equal(auth.useMockIris, false);
+  assert.equal(
+    desktop.generatePartitionKey("user-one"),
+    desktop.generatePartitionKey("user-one"),
+  );
+  assert.notEqual(
+    desktop.generatePartitionKey("user-one"),
+    desktop.generatePartitionKey("user-two"),
   );
 });
 

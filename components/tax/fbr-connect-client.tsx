@@ -33,6 +33,12 @@ type Props = Readonly<{
   taxPayable?: number | null;
   refundDue?: number | null;
   packetVersion?: number;
+  /**
+   * The deployment's own consent for entering approved Salary data (server env
+   * TAXROCKET_ALLOW_LIVE_FILING). Shown verbatim rather than hidden, because an
+   * operator must never discover after the fact that amounts were entered.
+   */
+  liveFilingEnabled?: boolean;
 }>;
 
 type DesktopSession = {
@@ -69,28 +75,30 @@ type Phase = "connect" | "connecting" | "start" | "working" | "resume" | "done";
 type FlowStep = "connect" | "start" | "resume";
 
 const PAUSE_LABELS: Record<string, string> = {
-  portal_inspection: "Identify the IRIS return form",
-  portal_readiness_unverified: "Waiting for a recognizable IRIS screen",
-  portal_identity_required: "Enter the target taxpayer in the desktop agent",
+  portal_inspection: "Preparing your FBR return",
+  portal_readiness_unverified: "Waiting for FBR to be ready",
+  portal_identity_required: "Confirm the taxpayer in the FBR window",
   portal_taxpayer_mismatch: "Taxpayer verification needs attention",
-  portal_document_mismatch: "Form / tax year / period needs attention",
-  portal_draft_ambiguous: "Select the intended draft",
-  portal_draft_list_incomplete: "Check the full draft list",
-  portal_new_return_setup: "New-return setup is open",
-  portal_sections_inspected: "Return sections inspected — no submission",
-  portal_section_navigation: "Section navigation needs attention",
-  portal_section_capture: "Waiting for the current section's field structure",
+  portal_document_mismatch: "Return details need attention",
+  portal_draft_ambiguous: "Select the return you want to file",
+  portal_draft_list_incomplete: "Checking your FBR returns",
+  portal_new_return_setup: "Complete the FBR return setup",
+  portal_sections_inspected: "Return prepared — no submission",
+  portal_section_navigation: "Return preparation needs attention",
+  portal_section_capture: "Preparing the current return section",
+  portal_autofill_review: "Review fields that could not be placed safely",
   portal_identity_changed: "Taxpayer target changed — recheck required",
-  portal_job_check_unavailable: "Check the web-app connection",
-  portal_fields_verified: "Return opened — Salary structure verified",
-  portal_fields_unverified: "Review the opened form structure",
-  portal_navigation: "Navigation needs attention",
-  portal_unsupported_route: "Return route not supported by this pilot",
-  portal_popup: "IRIS dialog needs attention",
+  portal_job_check_unavailable: "Check your TaxRocket connection",
+  portal_fields_verified: "Return opened — Salary details verified",
+  portal_fields_unverified: "Review the opened return",
+  portal_navigation: "FBR window needs attention",
+  portal_unsupported_route: "This return type is not available yet",
+  portal_popup: "FBR window needs attention",
   portal_economic_transactions_gate:
-    "Answer the IRIS income-sources and residency questions",
-  session_reconnect: "Complete IRIS sign-in",
-  selector_bundle_update: "Retry the current navigation step",
+    "Confirm income and residency in the FBR window",
+  portal_reconciliation_review: "Resolve the outstanding reconciliation amount",
+  session_reconnect: "Complete FBR sign-in",
+  selector_bundle_update: "Retry preparing your return",
   password_reset: "Password reset",
   otp_captcha_pin: "OTP / CAPTCHA / PIN",
   otp_required: "OTP",
@@ -121,9 +129,9 @@ const SESSION_GRACE_MS = 2 * 60_000;
 const SESSION_TTL_MS = 10 * 60_000;
 
 const FLOW_STEPS: ReadonlyArray<{ id: FlowStep; n: string; label: string }> = [
-  { id: "connect", n: "1", label: "Open agent" },
-  { id: "start", n: "2", label: "Check IRIS" },
-  { id: "resume", n: "3", label: "Review checkpoint" },
+  { id: "connect", n: "1", label: "Connect to FBR" },
+  { id: "start", n: "2", label: "Start filing" },
+  { id: "resume", n: "3", label: "Review & continue" },
 ];
 
 const FLOW_ORDER: FlowStep[] = ["connect", "start", "resume"];
@@ -161,6 +169,7 @@ export default function FbrConnectClient({
   taxPayable,
   refundDue,
   packetVersion,
+  liveFilingEnabled = false,
 }: Props) {
   const [connection, setConnection] = useState(initialConnection);
   const [session, setSession] = useState<DesktopSession | null>(null);
@@ -248,7 +257,7 @@ export default function FbrConnectClient({
       });
       const data = await res.json();
       if (!data.success) {
-        setError(data.error || "Could not start the desktop agent");
+        setError(data.error || "Could not open the FBR connection app");
       } else {
         setSession(data.session);
         // Use ONE transport. The old POST did not meet the bridge's nonce/
@@ -257,7 +266,7 @@ export default function FbrConnectClient({
         window.location.href = data.session.deepLink;
       }
     } catch {
-      setError("Could not start the desktop agent");
+      setError("Could not open the FBR connection app");
     }
     setSessionLoading(false);
     void refreshDevices();
@@ -345,6 +354,7 @@ export default function FbrConnectClient({
       "portal_inspection",
       "portal_popup",
       "portal_economic_transactions_gate",
+      "portal_reconciliation_review",
       "selector_bundle_update",
       "session_reconnect",
       "portal_readiness_unverified",
@@ -361,10 +371,13 @@ export default function FbrConnectClient({
       "portal_sections_inspected",
       "portal_section_navigation",
       "portal_section_capture",
+      "portal_autofill_review",
       "portal_identity_changed",
       "portal_job_check_unavailable",
     ].includes(activeJob.pauseAction),
   );
+  const reconciliationPause =
+    activeJob?.pauseAction === "portal_reconciliation_review";
   const activeFlowStep = flowStepForPhase(phase);
   const activeIndex = FLOW_ORDER.indexOf(activeFlowStep);
 
@@ -400,13 +413,14 @@ export default function FbrConnectClient({
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-sm">
-              <Monitor className="h-4 w-4" /> Step 1 — Install the desktop agent
+              <Monitor className="h-4 w-4" /> Step 1 — Connect to FBR
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4 text-sm">
             <p className="text-muted-foreground">
-              Filing runs on this computer. Download the Tax Rocket Portal
-              Agent, install it, then confirm below.
+              Connect your TaxRocket account to FBR on this computer. Download
+              and install the secure TaxRocket Portal Agent, then continue
+              below.
             </p>
             <Button asChild size="sm" className="gap-2">
               <a href="/api/downloads/taxrocket-agent/windows">
@@ -421,7 +435,7 @@ export default function FbrConnectClient({
                 onChange={(event) => setInstalledAck(event.target.checked)}
               />
               <span>
-                I already installed this app
+                I installed the FBR connection app
                 {installedAck ? (
                   <CheckCircle className="ml-1 inline h-3.5 w-3.5 text-green-600" />
                 ) : null}
@@ -438,7 +452,7 @@ export default function FbrConnectClient({
               ) : (
                 <Monitor className="h-3.5 w-3.5" />
               )}
-              Open Desktop Agent
+              Continue to FBR
             </Button>
           </CardContent>
         </Card>
@@ -448,15 +462,13 @@ export default function FbrConnectClient({
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-sm">
-              <Loader2 className="h-4 w-4 animate-spin" /> Waiting for IRIS
-              sign-in
+              <Loader2 className="h-4 w-4 animate-spin" /> Connect to FBR
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
             <p>
-              Finish login in the desktop agent and keep that portal window
-              open. Creating a launch link alone does not mean IRIS is
-              connected.
+              Sign in to FBR in the window that opened. Keep that window open
+              while TaxRocket prepares your filing.
             </p>
             <Button
               variant="outline"
@@ -464,7 +476,7 @@ export default function FbrConnectClient({
               disabled={sessionLoading}
               onClick={handleCreateSession}
             >
-              Agent did not open? Try again
+              Reopen FBR connection
             </Button>
           </CardContent>
         </Card>
@@ -474,21 +486,32 @@ export default function FbrConnectClient({
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-sm">
-              <ShieldCheck className="h-4 w-4" /> Step 2 — Check IRIS navigation
+              <ShieldCheck className="h-4 w-4" /> Step 2 — Start your filing
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
             <p className="text-muted-foreground">
-              Agent is ready
+              Your secure FBR connection is ready
               {readyDevice?.deviceName ? ` on ${readyDevice.deviceName}` : ""}.
-              The desktop agent uses the taxpayer CNIC/NTN from your TaxRocket
-              profile when available; if that field is blank or wrong, correct
-              it locally before starting. The pilot opens a matching original
-              114(1) draft, or the new-return menu if none exists in the
-              complete list. It inspects the supplied Data sections plus Payment
-              and Attachment structures. It does not enter amounts, upload
-              files, pay, save or submit.
+              Click Start filing to open the approved Salary return and its
+              Salary withholding section. Complete sign-in, OTP, CAPTCHA, or PIN
+              steps yourself in the FBR window. TaxRocket will pause whenever it
+              needs you and will not save or submit anything.
             </p>
+            {liveFilingEnabled && (
+              <div
+                role="alert"
+                className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-400"
+              >
+                <span className="font-medium">
+                  Your filing is ready for supervised entry.
+                </span>{" "}
+                TaxRocket will enter only the approved Salary and Salary
+                withholding information that can be verified. Property, Wealth,
+                Payments, and Computations remain outside this test. Nothing is
+                saved or submitted.
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 size="sm"
@@ -501,7 +524,7 @@ export default function FbrConnectClient({
                 ) : (
                   <Play className="h-3.5 w-3.5" />
                 )}
-                Start navigation check
+                Start filing
               </Button>
               <Button
                 variant="outline"
@@ -515,13 +538,14 @@ export default function FbrConnectClient({
                 ) : (
                   <Monitor className="h-3.5 w-3.5" />
                 )}
-                Reconnect agent
+                Reconnect securely
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
-              Agent window closed or IRIS needs to be reopened? &quot;Reconnect
-              agent&quot; creates a fresh secure session and launches the
-              desktop agent again.
+              If the FBR window closes or pauses, choose &quot;Reconnect
+              securely&quot; to open a fresh connection. Your sensitive OTP,
+              CAPTCHA, and PIN stay in the FBR window and are never sent to
+              TaxRocket.
             </p>
           </CardContent>
         </Card>
@@ -531,17 +555,15 @@ export default function FbrConnectClient({
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-sm">
-              <Loader2 className="h-4 w-4 animate-spin" /> Desktop check in
-              progress
+              <Loader2 className="h-4 w-4 animate-spin" /> Filing in progress
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
             <p className="text-muted-foreground">
-              Look at the Tax Rocket Portal Agent window. The live navigation
-              pilot checks Draft / IT Declaration, opens the matching return and
-              verifies fields. If no draft exists, it opens the new-return menu
-              and pauses for setup. Complete sign-in or close a welcome popup
-              locally if asked. Do not start another job.
+              Complete any sign-in, OTP, CAPTCHA, PIN, or payment step in the
+              FBR window. TaxRocket will pause when your action is needed. Keep
+              the FBR window open and do not start another filing at the same
+              time.
             </p>
             <p className="text-xs text-muted-foreground">
               Assisted filing · started {formatWhen(activeJob.createdAt)}
@@ -571,8 +593,8 @@ export default function FbrConnectClient({
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
               <p>
-                The agent has filled your return in IRIS and is waiting at the
-                final submit step. Nothing is submitted until you choose.
+                Your return is ready for final review in FBR. Nothing is
+                submitted until you explicitly choose to submit it.
               </p>
               {(taxPayable != null ||
                 refundDue != null ||
@@ -594,7 +616,7 @@ export default function FbrConnectClient({
                 </div>
               )}
               <p className="text-xs font-medium text-red-800">
-                Submitting is final in IRIS. Choose only after reviewing the
+                Submitting is final in FBR. Choose only after reviewing the
                 figures above.
               </p>
               {activeJob.pauseMessage && (
@@ -655,7 +677,7 @@ export default function FbrConnectClient({
                 has been submitted.
               </p>
               <Button size="sm" onClick={() => setSubmitGateOpen(true)}>
-                Review the submit gate
+                Review before submission
               </Button>
             </CardContent>
           </Card>
@@ -667,13 +689,13 @@ export default function FbrConnectClient({
           <Card className="border-amber-200">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-sm text-amber-800">
-                <CheckCircle className="h-4 w-4" /> Step 3 — Continue
+                <CheckCircle className="h-4 w-4" /> Step 3 — Review & continue
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
               <p>
                 {PAUSE_LABELS[activeJob.pauseAction || ""] ??
-                  "Action needed in the desktop agent"}
+                  "Action needed in the FBR window"}
               </p>
               {activeJob.pauseMessage && (
                 <p className="text-muted-foreground">
@@ -681,13 +703,14 @@ export default function FbrConnectClient({
                 </p>
               )}
               <p className="text-xs text-muted-foreground">
-                Checkpoint: {activeJob.pauseAction || "unknown"} · Job:{" "}
-                {activeJob.id.slice(-8)}
+                Waiting for your action in the FBR window.
               </p>
               <p className="text-xs text-muted-foreground">
-                {inspectionPause
-                  ? "Follow the checkpoint above in the desktop agent. Retry resumes the pending section after checking the current document. Export IRIS structure includes the sections already captured. No financial filling or submission is enabled."
-                  : "Finish that step in the agent window, then press Continue here."}
+                {reconciliationPause
+                  ? "Resolve the outstanding amount in TaxRocket, then press Continue here."
+                  : inspectionPause
+                    ? "Follow the instruction in the FBR window. When you finish, press Continue here."
+                    : "Finish that step in the FBR window, then press Continue here."}
               </p>
               <Button
                 size="sm"
@@ -700,7 +723,7 @@ export default function FbrConnectClient({
                 ) : (
                   <ExternalLink className="h-3.5 w-3.5" />
                 )}
-                {inspectionPause ? "Retry navigation check" : "Continue"}
+                {inspectionPause ? "Continue filing" : "Continue"}
               </Button>
               <Button
                 size="sm"
@@ -708,7 +731,7 @@ export default function FbrConnectClient({
                 disabled={actionLoading === activeJob.id}
                 onClick={() => handleCancelJob(activeJob.id)}
               >
-                Cancel this job
+                Cancel this filing
               </Button>
               {inspectionPause && (
                 <Button
@@ -717,7 +740,7 @@ export default function FbrConnectClient({
                   disabled={sessionLoading}
                   onClick={handleCreateSession}
                 >
-                  Reopen existing IRIS window
+                  Reconnect to FBR
                 </Button>
               )}
             </CardContent>
@@ -725,21 +748,22 @@ export default function FbrConnectClient({
         )}
 
       {phase === "done" && (
-        <Card className="border-green-200 bg-green-50/40">
+        <Card className="border-amber-200 bg-amber-50/40">
           <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-sm text-green-800">
-              <CheckCircle className="h-4 w-4" /> Filing finished
+            <CardTitle className="flex items-center gap-2 text-sm text-amber-800">
+              <CheckCircle className="h-4 w-4" /> FBR handoff complete — review
+              required
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
             <p className="text-muted-foreground">
-              Assisted filing completed
+              The FBR handoff completed
               {completedFiling
                 ? ` at ${formatWhen(
                     completedFiling.completedAt || completedFiling.createdAt,
                   )}`
                 : ""}
-              .
+              . The return was not saved or submitted.
             </p>
             <Button
               type="button"

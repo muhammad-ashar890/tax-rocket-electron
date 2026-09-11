@@ -75,12 +75,32 @@ GOOGLE_CLIENT_ID=""
 GOOGLE_CLIENT_SECRET=""
 GEMINI_API_KEY=""
 GEMINI_MODEL="gemini-3.5-flash"
-FBR_USE_MOCK_IRIS="true"
+
+# Live entry — writing the approved packet's amounts into IRIS cells.
+# Off unless this says so; it is the deployment's half of a two-key switch.
+# TAXROCKET_ALLOW_LIVE_FILING="true"
 ```
+
+### Two keys are needed before anything is typed into IRIS
+
+Writing into a government return is deliberately gated twice, and both halves must be on:
+
+1. **The operator's key** — in the desktop agent's own shell (not this file; `electron-connect`
+   reads no `.env`): `TAXROCKET_REAL_AUTOFILL=dry|live`.
+2. **The deployment's key** — `TAXROCKET_ALLOW_LIVE_FILING=true` in the **server** environment.
+   Accepted spellings are the agent's own (`true`, `1`, `on`, `yes`); anything else, including an
+   empty or misspelled value, means off. There is no DB row for it on purpose.
+
+With only (1) set, the agent logs that writes are blocked by the deployment and runs as a dry
+run. With both, `mode` becomes `supervised_live_filing`, and the FBR panel clearly tells the user
+that supervised entry is enabled. Even then the agent writes only into a section whose
+header/row binding it verified on screen — today that is **Salary**, and nothing else — and it
+never uploads, pays, saves or submits. `verify:fbr-contracts` locks all of this.
+
+To turn it back off: unset the variable and restart the web app. Nothing else has to change.
 
 - `NEXTAUTH_SECRET`: generate with `openssl rand -base64 32` (Git Bash ships openssl on Windows).
 - Google callback URL in Google Cloud Console must be `http://localhost:3000/api/auth/callback/google`.
-- `FBR_USE_MOCK_IRIS="true"` points the desktop-agent flow at the local mock IRIS pages under `electron-connect/mock-iris/` instead of the real portal.
 
 ## Verification suites
 
@@ -100,6 +120,8 @@ npm run verify:upload-safety
 npm run verify:route-protection
 npm run verify:dependency-health
 npm run verify:cleanup-hygiene
+npm run verify:portal-field-map     # IRIS code mapping + the capture-evidence gate
+npm run verify:cnic-profile-plan    # CNIC -> profile, card expiry, cross-year reuse
 ```
 
 Database-backed suites (need `DATABASE_URL` + migrated DB):
@@ -115,9 +137,15 @@ npm run verify:bank-statement-isolation
 Browser suites (need the dev server running, a migrated DB, and Playwright browsers):
 
 ```bash
-npx playwright install        # once per machine
-npm run verify:ui             # auth + wizard + calculation + security
+npx playwright install chromium   # once per machine
+npm run verify:ui                 # auth + wizard + calculation + security
+npm run verify:iris-navigation    # 100 checks against a real Chromium, no portal access
+npm run verify:iris-row-filler    # 27 checks, same browser fixture
 ```
+
+`verify:ui` expects the dev server on `http://localhost:3000`; point it elsewhere with
+`UI_BASE_URL=http://localhost:3123 npm run verify:ui`. These suites never touch the real IRIS
+portal — no login, no writes.
 
 Type check:
 

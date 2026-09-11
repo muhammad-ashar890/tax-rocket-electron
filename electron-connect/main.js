@@ -10,7 +10,6 @@ const http = require("http");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { pathToFileURL } = require("url");
 const {
   createStateStore,
   isBackendAllowed,
@@ -24,6 +23,16 @@ const LOCAL_BRIDGE_PORT = 37219;
 const DLD_PORTAL_HOST = "dubailand.gov.ae";
 const LOCAL_AGENT_POLL_INTERVAL_MS = 10000;
 const LOCAL_AGENT_CONFIRMATION_TITLE = "Tax Rocket Desktop Agent";
+const REAL_FBR_ROOT = "https://iris.fbr.gov.pk/";
+
+function isOfficialFbrUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return url.protocol === "https:" && url.hostname === "iris.fbr.gov.pk";
+  } catch {
+    return false;
+  }
+}
 
 let mainWindow = null;
 let loginWindow = null;
@@ -58,20 +67,68 @@ function getRealAutofillMode() {
     .trim()
     .toLowerCase();
   if (raw === "dry" || raw === "dryrun" || raw === "dry-run") return "dry";
-  if (raw === "1" || raw === "true" || raw === "on" || raw === "yes")
+  if (
+    raw === "1" ||
+    raw === "true" ||
+    raw === "on" ||
+    raw === "yes" ||
+    raw === "live"
+  )
     return "live";
   return "off";
 }
+
+/**
+ * The env var is the OPERATOR's switch; `livePilot.automaticFilingEnabled` is the
+ * deployment's. The flag used to be declared in `lib/tax/fbr-agent-config.ts` and
+ * read by nothing, which is worse than absent: everyone assumed it controlled
+ * something. Now it does, with kill-switch semantics —
+ *
+ *   automaticFilingEnabled === false  → live is downgraded to dry, whatever env says
+ *   automaticFilingEnabled === true   → the env var is still required (no new capability)
+ *   absent/null                       → env only, i.e. current behaviour
+ *
+ * "Only false blocks" is deliberate: the shipped default in the config builder is
+ * false, so a deployment that has not opted in cannot write to IRIS even with
+ * TAXROCKET_REAL_AUTOFILL=live, and this is logged rather than silent.
+ */
+function resolveAutofillMode(jobContext) {
+  const envMode = getRealAutofillMode();
+  const livePilot = jobContext?.taxAutomationConfig?.livePilot;
+  const gate = livePilot && livePilot.automaticFilingEnabled;
+  if (envMode === "live" && gate === false) {
+    return {
+      mode: "dry",
+      downgradedFrom: "live",
+      note:
+        "livePilot.automaticFilingEnabled=false in the job config: writes are blocked " +
+        "by the deployment, so this run is DRY. Enable the flag to allow live entry.",
+    };
+  }
+  return { mode: envMode, downgradedFrom: null, note: null };
+}
 // Independent controller stamp: a new navigator must not make an OLD main
 // process appear fully updated (the mixed fix10/fix11 rollout hid this).
-const AGENT_BUILD_TAG = "fix16-new-return-setup-20260908";
+const AGENT_BUILD_TAG = "fix26-salary-withholding-handoff-20260911";
 function getAgentBuildLabel() {
-  return `${AGENT_BUILD_TAG} | navigator: ${irisNavigation.BUILD_TAG}`;
+  return `${AGENT_BUILD_TAG} | navigator: ${irisNavigation.BUILD_TAG} | filler: ${irisRowFiller.BUILD_TAG}`;
 }
 function assertNavigatorBuild() {
-  if (irisNavigation.BUILD_TAG !== AGENT_BUILD_TAG) {
+  const mismatched = [
+    ["iris-navigation.js", irisNavigation.BUILD_TAG],
+    // The filler decides which cell a value lands in; a stale copy of it is as
+    // dangerous as a stale navigator, and it ships as a loose file too.
+    ["iris-row-filler.js", irisRowFiller.BUILD_TAG],
+  ].filter(([, tag]) => tag !== AGENT_BUILD_TAG);
+  if (mismatched.length) {
     throw new Error(
-      "Desktop files are mixed versions. Replace main.js and iris-navigation.js from the same fix15 patch and fully restart the agent.",
+      `Desktop files are mixed versions (${mismatched
+        .map(([name, tag]) => `${name}: ${tag || "untagged"}`)
+        .join(", ")} vs main: ${AGENT_BUILD_TAG}). Replace ${mismatched
+        .map(([name]) => name)
+        .join(
+          " and ",
+        )} from the same patch as main.js and fully restart the agent.`,
     );
   }
 }
@@ -266,8 +323,14 @@ function publishLaunchState() {
 }
 
 function normalizeDesktopAuthConfig(input = {}) {
+  const requestedLoginUrl =
+    typeof input.loginUrl === "string" ? input.loginUrl.trim() : "";
+  const loginUrl = isOfficialFbrUrl(requestedLoginUrl)
+    ? requestedLoginUrl
+    : REAL_FBR_ROOT;
+
   return {
-    loginUrl: typeof input.loginUrl === "string" ? input.loginUrl.trim() : "",
+    loginUrl,
     readySelector:
       typeof input.readySelector === "string"
         ? input.readySelector.trim()
@@ -286,74 +349,42 @@ function normalizeDesktopAuthConfig(input = {}) {
         : typeof input.successUrlPattern === "string"
           ? input.successUrlPattern.trim()
           : "",
-    useMockIris:
-      input.useMockIris === true ||
-      String(input.loginUrl || "").startsWith("mock-iris://"),
+    // FBR always uses the live portal. This remains in the handoff shape for
+    // compatibility with older agents, but it is hard-coded false so a stale
+    // launch link cannot switch the runtime to local pages.
+    useMockIris: false,
   };
-}
-
-function getMockIrisFile(fileName) {
-  return pathToFileURL(path.join(__dirname, "mock-iris", fileName)).toString();
 }
 
 function resolveDesktopLoginUrl() {
   if (launchState.flow === "fbr") {
-    const configured =
-      launchState.desktopAuthConfig.loginUrl ||
-      (launchState.desktopAuthConfig.useMockIris
-        ? "mock-iris://login"
-        : "https://iris.fbr.gov.pk/");
-    if (configured === "mock-iris://login") {
-      return getMockIrisFile("login.html");
-    }
-    return configured;
+    return launchState.desktopAuthConfig.loginUrl || REAL_FBR_ROOT;
   }
 
   return DLD_OWNER_LOGIN_URL;
 }
 
 function resolveWorkerEntryUrl(config) {
-  // Real-IRIS sessions must never open local mock fixtures — same guard as
-  // resolveMockIrisUrl, but ALSO keyed on the job config (config.useMockIris
-  // === false) because the localhost-bridge launch carries no loginUrl.
-  // Before the readiness fix this branch was unreachable on the live portal
-  // (the selector wait threw first), so the hardcoded mock return page here
-  // only surfaced after automation started surviving readiness.
+  // FBR jobs stay on the live portal, even when an old job contains an invalid
+  // or local entry URL.
   const configuredLoginUrl =
     realPortalLoginUrl ||
     (config && config.readiness && config.readiness.loginUrl) ||
     launchState.desktopAuthConfig?.loginUrl ||
     "";
-  const realHandoff =
-    realPortalMode ||
-    config?.useMockIris === false ||
-    (launchState.flow === "fbr" &&
-      /^https?:\/\//i.test(launchState.desktopAuthConfig?.loginUrl || ""));
-
-  const entryUrl = config?.dryRun?.entryUrl || "";
-
-  if (
-    realHandoff &&
-    (entryUrl === "mock-iris://return" ||
-      !entryUrl ||
-      String(entryUrl).startsWith("mock-iris://"))
-  ) {
+  const entryUrl = String(config?.dryRun?.entryUrl || "").trim();
+  if (!isOfficialFbrUrl(entryUrl)) {
     if (!realEntryFallbackAnnounced) {
       realEntryFallbackAnnounced = true;
       pushStatus(
         "progress",
-        "Real IRIS session detected: local mock pages are disabled. The agent will continue on the live portal (iris.fbr.gov.pk).",
+        "Connected to the real FBR portal. Continuing there.",
       );
     }
-    return /^https?:\/\//i.test(configuredLoginUrl)
+    return isOfficialFbrUrl(configuredLoginUrl)
       ? configuredLoginUrl
-      : "https://iris.fbr.gov.pk/";
+      : REAL_FBR_ROOT;
   }
-
-  if (entryUrl === "mock-iris://return" || !entryUrl) {
-    return getMockIrisFile("return.html");
-  }
-
   return entryUrl;
 }
 
@@ -842,12 +873,32 @@ async function navigateIris2DashboardFlow(windowInstance, formLabel) {
     }
   }
 
+  // Readiness is the WORKSPACE, not the presence of inputs: the
+  // Summary-of-Economic-Transactions gate also renders ten visible inputs, and
+  // treating that as "form ready" is how a job can start filling the wrong page.
+  let readiness = {
+    returnWorkspace: false,
+    inputs: formOpen,
+    probeFailed: true,
+  };
+  if (formOpen > 0) {
+    readiness = await windowInstance.webContents
+      .executeJavaScript(irisNavigation.RETURN_WORKSPACE_PROBE)
+      .then((value) => (value && typeof value === "object" ? value : readiness))
+      .catch(() => readiness);
+  }
+
   return {
     steps: [`iris2_${how}${editFallbackTried ? "+edit_ctl" : ""}`],
-    formReady: formOpen > 0,
-    detail:
-      `IRIS 2.0 dashboard strategy: "${how}"${rowText}` +
-      `${editFallbackTried ? " + row action control" : ""}, visible form fields: ${formOpen}.`,
+    formReady: Boolean(readiness.returnWorkspace),
+    readiness,
+    detail: readiness.returnWorkspace
+      ? `IRIS 2.0 dashboard strategy: "${how}"${rowText}` +
+        `${editFallbackTried ? " + row action control" : ""}, return workspace confirmed ` +
+        `(year/document/registration header present, ${readiness.inputs ?? formOpen} visible inputs).`
+      : `IRIS 2.0 dashboard strategy: "${how}"${rowText} — ${formOpen} visible input(s) but no ` +
+        `app-nitr-workflow header proving the return is open (tax-year/document/registration). ` +
+        `Held instead of filling an unconfirmed page.`,
   };
 }
 
@@ -871,8 +922,18 @@ async function navigateToIrisForm(
         detail: iris2.detail,
       };
     }
-    // Fall through to the legacy chain — it will fail and the job failure
-    // now carries DOM evidence to build the real selector bundle.
+    // Do NOT fall through to the legacy chain on the live portal. Its
+    // selectors (`#iris-return-form-ready`, `#return-tax-form`,
+    // `a[href*='IncomeTaxReturn']`) match 0 of 13 captured IRIS 2.0 pages, so
+    // the fall-through only burns ~30s of per-selector timeouts and then throws
+    // a message containing the word "selector" — which is how a readiness miss
+    // used to get mislabelled as selector drift. The mock keeps the chain below.
+    return {
+      steps: iris2.steps,
+      formReady: false,
+      readiness: iris2.readiness,
+      detail: iris2.detail,
+    };
   }
 
   // Step 1: Navigate top menu
@@ -1169,55 +1230,13 @@ async function verifyCompletionEvidence(windowInstance, routeSelector) {
   return evidence;
 }
 
-function resolveMockIrisUrl(value) {
-  // Real-IRIS sessions must never open local mock fixtures. The guard reads
-  // the JOB config (realPortalMode) first — set in processLocalJob — because
-  // the localhost-bridge launch path carries no loginUrl. When the launch
-  // handoff configured a real portal login URL, any mock-iris:// stage URL
-  // (e.g. from a stale job context) resolves to the real IRIS root instead.
-  const configuredLoginUrl =
-    realPortalLoginUrl || launchState.desktopAuthConfig?.loginUrl || "";
-  if (
-    String(value).startsWith("mock-iris://") &&
-    (realPortalMode ||
-      (launchState.flow === "fbr" &&
-        /^https?:\/\//i.test(launchState.desktopAuthConfig?.loginUrl || "")))
-  ) {
-    return configuredLoginUrl;
-  }
-  switch (value) {
-    case "mock-iris://login":
-      return getMockIrisFile("login.html");
-    case "mock-iris://dashboard":
-      return getMockIrisFile("dashboard.html");
-    case "mock-iris://return":
-      return getMockIrisFile("return.html");
-    case "mock-iris://password-reset":
-      return getMockIrisFile("password-reset.html");
-    case "mock-iris://otp-captcha":
-      return getMockIrisFile("otp-captcha.html");
-    case "mock-iris://payment":
-      return getMockIrisFile("payment.html");
-    case "mock-iris://final-review":
-      return getMockIrisFile("final-review.html");
-    case "mock-iris://completed":
-      return getMockIrisFile("completed.html");
-    // ── Phase 15.5a F6: Classic portal mock routes ──
-    case "mock-iris://classic-portal":
-      return getMockIrisFile("classic-portal.html");
-    case "mock-iris://classic-other-revenues":
-      return getMockIrisFile("classic-other-revenues.html");
-    case "mock-iris://classic-fixed-final-tax":
-      return getMockIrisFile("classic-fixed-final-tax.html");
-    case "mock-iris://classic-wealth-statement":
-      return getMockIrisFile("classic-wealth-statement.html");
-    case "mock-iris://classic-attributes":
-      return getMockIrisFile("classic-attributes.html");
-    case "mock-iris://classic-pin":
-      return getMockIrisFile("classic-pin.html");
-    default:
-      return value;
-  }
+function resolveFbrPortalUrl(value) {
+  const fallback =
+    realPortalLoginUrl ||
+    launchState.desktopAuthConfig?.loginUrl ||
+    REAL_FBR_ROOT;
+  const candidate = String(value || "").trim();
+  return isOfficialFbrUrl(candidate) ? candidate : fallback;
 }
 
 function getTrustedDeviceRegisterEndpoint() {
@@ -1339,7 +1358,7 @@ function applyLaunchUrl(rawValue) {
   if (localWorkerRunning) {
     pushStatus(
       "error",
-      "A navigation check is running. Wait for it to pause before reconnecting.",
+      "A filing is already in progress. Wait for it to pause before reconnecting.",
     );
     return false;
   }
@@ -1377,11 +1396,6 @@ function applyLaunchUrl(rawValue) {
         parsed.searchParams.get("successUrlPattern") ||
         "",
       loginUrl: parsed.searchParams.get("loginUrl") || "",
-      useMockIris:
-        parsed.searchParams.get("useMockIris") === "true" ||
-        String(parsed.searchParams.get("loginUrl") || "").startsWith(
-          "mock-iris://",
-        ),
     }),
   };
   setTrustedDeviceState({
@@ -1393,11 +1407,11 @@ function applyLaunchUrl(rawValue) {
   pushStatus(
     "ready",
     launchState.flow === "fbr"
-      ? "Connection request received. Opening Iris sign-in now."
+      ? "Connection request received. Opening FBR sign-in now."
       : "Connection request received. Opening MyDLD sign-in now.",
   );
   void createLoginWindow(true).catch((error) =>
-    pushStatus("error", error.message || "Could not open IRIS."),
+    pushStatus("error", error.message || "Could not open FBR."),
   );
 
   return true;
@@ -1417,7 +1431,7 @@ function applyLaunchPayload(payload) {
   if (localWorkerRunning) {
     pushStatus(
       "error",
-      "A navigation check is running. Wait for it to pause before reconnecting.",
+      "A filing is already in progress. Wait for it to pause before reconnecting.",
     );
     return false;
   }
@@ -1473,11 +1487,11 @@ function applyLaunchPayload(payload) {
   pushStatus(
     "ready",
     launchState.flow === "fbr"
-      ? "Connection request received. Opening Iris sign-in now."
+      ? "Connection request received. Opening FBR sign-in now."
       : "Connection request received. Opening MyDLD sign-in now.",
   );
   void createLoginWindow(true).catch((error) =>
-    pushStatus("error", error.message || "Could not open IRIS."),
+    pushStatus("error", error.message || "Could not open FBR."),
   );
   return true;
 }
@@ -1643,7 +1657,7 @@ async function collectPreFillComparison(windowInstance, portalFieldMap) {
 
   for (const field of portalFieldMap) {
     // Phase 15.5a F1: Use field.selector (actual CSS selector for classic portal JSF IDs)
-    // when available, falling back to data-tax-field-key for new-portal mock pages.
+    // when available, falling back to data-tax-field-key for legacy portal pages.
     const selector =
       field.selector ||
       `[data-tax-field-key="${String(field.key).replace(/"/g, '\\"')}"]`;
@@ -1723,25 +1737,59 @@ function inferLikelySelectorGroup(errorMessage, executionLog) {
   return "unknown_selector_group";
 }
 
-function buildSelectorDriftDiagnostics(errorMessage, executionLog, jobContext) {
+/**
+ * Evidence about the portal's own shape lives in the navigation module, next to the
+ * section lists it depends on — main.js delegates so the two cannot disagree.
+ */
+const buildPortalEvidenceDiagnostics =
+  irisNavigation.buildPortalEvidenceDiagnostics;
+
+function buildSelectorDriftDiagnostics(
+  errorMessage,
+  executionLog,
+  jobContext,
+  evidence = null,
+) {
   const message = String(errorMessage || "").toLowerCase();
+  // The word "selector" in a message is not evidence of drift, and neither is a
+  // readiness miss: the live pilot's `0/27 refused` run was labelled
+  // "update your selectors" because this function only string-matched.
   const selectorLikeFailure =
     message.includes("selector") ||
     message.includes("timed out waiting for selector") ||
-    message.includes("missing selector") ||
-    message.includes("target form was not detected as ready");
+    message.includes("missing selector");
 
   if (!selectorLikeFailure) {
     return null;
   }
+  // With a capture in hand, only missing rows justify calling it drift.
+  if (
+    evidence &&
+    evidence.state !== "rows_missing" &&
+    evidence.state !== "no_evidence"
+  ) {
+    return null;
+  }
 
+  const rowsMissing = Boolean(evidence && evidence.state === "rows_missing");
   return {
-    reasonCode: "selector_drift_suspected",
+    reasonCode: rowsMissing
+      ? "selector_drift_confirmed_by_capture"
+      : "selector_drift_suspected",
     likelySelectorGroup: inferLikelySelectorGroup(message, executionLog),
     selectorBundle: getSelectorBundleSignal(jobContext),
+    evidence: evidence
+      ? {
+          state: evidence.state,
+          driftedSections: evidence.drifted,
+          unverifiedSections: evidence.unverified,
+        }
+      : null,
     recommendedActions: [
       "Capture a fresh screenshot of the failed IRIS screen on the trusted device.",
-      "Update the affected selector group in the active selector bundle.",
+      rowsMissing
+        ? `These sections rendered zero rows although their panels were found: ${evidence.drifted.join(", ")}. Update only the selectors that open them.`
+        : "Update the affected selector group in the active selector bundle.",
       "Re-run the job from the latest approved packet after bundle update.",
     ],
   };
@@ -1758,15 +1806,79 @@ function looksLikeSessionReconnectNeeded(errorMessage) {
   );
 }
 
+/**
+ * A fill that the portal REFUSED (derived column, computed row, no matching row) is a
+ * mapping problem, not selector drift. That distinction is the whole point of this
+ * branch: the live pilot parked a job on `selector_bundle_update` for what was really
+ * 24 `column_disabled` refusals, because the classifier only string-matched the word
+ * "selector" out of the thrown message. Telling an operator to rewrite selectors
+ * instead of fixing the packet's column target wastes the one thing this pilot has
+ * scarce of — a real filing window.
+ */
+function buildMappingRefusalDiagnostics(executionLog) {
+  const steps = Array.isArray(executionLog) ? executionLog : [];
+  const refusals = [];
+  for (const entry of steps) {
+    if (entry?.step !== "real_autofill_skip") continue;
+    refusals.push(String(entry.detail || ""));
+  }
+  if (!refusals.length) return null;
+
+  const counts = new Map();
+  for (const line of refusals) {
+    const status = line.split("->")[1]?.trim().split(" ")[0] || "unknown";
+    counts.set(status, (counts.get(status) || 0) + 1);
+  }
+  const derived =
+    (counts.get("column_disabled") || 0) +
+    (counts.get("no_editable_cell") || 0);
+  const unplaced = counts.get("row_not_found") || 0;
+  return {
+    reasonCode: "portal_mapping_refused",
+    refusalCount: refusals.length,
+    byStatus: Object.fromEntries(counts),
+    likelyCause:
+      derived >= unplaced
+        ? "The packet targeted IRIS-derived columns or computed rows. IRIS derives Total/Final/Exemption/Normal itself; only the entered column may be written."
+        : "The packet carries IRIS codes that this taxpayer's return does not render. Each one must be a named mapping gap, not a fallback row.",
+    recommendedActions: [
+      "Rebuild the packet so portalFieldMap is version 1.1.0 or newer (aggregated, entered-column targeting, mappingGaps reported).",
+      "Treat portalFieldMap.mappingGaps entries as manual-entry work, not as a selector problem.",
+      "Re-run in dry mode and confirm 'no refusal is left behind' before going live.",
+    ],
+    refusals: refusals.slice(0, 40),
+  };
+}
+
 function classifyRecoverableAssistedIssue(
   errorMessage,
   executionLog,
   jobContext,
+  portalEvidence = null,
 ) {
+  const mappingRefusal = buildMappingRefusalDiagnostics(executionLog);
+  if (mappingRefusal) {
+    return {
+      requiredAction: "portal_mapping_review",
+      message:
+        "IRIS refused the packet's field mapping; no selector bundle change can fix that.",
+      pauseReason: `${mappingRefusal.refusalCount} field(s) were refused by the portal (${Object.entries(
+        mappingRefusal.byStatus,
+      )
+        .map(([status, count]) => `${count} ${status}`)
+        .join(", ")}).`,
+      userInstruction:
+        "Review the packet mapping gaps and re-approve. The portal was not modified.",
+      selectorDriftDiagnostics: null,
+      mappingRefusalDiagnostics: mappingRefusal,
+    };
+  }
+
   const selectorDriftDiagnostics = buildSelectorDriftDiagnostics(
     errorMessage,
     executionLog,
     jobContext,
+    portalEvidence,
   );
   if (selectorDriftDiagnostics) {
     return {
@@ -1777,6 +1889,22 @@ function classifyRecoverableAssistedIssue(
       userInstruction:
         "Update the affected selector bundle entry, then confirm to retry this phase.",
       selectorDriftDiagnostics,
+    };
+  }
+
+  // The tour found the panels but could not bind headers to rows. That is a
+  // verification gap, not a broken selector: say so, with the per-section numbers,
+  // instead of pointing the operator at the selector bundle.
+  if (portalEvidence && portalEvidence.state === "structure_unverified") {
+    return {
+      requiredAction: "portal_structure_review",
+      message:
+        "IRIS rendered the sections but the agent could not verify their column/row binding, so nothing was written into them.",
+      pauseReason: `Unverified structure in: ${portalEvidence.unverified.join(", ")}.`,
+      userInstruction:
+        "Either re-run the inspection so the grids are expanded, or enter these sections manually. The selector bundle does not need changing.",
+      selectorDriftDiagnostics: null,
+      portalEvidence,
     };
   }
 
@@ -2038,7 +2166,7 @@ async function waitForIrisLogin(windowInstance, timeoutMs = 5 * 60 * 1000) {
       announced = true;
       pushStatus(
         "progress",
-        "IRIS login required: log in (CNIC/NTN + password + captcha) inside the agent return window, then wait here.",
+        "FBR sign-in required: complete your CNIC/NTN, password, and CAPTCHA in the FBR window, then wait here.",
       );
     }
     await new Promise((resolve) => setTimeout(resolve, pollMs));
@@ -2048,9 +2176,6 @@ async function waitForIrisLogin(windowInstance, timeoutMs = 5 * 60 * 1000) {
 
 /**
  * Confirm the IRIS dashboard is ready before automation touches it.
- *
- * Mock mode: the ready selector is a fixture element, so a missing selector
- * is a real failure and throws.
  *
  * Real portal: the trusted session may not have carried into this window, so
  * wait for the user's IRIS login FIRST. Only then check the ready selector —
@@ -2073,7 +2198,7 @@ async function confirmIrisReadiness(
   const loggedIn = await waitForIrisLogin(windowInstance);
   if (!loggedIn) {
     throw new Error(
-      "IRIS login was not completed in the agent window. Restart the filing and complete the login (CNIC/NTN, password, captcha) inside the return window.",
+      "FBR sign-in was not completed. Restart the filing and complete your CNIC/NTN, password, and CAPTCHA in the FBR window.",
     );
   }
 
@@ -2089,7 +2214,7 @@ async function confirmIrisReadiness(
     executionLog.push({
       step: STANDARD_LOG_STEPS.READINESS_CHECK,
       label: "Ready selector not found on the live portal",
-      detail: `IRIS login is confirmed, but "${readySelector}" was not detected (${
+      detail: `FBR sign-in is confirmed, but "${readySelector}" was not detected (${
         error instanceof Error ? error.message : String(error)
       }). Continuing on the live portal — set FBR_IRIS_READY_SELECTOR to the correct dashboard element to restore this check.`,
     });
@@ -2657,7 +2782,7 @@ async function clickClassicTreePanel(windowInstance, headerText) {
     (() => {
       const searchText = ${JSON.stringify(headerText)};
 
-      // Strategy 1: Find .panel-header links (our mock pages)
+      // Strategy 1: Find .panel-header links (legacy portal pages)
       let headers = document.querySelectorAll('.panel-header');
       for (const h of headers) {
         if ((h.textContent || '').trim().includes(searchText)) {
@@ -2753,7 +2878,7 @@ async function clickClassicTreeMenuItem(windowInstance, itemText) {
         }
       }
 
-      // Strategy 2: Find any sub-item link by data-nav attribute (mock pages)
+      // Strategy 2: Find any sub-item link by data-nav attribute (legacy portal pages)
       const allSubLinks = document.querySelectorAll('.sub-items a, [data-nav]');
       for (const link of allSubLinks) {
         if ((link.textContent || '').trim().includes(searchText)) {
@@ -3042,7 +3167,21 @@ async function handleClassicAddRow(windowInstance, rowDesc) {
  * @param {BrowserWindow} windowInstance - Electron BrowserWindow
  * @returns {Promise<{steps: string[], success: boolean}>}
  */
-async function navigateNewPortalPreRedirectFlow(windowInstance) {
+async function navigateNewPortalPreRedirectFlow(
+  windowInstance,
+  residencyStatus,
+) {
+  const normalizedResidencyStatus =
+    normalizeExplicitResidencyStatus(residencyStatus);
+  if (!normalizedResidencyStatus) {
+    throw new Error(
+      "Missing filing context: select Resident or Non-Resident before portal navigation. No portal action was taken.",
+    );
+  }
+  const residencyInputValue =
+    normalizedResidencyStatus === "Resident" ? "yes" : "no";
+  const residencyOptionText =
+    normalizedResidencyStatus === "Resident" ? "yes" : "no";
   const steps = [];
 
   // FBR5: Select "Normal Return" radio button
@@ -3118,8 +3257,8 @@ async function navigateNewPortalPreRedirectFlow(windowInstance) {
             // Find the associated radio — look for "Yes"
             const container = label.closest('div, fieldset, .form-group');
             if (container) {
-              const yesRadio = container.querySelector('input[value="yes"], input[id*="yes"], input[id*="resident"]');
-              if (yesRadio) { yesRadio.checked = true; yesRadio.click(); return true; }
+              const targetRadio = container.querySelector('input[value="${residencyInputValue}"], input[id*="${residencyInputValue}"], input[id*="resident"]');
+              if (targetRadio) { targetRadio.checked = true; targetRadio.click(); return true; }
             }
             // Fallback: first radio in the group
             const firstRadio = label.parentElement?.querySelector?.('input[type="radio"]');
@@ -3131,7 +3270,7 @@ async function navigateNewPortalPreRedirectFlow(windowInstance) {
         const radios = document.querySelectorAll('input[type="radio"]');
         for (const r of radios) {
           const parentText = (r.parentElement?.textContent || '').trim().toLowerCase();
-          if (parentText === 'yes' || parentText.includes('resident')) {
+          if (parentText === '${residencyOptionText}' || parentText === '${normalizedResidencyStatus.toLowerCase()}') {
             r.checked = true; r.click(); return true;
           }
         }
@@ -3294,23 +3433,22 @@ async function navigateToClassicSection(windowInstance, irisSection) {
  * it's ready. Per-section navigation happens separately via navigateToClassicSection()
  * during the fill loop, because each section is on its own JSF form page.
  *
- * For mock mode: loads the classic-portal.html mock page.
- * For live mode: navigates pre-redirect screens (FBR5-FBR8), then verifies tree panel.
+ * Navigates pre-redirect screens (FBR5-FBR8), then verifies the tree panel.
  *
  * @param {BrowserWindow} windowInstance - Electron BrowserWindow
  * @param {Object} routeSelector - Route selector config
- * @param {boolean} useMockIris - Whether to use mock pages
  * @returns {Promise<{steps: string[], formReady: boolean, detail: string}>}
  */
 async function navigateClassicPortalFlow(
   windowInstance,
   routeSelector,
   useMockIris,
+  residencyStatus,
 ) {
   const steps = [];
 
   if (useMockIris) {
-    const classicUrl = resolveMockIrisUrl("mock-iris://classic-portal");
+    const classicUrl = resolveFbrPortalUrl("https://iris.fbr.gov.pk/");
     await windowInstance.loadURL(classicUrl);
     await new Promise((resolve) => setTimeout(resolve, 2000));
     steps.push("classic_portal_loaded");
@@ -3325,8 +3463,10 @@ async function navigateClassicPortalFlow(
     };
   }
 
-  const preRedirectResult =
-    await navigateNewPortalPreRedirectFlow(windowInstance);
+  const preRedirectResult = await navigateNewPortalPreRedirectFlow(
+    windowInstance,
+    residencyStatus,
+  );
   steps.push(...preRedirectResult.steps.map((s) => `preredirect_${s}`));
   steps.push("awaiting_classic_portal");
 
@@ -3374,6 +3514,17 @@ function isClassicPortalRoute(routeMetadata) {
   return routeMetadata?.routeFamily === "classic_individual_114";
 }
 
+function normalizeExplicitResidencyStatus(value) {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, "-");
+  if (normalized === "resident") return "Resident";
+  if (normalized === "non-resident" || normalized === "nonresident")
+    return "Non-Resident";
+  return null;
+}
+
 async function runLocalIrisNavigationCheck(jobContext, job) {
   assertNavigatorBuild();
   const windowInstance = await ensureWorkerWindow();
@@ -3388,17 +3539,117 @@ async function runLocalIrisNavigationCheck(jobContext, job) {
       "The approved packet does not specify a valid tax year. No portal action was taken.",
     );
   }
-  const portalFieldMap = Array.isArray(snapshot.portalFieldMap)
-    ? snapshot.portalFieldMap
-    : [];
-  const residencyStatus = String(
-    portalFieldMap.find((entry) => entry?.key === "return.residency_status")
-      ?.value || "",
-  ).trim();
+  const residencyStatus = normalizeExplicitResidencyStatus(
+    snapshot.filing?.residencyStatus,
+  );
+  if (!residencyStatus) {
+    const pauseMessage =
+      "Missing filing context: select Resident or Non-Resident in TaxRocket before starting FBR navigation. No portal action was taken.";
+    const executionLog = [
+      {
+        step: "missing_residency_context",
+        label: "Missing residency context",
+        detail: pauseMessage,
+      },
+    ];
+    const result = {
+      mode: "live_return_navigation_only",
+      requiredAction: "missing_residency_context",
+      message: pauseMessage,
+      pauseReason: pauseMessage,
+      taxYear,
+      submitted: false,
+      navigationVerified: false,
+      sectionTourComplete: false,
+      captures: [],
+    };
+    await updateLocalJobStatus(job.id, "awaiting_user_action", {
+      pauseAction: "missing_residency_context",
+      pauseMessage,
+      result,
+      executionLog,
+    });
+    return {
+      paused: true,
+      pauseAction: "missing_residency_context",
+      pauseMessage,
+      result,
+      executionLog,
+    };
+  }
+  const reconciliationStatus = String(
+    snapshot.filing?.reconciliationStatus || "",
+  ).toUpperCase();
+  const reconciliationGapRaw = snapshot.filing?.reconciliationGap;
+  const reconciliationGap = Number(
+    reconciliationGapRaw === null || reconciliationGapRaw === undefined
+      ? NaN
+      : String(reconciliationGapRaw).replace(/,/g, ""),
+  );
+  const reconciliationResolved =
+    reconciliationStatus === "RESOLVED" &&
+    Number.isFinite(reconciliationGap) &&
+    reconciliationGap === 0;
+  if (!reconciliationResolved) {
+    const gapText = Number.isFinite(reconciliationGap)
+      ? ` The recorded unresolved amount is PKR ${Math.abs(reconciliationGap).toLocaleString()}.`
+      : "";
+    const pauseMessage = `Your TaxRocket return data still needs reconciliation.${gapText} Resolve the outstanding amount before starting FBR. No portal action was taken.`;
+    const executionLog = [
+      {
+        step: "reconciliation_review_required",
+        label: "Reconciliation review required",
+        detail: pauseMessage,
+      },
+    ];
+    const result = {
+      mode: "live_return_navigation_only",
+      requiredAction: "portal_reconciliation_review",
+      message: pauseMessage,
+      pauseReason: pauseMessage,
+      taxYear,
+      submitted: false,
+      navigationVerified: false,
+      sectionTourComplete: false,
+      reconciliationStatus,
+      reconciliationGap: Number.isFinite(reconciliationGap)
+        ? reconciliationGap
+        : null,
+      captures: [],
+    };
+    await updateLocalJobStatus(job.id, "awaiting_user_action", {
+      pauseAction: "portal_reconciliation_review",
+      pauseMessage,
+      result,
+      executionLog,
+    });
+    return {
+      paused: true,
+      pauseAction: "portal_reconciliation_review",
+      pauseMessage,
+      result,
+      executionLog,
+    };
+  }
+  const packetIncomeSources = Array.isArray(snapshot.filing?.incomeSources)
+    ? snapshot.filing.incomeSources.map((source) => String(source))
+    : null;
+  // An approved packet has passed the wealth-reconciliation gate. That is the
+  // packet-backed answer to IRIS's Wealth Confirmation question; do not infer it
+  // from whatever the live page happens to show.
+  const wealthStatement = Boolean(
+    snapshot.filing?.reconciliationStatus === "RESOLVED" ||
+    snapshot.filing?.openingWealth != null ||
+    snapshot.filing?.closingWealth != null ||
+    (Array.isArray(snapshot.portalFieldMap?.wealthFields) &&
+      snapshot.portalFieldMap.wealthFields.length > 0),
+  );
   const newReturnContext = {
     routeFamily: snapshot.routeMetadata?.routeFamily || null,
     filingIntent: snapshot.routeMetadata?.filingIntent || "original",
     residencyStatus: residencyStatus || null,
+    incomeSources: packetIncomeSources,
+    wealthStatement,
   };
   const executionLog = [];
   activeJobExecutionLog = executionLog;
@@ -3412,7 +3663,7 @@ async function runLocalIrisNavigationCheck(jobContext, job) {
   );
   onStep(
     "new_return_context",
-    `Route=${newReturnContext.routeFamily || "unknown"}; filingIntent=${newReturnContext.filingIntent || "unknown"}; residency=${newReturnContext.residencyStatus || "not provided in packet/context"}.`,
+    `Route=${newReturnContext.routeFamily || "unknown"}; filingIntent=${newReturnContext.filingIntent || "unknown"}; residency=${newReturnContext.residencyStatus || "not provided in packet/context"}; incomeSources=${packetIncomeSources ? packetIncomeSources.length : "not provided"}; wealthStatement=${wealthStatement}.`,
   );
   const taxpayerIdentifier = String(launchState.accountReference || "")
     .trim()
@@ -3425,7 +3676,33 @@ async function runLocalIrisNavigationCheck(jobContext, job) {
     "agent_handoff",
     `Main ${AGENT_BUILD_TAG}; navigator ${irisNavigation.BUILD_TAG}; openReturn=true; inspectSections=true; targetConfigured=${/^(?:\d{7}|\d{8}|\d{13})$/.test(taxpayerIdentifier)}.`,
   );
-  if (lastTourStateKey !== stateKey) lastSectionTour = null;
+  const allowedHandoffSections = new Set(
+    irisNavigation.SALARY_WITHHOLDING_SECTION_IDS,
+  );
+  const compatibleTour = (tour) =>
+    Boolean(
+      tour &&
+      Array.isArray(tour.sections) &&
+      tour.sections.every((entry) => allowedHandoffSections.has(entry?.id)) &&
+      tour.sections.length <= allowedHandoffSections.size,
+    );
+  if (lastTourStateKey !== stateKey || !compatibleTour(lastSectionTour)) {
+    lastSectionTour = null;
+  }
+  const storedNavigationState = navigationStates.get(stateKey);
+  if (
+    storedNavigationState.sectionTour &&
+    !compatibleTour(storedNavigationState.sectionTour)
+  ) {
+    // A resumed fix24 job may still carry a completed broad tour. Discard it
+    // before this narrower Salary + withholding test so stale Property/Wealth/
+    // Payments/Computations state cannot be replayed.
+    storedNavigationState.sectionTour = null;
+    onStep(
+      "stale_section_tour_reset",
+      "Discarded stale section state; this handoff will inspect only Salary and Salary withholding.",
+    );
+  }
   lastTourStateKey = stateKey;
   const requestedFamily = packet.snapshot?.routeMetadata?.routeFamily;
   const supportedFamily =
@@ -3441,10 +3718,10 @@ async function runLocalIrisNavigationCheck(jobContext, job) {
           openReturn: true,
           state: navigationStates.get(stateKey),
           inspectSections: true,
-          // Income/tax views only. The 116 Wealth Statement is a separate
-          // document, not a panel in this workflow, and blocking the tour on it
-          // stops every section the autofill actually needs.
-          sectionIds: irisNavigation.INCOME_SECTION_IDS,
+          // This supervised test explicitly includes Salary and its withholding
+          // grid so the verified 64020004 row can be filled. Property, Wealth,
+          // Payments, Computations, and other unsupported routes remain closed.
+          sectionIds: irisNavigation.SALARY_WITHHOLDING_SECTION_IDS,
           beforeStep: () =>
             ensureNavigationJobActive(job.id, taxpayerIdentifier),
           onSectionCaptured: async (snapshot) => {
@@ -3504,45 +3781,73 @@ async function runLocalIrisNavigationCheck(jobContext, job) {
     };
   const inspectionPath = writePortalInspectionToDisk(outcome.inspection, job);
   const rows = outcome.inspection.frames.flatMap((frame) => frame.rows || []);
+  const economicSourceLabels = {
+    salary: "Income from Salary",
+    pension: "Income from Other Sources",
+    property_rent: "Property Rental Income",
+    services: "Income from Business",
+    bank_profit: "Income from Other Sources",
+    dividend: "Income from Other Sources",
+    capital_gains: "Capital Gain",
+    capital_gain: "Capital Gain",
+    business: "Income from Business",
+    agriculture: "Income from Agriculture",
+    foreign_income_assets: "Income from Foreign Sources and Assets",
+    other_income: "Income from Other Sources",
+  };
+  const expectedEconomicSources = (packetIncomeSources || [])
+    .map(
+      (source) =>
+        economicSourceLabels[String(source).toLowerCase()] || String(source),
+    )
+    .filter(Boolean);
+  const economicGateMessage =
+    expectedEconomicSources.length > 0
+      ? `In the FBR window, select only ${expectedEconomicSources.join(", ")} and choose ${residencyStatus === "Resident" ? "Yes (Resident)" : "No (Non-Resident)"}. Then choose Continue filing here. Do not submit the return.`
+      : "In the FBR window, answer the income and residency questions for this filing, then choose Continue filing here. Do not submit the return.";
   const messages = {
     session_reconnect:
-      "Complete IRIS sign-in in the existing agent window, then retry the navigation check. No form was changed.",
+      "Sign in to FBR in the open window, then choose Continue. Nothing was changed.",
     portal_popup:
-      "An IRIS dialog is still open. Close only the welcome popup, or complete the required verification locally, then retry. The agent did not hide or bypass it.",
-    portal_inspection: `IRIS structure captured: ${rows.length} visible return/wealth draft row(s). No values were filled, saved or submitted.`,
+      "An FBR dialog is open. Complete the required verification locally, then choose Continue. The agent did not bypass it.",
+    portal_inspection: `Your FBR return is being prepared. No values were entered, saved or submitted.`,
     portal_readiness_unverified:
-      "The portal screen could not be positively identified yet; no login prompt was detected. Keep the intended IRIS window open, wait for it to finish loading and Retry. Export the current structure if this repeats. The agent did not assume you are logged out.",
+      "FBR is still loading. Keep the intended FBR window open, wait a moment, and choose Continue.",
     portal_identity_required:
-      "Enter the intended taxpayer CNIC/NTN in the desktop agent main window (local only), then Retry navigation. It must match the draft and the opened return.",
+      "Confirm the intended taxpayer CNIC or NTN in the FBR window, then choose Continue. It must match this filing.",
     portal_taxpayer_mismatch:
-      "The draft/return registration number does not match the locally entered target, or could not be verified. Check the correct IRIS account and target CNIC/NTN. No tax values were changed.",
+      "The taxpayer details in FBR do not match this filing. Check the correct FBR account and taxpayer before continuing. No tax values were changed.",
     portal_document_mismatch:
-      "The document form, full-year period or tax year is not the requested original 114(1) return. Check the correct draft manually; the agent will not switch or create a different document blindly.",
+      "The open FBR return does not match the requested form, full-year period, or tax year. Check the correct return before continuing.",
     portal_draft_ambiguous:
-      "Multiple matching drafts were found. Open the intended draft manually, then Retry. No draft was chosen automatically.",
+      "More than one matching return was found. Open the return you intend to file, then choose Continue.",
     portal_draft_list_incomplete:
-      "The complete IT Declaration list is not visible (pagination/filter/count mismatch). Show all rows or open the intended draft manually, then Retry. The agent did not assume the draft is missing or open a new-return entry.",
-    portal_economic_transactions_gate:
-      'IRIS is showing the "Summary of Economic Transactions" gate reached from the blue dashboard tile. Tick your income sources and answer the tax-residency question yourself, then click "Start Return Filling" locally and Retry. The agent will not answer these for you: residency under ITO sections 82-84 and the choice of income sources are your declarations, and they decide which schedules IRIS opens.',
-    portal_new_return_setup: `No matching draft was found in the complete displayed list. The new Original TY2026+ return menu is open. Select the intended 114(1) form and TY${taxYear} period locally, handle any required setup questions, then Retry. Do not submit the return. No Create/Save/Submit control was clicked by the agent.`,
+      "The full list of FBR returns is not visible. Show the complete list or open the intended return, then choose Continue.",
+    portal_economic_transactions_gate: economicGateMessage,
+    portal_reconciliation_review:
+      "The TaxRocket return data still has an unresolved reconciliation amount. Resolve it before starting FBR. No portal values were changed.",
+    portal_new_return_setup: `FBR needs the return setup completed. Select the intended 114(1) form and TY${taxYear} period, answer only the questions you know, then choose Continue. Do not submit the return.`,
     portal_sections_inspected:
-      "The seven requested Data sections plus Payment and Attachment were inspected. Each grid has its own headers and row context in the export. This is NOT a filed return: no amounts, uploads or payments were made and Save/Submit were not clicked.",
+      "Your return is prepared for review. No amounts, uploads, payments, saves, or submissions were made.",
     portal_section_navigation:
-      "A section menu could not be opened safely. The completed sections are retained. Export the current structure and Retry from this checkpoint; no amounts were changed.",
+      "The requested part of the FBR return could not be opened safely. Your progress is retained; choose Continue to try again. No amounts were changed.",
     portal_section_capture:
-      "The selected section did not expose a stable new field grid or explicit empty state. Previous-section fields were not mislabeled as this section. Export the current structure; Retry resumes this section.",
+      "The current part of the FBR return is not ready. No fields were mislabeled or changed. Choose Continue to try again.",
+    portal_autofill_review:
+      "Some approved packet fields could not be placed safely. Review the named fields in the FBR window. Nothing was saved or submitted.",
     portal_identity_changed:
-      "The local taxpayer target changed while the agent was working. Old section checkpoints were cleared. Confirm the intended target in the desktop main window and Retry.",
+      "The taxpayer selection changed while filing. Confirm the intended taxpayer in FBR, then choose Continue.",
     portal_job_check_unavailable:
-      "The desktop could not check the current web job. Make sure the fix13 status API route is installed and the web server is running, then Retry. This is not an IRIS-login error.",
-    portal_fields_verified: `Matching original 114(1) return for TY${taxYear} opened. Salary's four-column layout and editable/calculated cells were verified. This navigation test is finished; no amounts were entered and nothing was saved or submitted.`,
+      "TaxRocket could not check the filing connection. Make sure the web app is open, then choose Continue.",
+    portal_fields_verified: `Your TY${taxYear} Salary return is open and the Salary plus withholding fields are ready. No amounts were saved or submitted.`,
     portal_fields_unverified:
-      "The document opened, but the expected Salary field layout is not ready/verified. Export IRIS structure for review. No amount fields were changed.",
+      "The return opened, but the Salary fields could not be verified. No amount fields were changed. Choose Continue to try again.",
     portal_navigation:
-      "The expected navigation control or opened document was not verified. Export the current IRIS structure. If a new-return wizard is displayed, finish only its form/year setup locally and Retry; do not submit.",
+      "The expected FBR return could not be verified. Keep the correct FBR return open, then choose Continue. Do not submit.",
     portal_unsupported_route:
-      "This navigation build supports original full-year 114(1) only. The approved packet requests a different route, so it was not substituted automatically.",
+      "This filing currently supports the Salary return only. The requested return was not changed or substituted.",
   };
+
   const pauseMessage =
     outcome.pauseMessage ||
     messages[outcome.requiredAction] ||
@@ -3645,11 +3950,63 @@ async function runRealIrisAutofill(jobContext, job, mode) {
   );
 
   if (!coded.length) {
+    const pauseMessage =
+      "No approved FBR fields were available for this handoff. Review the filing packet before continuing. Nothing was saved, submitted, calculated, or paid.";
     onStep(
       "real_autofill_skipped",
-      "The approved packet contains no IRIS-coded fields, so there is nothing to fill.",
+      "The approved packet contains no IRIS-coded fields, so the handoff cannot be marked complete.",
     );
-    return { paused: false, executionLog, result: { filled: 0, results: [] } };
+    return {
+      paused: true,
+      pauseAction: "portal_autofill_review",
+      pauseMessage,
+      executionLog,
+      result: {
+        mode,
+        summary: { total: 0, filled: 0, skipped: 0, byStatus: {} },
+        results: [],
+        message: pauseMessage,
+        reviewRequired: true,
+      },
+    };
+  }
+
+  // The tour drives navigation section by section from whatever is on screen, and
+  // it only works inside the return. After a resume — or a start where the draft
+  // row's dblclick did not open anything — the window can be sitting on the
+  // dashboard or the economic-transactions gate, and every section lookup would
+  // then report `row_not_found` and the operator would read that as "the packet is
+  // wrong". Prove the workspace first; hold with the reason if it is not there.
+  const workspace = await windowInstance.webContents
+    .executeJavaScript(irisNavigation.RETURN_WORKSPACE_PROBE)
+    .catch((error) => ({
+      returnWorkspace: false,
+      reason: `probe_failed: ${error instanceof Error ? error.message : String(error)}`,
+    }));
+  onStep(
+    workspace?.returnWorkspace
+      ? "real_autofill_workspace_confirmed"
+      : "real_autofill_workspace_missing",
+    workspace?.returnWorkspace
+      ? `Return workspace confirmed (${workspace.inputs ?? "?"} entered inputs).`
+      : `No return workspace on screen (${workspace?.reason || "unknown"}). ` +
+          `Open the intended 114(1)/116 return so the tax-year header is visible, then resume — ` +
+          `nothing was filled and no section tour was attempted.`,
+  );
+  if (!workspace?.returnWorkspace) {
+    return {
+      paused: true,
+      pauseAction: "portal_state_confirmation",
+      pauseMessage:
+        "The agent could not prove the return is open, so it held instead of filling.",
+      executionLog,
+      result: {
+        mode,
+        workspace,
+        summary: { total: coded.length, filled: 0, skipped: 0, byStatus: {} },
+        results: [],
+      },
+    };
   }
 
   // Phase 2a. The section tour leaves the portal on its last view (Attachment,
@@ -3693,10 +4050,34 @@ async function runRealIrisAutofill(jobContext, job, mode) {
       "real_autofill_section",
       `${group.sectionId}: ${moved.status}; filling ${group.fields.length} field(s).`,
     );
+    // The tour reports, per section, whether the header/row binding was proven
+    // (`mappingVerified`). In the live capture only `salary` had it — six of seven
+    // sections came back unverified because their grids render more than one
+    // heading bar. Writing into a section whose structure we could not prove is
+    // exactly how a wrong number reaches a return, so live mode refuses.
+    const sectionVerified = Boolean(
+      sectionTour?.sections?.find((entry) => entry?.id === group.sectionId)
+        ?.mappingVerified,
+    );
+    if (mode !== "dry" && !sectionVerified) {
+      onStep(
+        "real_autofill_section_unverified",
+        `${group.sectionId}: the section tour could not verify its header/row binding, so ${group.fields.length} field(s) were left untouched. Re-run the inspection (or use dry mode) to review the targets.`,
+      );
+      results = results.concat(
+        group.fields.map((field) => ({
+          ...field,
+          status: irisRowFiller.FILL_STATUS.UNVERIFIED_TARGET,
+          sectionId: group.sectionId,
+          sectionStatus: "section_mapping_unverified",
+        })),
+      );
+      continue;
+    }
     const outcome = await irisRowFiller.fillIrisRows(
       windowInstance,
       group.fields,
-      { dryRun: mode === "dry" },
+      { dryRun: mode === "dry", sectionVerified },
     );
     results = results.concat(
       outcome.results.map((entry) => ({
@@ -3734,16 +4115,24 @@ async function runRealIrisAutofill(jobContext, job, mode) {
   const captures = [
     await captureWindowScreenshot(windowInstance, "real_autofill"),
   ];
+  const fillMessage = irisRowFiller.describeFillSummary(summary);
+  const autofillReviewRequired = summary.skipped > 0;
+  const pauseMessage = autofillReviewRequired
+    ? `The FBR return opened, but ${summary.skipped} approved field(s) could not be placed safely (${fillMessage}). Review those fields in the FBR window. Nothing was saved, submitted, calculated, or paid.`
+    : null;
 
   return {
-    paused: false,
+    paused: autofillReviewRequired,
+    pauseAction: autofillReviewRequired ? "portal_autofill_review" : null,
+    pauseMessage,
     executionLog,
     result: {
       mode,
       summary,
       results,
       captures,
-      message: irisRowFiller.describeFillSummary(summary),
+      message: fillMessage,
+      reviewRequired: autofillReviewRequired,
     },
   };
 }
@@ -3768,7 +4157,14 @@ async function finishNavigationOnly(navigation, job) {
 
 async function runLocalTaxDryRunFlow(jobContext) {
   if (realPortalMode) {
-    const autofillMode = getRealAutofillMode();
+    const {
+      mode: autofillMode,
+      downgradedFrom,
+      note: autofillGateNote,
+    } = resolveAutofillMode(jobContext);
+    if (downgradedFrom && autofillGateNote) {
+      pushStatus("progress", autofillGateNote);
+    }
     // Navigation check first: it drives the taxpayer to the right return and
     // is where all the login/route/pause handling lives. Only once it reports
     // an un-paused, ready form does filling make sense.
@@ -3813,15 +4209,10 @@ async function runLocalTaxDryRunFlow(jobContext) {
     );
   }
 
-  const readySelector =
-    config?.readiness?.readySelector || "#iris-dashboard-ready";
+  const readySelector = config?.readiness?.readySelector || "#homeLink";
   const entryUrl = resolveWorkerEntryUrl(config);
 
-  if (config.useMockIris) {
-    await windowInstance.loadURL(getMockIrisFile("dashboard.html"));
-  } else {
-    await windowInstance.loadURL(config?.readiness?.loginUrl || entryUrl);
-  }
+  await windowInstance.loadURL(config?.readiness?.loginUrl || entryUrl);
 
   // Real portal: login confirmation first, advisory selector check second —
   // see confirmIrisReadiness. The old order timed out on the live portal.
@@ -3854,6 +4245,7 @@ async function runLocalTaxDryRunFlow(jobContext) {
       windowInstance,
       routeSelector,
       Boolean(config.useMockIris),
+      normalizeExplicitResidencyStatus(snapshot.filing?.residencyStatus),
     );
 
     executionLog.push({
@@ -4153,7 +4545,14 @@ async function pauseAssistedPilot(job, windowInstance, input) {
 
 async function runLocalTaxAssistedFilingFlow(jobContext, job) {
   if (realPortalMode) {
-    const autofillMode = getRealAutofillMode();
+    const {
+      mode: autofillMode,
+      downgradedFrom,
+      note: autofillGateNote,
+    } = resolveAutofillMode(jobContext);
+    if (downgradedFrom && autofillGateNote) {
+      pushStatus("progress", autofillGateNote);
+    }
     const navigation = await runLocalIrisNavigationCheck(jobContext, job);
     if (autofillMode === "off" || navigation?.paused) {
       return await finishNavigationOnly(navigation, job);
@@ -4161,6 +4560,35 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
     // Assisted filing still stops before Save/Submit — this only populates the
     // data grid for the supervising user to review.
     const autofill = await runRealIrisAutofill(jobContext, job, autofillMode);
+    if (autofill?.paused) {
+      // A skipped approved field is not a completed filing. Keep the return
+      // awaiting review instead of showing a misleading "Filing finished" state.
+      const executionLog = [
+        ...(navigation?.executionLog || []),
+        ...(autofill.executionLog || []),
+      ];
+      const result = {
+        ...(navigation?.result || {}),
+        requiredAction: autofill.pauseAction,
+        message: autofill.pauseMessage,
+        pauseReason: autofill.pauseMessage,
+        submitted: false,
+        autofill: autofill.result,
+      };
+      await updateLocalJobStatus(job.id, "awaiting_user_action", {
+        pauseAction: autofill.pauseAction,
+        pauseMessage: autofill.pauseMessage,
+        result,
+        executionLog,
+      });
+      return {
+        paused: true,
+        pauseAction: autofill.pauseAction,
+        pauseMessage: autofill.pauseMessage,
+        executionLog,
+        result,
+      };
+    }
     return {
       ...navigation,
       paused: false,
@@ -4195,10 +4623,9 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
     );
   }
 
-  const readySelector =
-    config?.readiness?.readySelector || "#iris-dashboard-ready";
-  const dashboardUrl = resolveMockIrisUrl(
-    assistedConfig.readinessUrl || "mock-iris://dashboard",
+  const readySelector = config?.readiness?.readySelector || "#homeLink";
+  const dashboardUrl = resolveFbrPortalUrl(
+    assistedConfig.readinessUrl || "https://iris.fbr.gov.pk/",
   );
   const captures = [];
 
@@ -4280,6 +4707,7 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
       windowInstance,
       routeSelector,
       Boolean(config.useMockIris),
+      normalizeExplicitResidencyStatus(snapshot.filing?.residencyStatus),
     );
 
     executionLog.push({
@@ -4449,8 +4877,8 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
   // ── Phase 15.5c F9: Classic portal has no mid-filing password reset ──
   if (pilotState.phase === "start" && !isClassic) {
     await windowInstance.loadURL(
-      resolveMockIrisUrl(
-        assistedConfig.passwordResetUrl || "mock-iris://password-reset",
+      resolveFbrPortalUrl(
+        assistedConfig.passwordResetUrl || "https://iris.fbr.gov.pk/",
       ),
     );
     executionLog.push({
@@ -4479,8 +4907,8 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
   // ── Phase 15.5c F9: Classic portal has no mid-filing OTP/captcha ──
   if (pilotState.phase === "after_password_reset" && !isClassic) {
     await windowInstance.loadURL(
-      resolveMockIrisUrl(
-        assistedConfig.otpCaptchaUrl || "mock-iris://otp-captcha",
+      resolveFbrPortalUrl(
+        assistedConfig.otpCaptchaUrl || "https://iris.fbr.gov.pk/",
       ),
     );
     executionLog.push({
@@ -4515,7 +4943,9 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
     ) > 0
   ) {
     await windowInstance.loadURL(
-      resolveMockIrisUrl(assistedConfig.paymentUrl || "mock-iris://payment"),
+      resolveFbrPortalUrl(
+        assistedConfig.paymentUrl || "https://iris.fbr.gov.pk/",
+      ),
     );
     executionLog.push({
       step: STANDARD_LOG_STEPS.PAYMENT_PSID_PAUSE,
@@ -4551,8 +4981,8 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
       // Classic portal: go directly to final review (save→submit→confirm dialog)
       const classicConfig = config.classicAssistedFiling || {};
       await windowInstance.loadURL(
-        resolveMockIrisUrl(
-          classicConfig.finalReviewUrl || "mock-iris://classic-portal",
+        resolveFbrPortalUrl(
+          classicConfig.finalReviewUrl || "https://iris.fbr.gov.pk/",
         ),
       );
       executionLog.push({
@@ -4586,8 +5016,8 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
       // Classic portal PIN entry: after submit confirmation, the portal shows a 4-digit PIN dialog
       const classicConfig = config.classicAssistedFiling || {};
       await windowInstance.loadURL(
-        resolveMockIrisUrl(
-          classicConfig.pinEntryUrl || "mock-iris://classic-pin",
+        resolveFbrPortalUrl(
+          classicConfig.pinEntryUrl || "https://iris.fbr.gov.pk/",
         ),
       );
       executionLog.push({
@@ -4621,8 +5051,8 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
       pilotState.phase === "after_payment_psid")
   ) {
     await windowInstance.loadURL(
-      resolveMockIrisUrl(
-        assistedConfig.finalReviewUrl || "mock-iris://final-review",
+      resolveFbrPortalUrl(
+        assistedConfig.finalReviewUrl || "https://iris.fbr.gov.pk/",
       ),
     );
     executionLog.push({
@@ -4696,8 +5126,8 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
   }
 
   await windowInstance.loadURL(
-    resolveMockIrisUrl(
-      assistedConfig.completedTasksUrl || "mock-iris://completed",
+    resolveFbrPortalUrl(
+      assistedConfig.completedTasksUrl || "https://iris.fbr.gov.pk/",
     ),
   );
   const proofCaptures = [
@@ -4879,14 +5309,20 @@ async function processLocalJob(job) {
       }
     }
 
-    // The JOB config — not the launch payload — decides mock vs real. The
-    // localhost-bridge launch path carries no loginUrl, so launch-based guards
-    // misread real handoffs as mock there. useMockIris === false in the job
-    // context is authoritative for real-portal sessions.
-    const jobAutomationConfig = context.taxAutomationConfig || {};
+    // Filing jobs always use the live FBR portal. Normalize the server response
+    // before passing it to any worker flow so an old or malformed job payload
+    // cannot select a local page.
+    const jobAutomationConfig = {
+      ...(context.taxAutomationConfig || {}),
+      useMockIris: false,
+    };
+    if (job.type === "tax_dry_run" || job.type === "tax_assisted_filing") {
+      context.taxAutomationConfig = jobAutomationConfig;
+    }
     const jobLoginUrl = String(jobAutomationConfig.readiness?.loginUrl || "");
     realPortalMode =
-      jobAutomationConfig.useMockIris === false ||
+      job.type === "tax_dry_run" ||
+      job.type === "tax_assisted_filing" ||
       /^https?:\/\//i.test(jobLoginUrl) ||
       /^https?:\/\//i.test(
         String(launchState.desktopAuthConfig?.loginUrl || ""),
@@ -4899,10 +5335,7 @@ async function processLocalJob(job) {
         ? launchState.desktopAuthConfig.loginUrl
         : "https://iris.fbr.gov.pk/";
     if (realPortalMode) {
-      pushStatus(
-        "progress",
-        "Real IRIS mode active (job config) — local mock pages are disabled for this job.",
-      );
+      pushStatus("progress", "Real FBR mode active for this filing.");
     }
 
     pushStatus(
@@ -4989,14 +5422,22 @@ async function processLocalJob(job) {
         detail: message,
       },
     ];
+    const portalEvidence = buildPortalEvidenceDiagnostics(
+      domEvidence?.sectionTour || lastSectionTour,
+    );
     const recoverableAssistedIssue =
       job.type === "tax_assisted_filing"
         ? classifyRecoverableAssistedIssue(
             message,
             failureExecutionLog,
             context,
+            portalEvidence,
           )
         : null;
+    const autofillSummaryForRecovery =
+      failureExecutionLog
+        .filter((entry) => entry?.step === "real_autofill_result")
+        .pop()?.detail || null;
 
     if (recoverableAssistedIssue) {
       await updateLocalJobStatus(job.id, "awaiting_user_action", {
@@ -5008,6 +5449,10 @@ async function processLocalJob(job) {
           selectorBundle: getSelectorBundleSignal(context),
           selectorDriftDiagnostics:
             recoverableAssistedIssue.selectorDriftDiagnostics,
+          mappingRefusalDiagnostics:
+            recoverableAssistedIssue.mappingRefusalDiagnostics || null,
+          portalEvidence,
+          autofillSummary: autofillSummaryForRecovery,
           domEvidence,
           recoveryActions: buildRecoveryActions(message, {
             selectorDriftDiagnostics:
@@ -5028,6 +5473,10 @@ async function processLocalJob(job) {
           userInstruction: recoverableAssistedIssue.userInstruction,
           selectorDriftDiagnostics:
             recoverableAssistedIssue.selectorDriftDiagnostics,
+          mappingRefusalDiagnostics:
+            recoverableAssistedIssue.mappingRefusalDiagnostics || null,
+          portalEvidence,
+          autofillSummary: autofillSummaryForRecovery,
           domEvidence,
         },
       });
@@ -5045,12 +5494,22 @@ async function processLocalJob(job) {
       message,
       failureExecutionLog,
       context,
+      portalEvidence,
     );
+    // The autofill counts belong on the FAILED record too: `0/27 filled` was only
+    // ever readable in latest-job.json, never in the job the operator sees.
+    const autofillSummary =
+      failureExecutionLog
+        .filter((entry) => entry?.step === "real_autofill_result")
+        .pop()?.detail || null;
+
     await updateLocalJobStatus(job.id, "failed", {
       errorMessage: messageWithDump,
       result: {
         selectorBundle: getSelectorBundleSignal(context),
         selectorDriftDiagnostics,
+        portalEvidence,
+        autofillSummary,
         domEvidence,
         recoveryActions: buildRecoveryActions(message, {
           selectorDriftDiagnostics,
@@ -5378,7 +5837,7 @@ async function attemptAutoCapture(reason) {
   ) {
     pushStatus(
       "progress",
-      "IRIS login screen detected. Complete the sign-in — the device is marked ready automatically afterwards.",
+      "FBR sign-in screen detected. Complete the sign-in — the device is marked ready automatically afterwards.",
     );
     return;
   }
@@ -5392,10 +5851,10 @@ async function attemptAutoCapture(reason) {
     "progress",
     reason === "login-detected"
       ? launchState.flow === "fbr"
-        ? "Iris sign-in detected. Marking this trusted device ready automatically."
+        ? "FBR sign-in detected. Marking this trusted device ready automatically."
         : "MyDLD sign-in detected. Marking this desktop device ready automatically."
       : launchState.flow === "fbr"
-        ? "Checking your local Iris session and saving this device automatically."
+        ? "Checking your local FBR session and saving this device automatically."
         : "Checking your local MyDLD session and saving this device automatically.",
   );
 
@@ -5409,7 +5868,7 @@ async function attemptAutoCapture(reason) {
     pushStatus(
       "success",
       launchState.flow === "fbr"
-        ? "IRIS login detected. Keep this portal window open. Return to the web app to start the navigation check."
+        ? "FBR sign-in complete. Keep the FBR window open and return to the web app to start filing."
         : "This trusted desktop device is ready for MyDLD automation. You can return to the web app.",
     );
     if (
@@ -5549,7 +6008,7 @@ async function captureLoginWindowState() {
   if (!isCurrentPortalReadyUrl(currentUrl)) {
     throw new Error(
       launchState.flow === "fbr"
-        ? "Complete Iris sign-in before this device can be marked ready."
+        ? "Complete FBR sign-in before this device can be marked ready."
         : "Complete sign-in to MyDLD before this device can be marked ready.",
     );
   }

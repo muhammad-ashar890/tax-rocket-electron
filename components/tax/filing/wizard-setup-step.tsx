@@ -10,6 +10,7 @@ import {
   CheckCircle2,
   Coins,
   FileText,
+  Globe2,
   HandCoins,
   Handshake,
   Landmark,
@@ -46,6 +47,7 @@ export type SetupStepKey =
   | "bank_accounts"
   | "salary_split"
   | "tax_year"
+  | "residency"
   | "readiness"
   | "review"
   | Ty2026SubcategoryStepKey;
@@ -58,6 +60,7 @@ type WizardSetupStepProps = Readonly<{
   bankAccounts: DraftBankAccount[];
   salaryPercentage: "over_50" | "under_50" | null;
   taxYear: number;
+  residencyStatus: "resident" | "non_resident" | null;
   readinessCompleted: TaxReadinessItem[];
   showStructureRow: boolean;
   needsIncomeSourceSelection: boolean;
@@ -72,6 +75,7 @@ type WizardSetupStepProps = Readonly<{
   onBankAccountsChange: (accounts: DraftBankAccount[]) => void;
   onSalaryPercentageChange: (value: "over_50" | "under_50") => void;
   onTaxYearChange: (value: number) => void;
+  onResidencyStatusChange: (value: "resident" | "non_resident") => void;
   onReadinessToggle: (value: TaxReadinessItem) => void;
 }>;
 
@@ -149,6 +153,7 @@ export function WizardSetupStep({
   bankAccounts,
   salaryPercentage,
   taxYear,
+  residencyStatus,
   readinessCompleted,
   showStructureRow,
   needsIncomeSourceSelection,
@@ -163,6 +168,7 @@ export function WizardSetupStep({
   onBankAccountsChange,
   onSalaryPercentageChange,
   onTaxYearChange,
+  onResidencyStatusChange,
   onReadinessToggle,
 }: WizardSetupStepProps) {
   const routeToneClass = {
@@ -385,6 +391,33 @@ export function WizardSetupStep({
     );
   }
 
+  if (currentStepKey === "residency") {
+    return (
+      <div className="space-y-6">
+        <StepHeading
+          title="What is your tax residency status?"
+          description="Choose the status that applies to this return. TaxRocket will pass this exact choice to IRIS; it will not assume Resident."
+        />
+        <div className="grid gap-4 sm:grid-cols-2">
+          <BigChoiceCard
+            icon={UserRound}
+            title="Resident"
+            description="I am a tax resident of Pakistan for this return."
+            selected={residencyStatus === "resident"}
+            onClick={() => onResidencyStatusChange("resident")}
+          />
+          <BigChoiceCard
+            icon={Globe2}
+            title="Non-Resident"
+            description="I am a non-resident of Pakistan for this return."
+            selected={residencyStatus === "non_resident"}
+            onClick={() => onResidencyStatusChange("non_resident")}
+          />
+        </div>
+      </div>
+    );
+  }
+
   if (currentStepKey === "readiness") {
     return (
       <div className="space-y-6">
@@ -441,6 +474,13 @@ export function WizardSetupStep({
         )}
         <span className="rounded-full border bg-card px-3 py-1.5 text-sm">
           Tax year {taxYear}
+        </span>
+        <span className="rounded-full border bg-card px-3 py-1.5 text-sm">
+          {residencyStatus === "resident"
+            ? "Resident"
+            : residencyStatus === "non_resident"
+              ? "Non-Resident"
+              : "Residency not selected"}
         </span>
         {needsIncomeSourceSelection && (
           <span className="rounded-full border bg-card px-3 py-1.5 text-sm">

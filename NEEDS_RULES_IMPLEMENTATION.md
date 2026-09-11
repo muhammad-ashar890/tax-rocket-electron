@@ -362,7 +362,7 @@ folder) and wht-ratecard-extracted.txt (rules live in catalog.ts); stale
 docs OLD_REPO_ANALYSIS, LATE_FILER_FIX_INSTRUCTIONS, TESTING_LATE_FILER,
 FBR_CONNECT_ANALYSIS, FBR_IMPLEMENTATION_SUMMARY, PHASE_PLAN_FBR_CONNECT,
 PORTAL_FIELD_MAP_PROPOSAL. Kept: README, NEEDS log, INSTALLER_BUILD,
-ANALYSIS_REPORT + CLIENT_QUESTIONS (decision record), fixtures, mock-iris,
+ANALYSIS_REPORT + CLIENT_QUESTIONS (decision record), fixtures,
 audit scripts. README rewritten: accurate requirements, .env template,
 setup/verify/deploy commands, agent separation note, honest production
 remainder list. Verified: tsc clean + 13/13 offline suites.

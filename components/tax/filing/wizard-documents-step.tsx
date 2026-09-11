@@ -13,6 +13,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { StepHeading } from "@/components/tax/wizard-ui";
+import { formatCnicInput, normalizeIdentityName } from "@/lib/tax/cnic-profile";
 import { getTaxYearDateInputBounds } from "@/lib/tax/tax-year-period";
 
 export type ExtractedTransaction = {
@@ -64,6 +65,7 @@ type WizardDocumentsStepProps = Readonly<{
   savingDocumentReviewId: string | null;
   mappingDocumentId: string | null;
   documentUploadError: string | null;
+  profileSyncNote: string | null;
   uploadFileInputsRef: React.MutableRefObject<
     Record<string, HTMLInputElement | null>
   >;
@@ -100,6 +102,7 @@ export function WizardDocumentsStep({
   savingDocumentReviewId,
   mappingDocumentId,
   documentUploadError,
+  profileSyncNote,
   uploadFileInputsRef,
   triggerDocumentUpload,
   handleDocumentFileSelected,
@@ -127,6 +130,15 @@ export function WizardDocumentsStep({
         title="Upload your documents"
         description="Upload each document one at a time, then review Gemini's extracted data before mapping it."
       />
+
+      {profileSyncNote && (
+        <div
+          role="status"
+          className="rounded-lg border border-amanah/25 bg-amanah/5 p-3 text-sm text-amanah"
+        >
+          {profileSyncNote}
+        </div>
+      )}
 
       {documentUploadError && (
         <div
@@ -168,7 +180,9 @@ export function WizardDocumentsStep({
             documentRecord?.extractionStatus === "COMPLETED" ||
             documentRecord?.extractionStatus === "MAPPED";
           const isMapped = documentRecord?.extractionStatus === "MAPPED";
+          const isCnicDocument = slot.documentType === "cnic";
           const isMappableDocument =
+            isCnicDocument ||
             slot.documentType === "bank_statement" ||
             slot.documentType === "salary_certificate";
           const hasFields = Boolean(extracted?.fields?.length);
@@ -368,8 +382,12 @@ export function WizardDocumentsStep({
                             disabled={isMapping || isSavingReview || !hasFields}
                           >
                             {isMapping
-                              ? "Saving & mapping..."
-                              : "Save & Approve Map"}
+                              ? isCnicDocument
+                                ? "Saving & updating profile..."
+                                : "Saving & mapping..."
+                              : isCnicDocument
+                                ? "Approve & update profile"
+                                : "Save & Approve Map"}
                           </Button>
                         ) : (
                           <span className="self-center text-xs text-muted-foreground">
@@ -382,51 +400,80 @@ export function WizardDocumentsStep({
 
                   {hasFields ? (
                     <div className="grid gap-3 sm:grid-cols-2">
-                      {extracted.fields?.map((field, fieldIndex) => (
-                        <label
-                          key={`${field.label}-${fieldIndex}`}
-                          className="grid gap-1"
-                        >
-                          <span className="text-xs font-medium text-muted-foreground">
-                            {field.label}
-                            {typeof field.confidence === "number" &&
-                              ` · ${Math.round(field.confidence * 100)}% confidence`}
-                          </span>
-                          <input
-                            type={
-                              /statement|from\s*date|to\s*date|transaction|value\s*date/i.test(
-                                field.label,
-                              )
-                                ? "date"
-                                : "text"
-                            }
-                            min={
-                              /statement|from\s*date|to\s*date|transaction|value\s*date/i.test(
-                                field.label,
-                              )
-                                ? taxYearBounds.min
-                                : undefined
-                            }
-                            max={
-                              /statement|from\s*date|to\s*date|transaction|value\s*date/i.test(
-                                field.label,
-                              )
-                                ? taxYearBounds.max
-                                : undefined
-                            }
-                            value={String(field.value ?? "")}
-                            onChange={(event) =>
-                              handleExtractedFieldChange(
-                                slotKey,
-                                fieldIndex,
-                                event.target.value,
-                              )
-                            }
-                            readOnly={isMapped}
-                            className="h-9 rounded-lg border bg-background px-3 text-sm"
-                          />
-                        </label>
-                      ))}
+                      {extracted.fields?.map((field, fieldIndex) => {
+                        const normalizedFieldLabel = field.label
+                          .toLowerCase()
+                          .replace(/[^a-z0-9]+/g, "_");
+                        const isStatementDateField =
+                          /statement|from_date|to_date|transaction|value_date/.test(
+                            normalizedFieldLabel,
+                          );
+                        const isIdentityDateField = [
+                          "date_of_birth",
+                          "dob",
+                          "birth_date",
+                          "expiry_date",
+                          "expiry",
+                          "valid_upto",
+                          "valid_until",
+                          "date_of_expiry",
+                        ].includes(normalizedFieldLabel);
+                        const isCnicField = [
+                          "cnic_number",
+                          "cnic",
+                          "identity_number",
+                        ].includes(normalizedFieldLabel);
+                        const isNameField = [
+                          "name",
+                          "full_name",
+                          "taxpayer_name",
+                        ].includes(normalizedFieldLabel);
+                        const isDateField =
+                          isStatementDateField || isIdentityDateField;
+                        const displayValue = isCnicField
+                          ? formatCnicInput(field.value)
+                          : isNameField
+                            ? normalizeIdentityName(field.value)
+                            : String(field.value ?? "");
+
+                        return (
+                          <label
+                            key={`${field.label}-${fieldIndex}`}
+                            className="grid gap-1"
+                          >
+                            <span className="text-xs font-medium text-muted-foreground">
+                              {field.label}
+                              {typeof field.confidence === "number" &&
+                                ` · ${Math.round(field.confidence * 100)}% confidence`}
+                            </span>
+                            <input
+                              type={isDateField ? "date" : "text"}
+                              min={
+                                isStatementDateField
+                                  ? taxYearBounds.min
+                                  : undefined
+                              }
+                              max={
+                                isStatementDateField
+                                  ? taxYearBounds.max
+                                  : undefined
+                              }
+                              inputMode={isCnicField ? "numeric" : undefined}
+                              maxLength={isCnicField ? 15 : undefined}
+                              value={displayValue}
+                              onChange={(event) =>
+                                handleExtractedFieldChange(
+                                  slotKey,
+                                  fieldIndex,
+                                  event.target.value,
+                                )
+                              }
+                              readOnly={isMapped}
+                              className="h-9 rounded-lg border bg-background px-3 text-sm"
+                            />
+                          </label>
+                        );
+                      })}
                     </div>
                   ) : (
                     <p className="rounded-lg border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">

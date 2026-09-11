@@ -6,6 +6,9 @@ export type TaxDraftMetadata = {
   readinessCompleted: TaxReadinessItem[];
   readinessMissing: TaxReadinessItem[];
   complexityScore: number;
+  /** Explicit user choice used for IRIS setup; absent means context is incomplete. */
+  residencyStatus?: "resident" | "non_resident";
+  /** Legacy eligibility input retained for old callers only. */
   residencyDaysInPakistan?: "yes" | "no" | "unsure";
   employerCount?: "single" | "multiple" | "unsure";
   hasServicesIncome?: "yes" | "no" | "unsure";

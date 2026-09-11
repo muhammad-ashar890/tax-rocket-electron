@@ -30,7 +30,6 @@
       "renderer.html",
       "renderer.js",
       "styles.css",
-      "mock-iris/**/*",
       "assets/icon.ico",
       "assets/icon.png"
     ],

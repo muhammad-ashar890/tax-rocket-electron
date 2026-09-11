@@ -167,10 +167,8 @@ export async function GET(
     const portalConfig = await getFbrPortalAutomationConfig({ routeFamily });
     const combinedConfig = getCombinedAgentConfig();
 
-    // Build flat array for mock-iris return.html (data-tax-field-key) + keep original object for real IRIS
-    const filing = snapshot.filing || {};
-    const ledgerEntries = snapshot.ledgerEntries || [];
-    const taxCredits = snapshot.taxCredits || [];
+    // The approved packet's verified field map is the only map sent to the
+    // production agent. It is never replaced with synthetic portal fields.
     const rawPortalFieldMap = snapshot.portalFieldMap || {};
     const portalMapDetailed =
       snapshot.portalFieldMapDetailed ||
@@ -179,107 +177,7 @@ export async function GET(
       ? rawPortalFieldMap
       : flattenPortalFieldMap(rawPortalFieldMap);
 
-    const sumByCategory = (cats: string[]) => {
-      return ledgerEntries
-        .filter((e: any) => cats.includes((e.category || "").toUpperCase()))
-        .reduce((s: number, e: any) => s + Number(e.amount || 0), 0);
-    };
-    const sumTaxBySection = (sections: string[]) => {
-      return taxCredits
-        .filter((c: any) => sections.includes((c.section || "").toUpperCase()))
-        .reduce((s: number, c: any) => s + Number(c.amount || 0), 0);
-    };
-
-    const salaryIncome = sumByCategory([
-      "SALARY",
-      "SALARY_INCOME",
-      "EMPLOYMENT",
-    ]);
-    const bankProfit = sumByCategory([
-      "BANK_PROFIT",
-      "PROFIT_ON_DEBT",
-      "BANK",
-      "PROFIT",
-    ]);
-    const taxLiability = Number(filing.taxPayable || filing.taxableIncome || 0);
-    const salaryTaxDeducted =
-      sumTaxBySection(["149", "149(1)"]) || Number(filing.taxWithheld || 0);
-    const advanceTax = taxCredits.reduce(
-      (s: number, c: any) => s + Number(c.amount || 0),
-      0,
-    );
-
-    // Flat array that Electron's mock filler expects (selector fallback to data-tax-field-key)
-    const flatMockMap = [
-      {
-        key: "return.tax_year",
-        value: String(filing.taxYear || ""),
-        selector: '[data-tax-field-key="return.tax_year"]',
-      },
-      {
-        key: "return.residency_status",
-        value: "Resident",
-        selector: '[data-tax-field-key="return.residency_status"]',
-      },
-      {
-        key: "return.salary_income",
-        value: String(salaryIncome || ""),
-        selector: '[data-tax-field-key="return.salary_income"]',
-      },
-      {
-        key: "return.bank_profit_income",
-        value: String(bankProfit || ""),
-        selector: '[data-tax-field-key="return.bank_profit_income"]',
-      },
-      {
-        key: "return.salary_tax_deducted",
-        value: String(salaryTaxDeducted || ""),
-        selector: '[data-tax-field-key="return.salary_tax_deducted"]',
-      },
-      {
-        key: "return.advance_tax_paid",
-        value: String(advanceTax || ""),
-        selector: '[data-tax-field-key="return.advance_tax_paid"]',
-      },
-      {
-        key: "return.tax_liability",
-        value: String(filing.taxPayable || taxLiability || ""),
-        selector: '[data-tax-field-key="return.tax_liability"]',
-      },
-      {
-        key: "return.tax_payable",
-        value: String(filing.taxPayable || ""),
-        selector: '[data-tax-field-key="return.tax_payable"]',
-      },
-      {
-        key: "return.refund_due",
-        value: String(filing.refundDue || ""),
-        selector: '[data-tax-field-key="return.refund_due"]',
-      },
-      {
-        key: "wealth.opening_wealth",
-        value: String(filing.openingWealth || ""),
-        selector: '[data-tax-field-key="wealth.opening_wealth"]',
-      },
-      {
-        key: "wealth.closing_wealth",
-        value: String(filing.closingWealth || ""),
-        selector: '[data-tax-field-key="wealth.closing_wealth"]',
-      },
-      {
-        key: "wealth.assets",
-        value: String(filing.closingWealth || ""),
-        selector: '[data-tax-field-key="wealth.assets"]',
-      },
-    ];
-
-    // The mock fixture map must NEVER replace the real IRIS-code mapping.
-    // Real-mode workers receive a flat array, while the grouped/original packet
-    // map is preserved separately for debugging and future route-specific fill
-    // strategies.
-    const selectedMap = portalConfig.useMockIris
-      ? flatMockMap
-      : normalizedRealPortalFieldMap;
+    const selectedMap = normalizedRealPortalFieldMap;
     const taxYear = Number(snapshot.filing?.taxYear || job.filingDraft.taxYear);
     const finalSnapshot = {
       ...snapshot,
@@ -351,7 +249,7 @@ export async function GET(
         dryRunUrl: portalConfig.dryRun.entryUrl,
         reviewGateSelector: portalConfig.dryRun.reviewGateSelector,
         finalSubmitSelector: portalConfig.dryRun.finalSubmitSelector,
-        useMockIris: portalConfig.useMockIris,
+        useMockIris: false,
       },
     });
   } catch (error) {

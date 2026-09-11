@@ -16,7 +16,7 @@
     "verify:withholding-sources": "node scripts/verify-withholding-sources.cjs",
     "verify:route-protection": "node scripts/verify-route-protection.cjs",
     "verify:dependency-health": "node scripts/verify-dependency-health.cjs",
-    "verify:all": "npm run verify:ty2026-rates && npm run verify:ty2026-data-model && npm run verify:ty2026-filer-status && npm run verify:ty2026-subcategories && npm run verify:ty2026-tax-calculation && npm run verify:upload-safety && npm run verify:withholding-sources && npm run verify:route-protection && npm run verify:dependency-health && npm run verify:tax-breakdown-surfacing && npm run verify:cleanup-hygiene && npm run verify:flat-income-routes && npm run verify:advance-tax && npm run verify:money-precision && npm run verify:money-database && npm run verify:bank-statement-isolation",
+    "verify:all": "npm run verify:ty2026-rates && npm run verify:ty2026-data-model && npm run verify:ty2026-filer-status && npm run verify:ty2026-subcategories && npm run verify:ty2026-tax-calculation && npm run verify:upload-safety && npm run verify:withholding-sources && npm run verify:route-protection && npm run verify:dependency-health && npm run verify:tax-breakdown-surfacing && npm run verify:cleanup-hygiene && npm run verify:flat-income-routes && npm run verify:advance-tax && npm run verify:money-precision && npm run verify:money-database && npm run verify:bank-statement-isolation && npm run verify:portal-field-map && npm run verify:employment-captures && npm run verify:property-capture && npm run verify:cnic-profile-plan && npm run verify:iris-row-filler && npm run verify:iris-navigation",
     "verify:money-precision": "node scripts/verify-money-precision.cjs",
     "verify:money-database": "node scripts/verify-money-database.cjs",
     "verify:tax-breakdown-surfacing": "node scripts/verify-tax-breakdown-surfacing.cjs",
@@ -32,7 +32,15 @@
     "check:oauth": "node scripts/check-oauth-callback.cjs",
     "diagnose:withholding": "node scripts/diagnose-withholding.cjs",
     "verify:iris-navigation": "node --test scripts/verify-iris-navigation.cjs scripts/verify-fbr-contracts.cjs scripts/verify-iris-row-filler.cjs",
-    "verify:iris-row-filler": "node --test scripts/verify-iris-row-filler.cjs"
+    "verify:iris-row-filler": "node --test scripts/verify-iris-row-filler.cjs",
+    "verify:portal-field-map": "node scripts/verify-portal-field-map.cjs",
+    "verify:employment-captures": "node scripts/verify-employment-captures.cjs",
+    "verify:property-capture": "node scripts/verify-property-capture.cjs",
+    "verify:cnic-profile-plan": "node scripts/verify-cnic-profile-plan.cjs",
+    "check:sync": "node scripts/check-workspace-sync.cjs",
+    "replay:agent-autofill": "node scripts/replay-agent-autofill.cjs",
+    "inventory:portal-coverage": "node scripts/portal-coverage-inventory.cjs",
+    "inventory:portal-evidence": "node scripts/portal-coverage-inventory.cjs --emit-evidence"
   },
   "dependencies": {
     "@e965/xlsx": "^0.20.3",

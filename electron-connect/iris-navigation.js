@@ -7,7 +7,7 @@
 // TY2026+ return setup steps that do not require legal/financial judgement.
 // Create/Save/Submit/payment controls and all financial inputs remain off
 // limits until the engine/mapping audit is resolved.
-const BUILD_TAG = "fix16-new-return-setup-20260908";
+const BUILD_TAG = "fix26-salary-withholding-handoff-20260911";
 const DEFAULT_HOSTS = ["iris.fbr.gov.pk"];
 const SECTION_TOUR = Object.freeze([
   { id: "salary", group: "Employment", tab: "Salary" },
@@ -37,6 +37,16 @@ const ALL_SECTION_TOUR = Object.freeze([
   SECTION_TOUR[0],
   { id: "tax_deductions", group: "Employment", tab: "Tax Deductions" },
   {
+    id: "property_receipts",
+    group: "Property",
+    tab: "Receipts/Deductions",
+  },
+  {
+    id: "property_tax_deductions",
+    group: "Property",
+    tab: "Tax Deductions",
+  },
+  {
     id: "allowance_credits",
     group: "Tax Chargeable / Payments",
     tab: "Allowances, Reductions and Credits",
@@ -50,9 +60,9 @@ const ALL_SECTION_IDS = Object.freeze(
 );
 // The 116 Wealth Statement sections are NOT panels inside the 114(1) workflow.
 // Dry-run 2026-09-09 captured only two expansion panels on the opened return --
-// "Employment" and "Tax Chargeable / Payments" -- so both wealth profiles report
-// panelFound:false and the tour correctly refuses to guess, blocking every later
-// section. Assets/Reconciliation live in a separate document (form 116, reached
+// "Employment", "Property" and "Tax Chargeable / Payments" -- so both wealth
+// profiles report panelFound:false and the tour correctly refuses to guess,
+// blocking every later section. Assets/Reconciliation live in a separate document (form 116, reached
 // via the "Assets Declaration" menu) and are tracked as their own phase. This
 // plan covers the income/tax views that autofill actually needs.
 const WEALTH_SECTION_IDS = Object.freeze([
@@ -62,6 +72,32 @@ const WEALTH_SECTION_IDS = Object.freeze([
 const INCOME_SECTION_IDS = Object.freeze(
   ALL_SECTION_IDS.filter((id) => !WEALTH_SECTION_IDS.includes(id)),
 );
+// Current Electron handoff scope is Salary plus the Salary withholding grid.
+// Tax Deductions is explicitly enabled for this supervised test so code 64020004
+// can be placed; Property, Wealth, Payments, Computations, and other unsupported
+// routes remain excluded.
+const SALARY_ONLY_SECTION_IDS = Object.freeze(["salary"]);
+const SALARY_WITHHOLDING_SECTION_IDS = Object.freeze([
+  "salary",
+  "tax_deductions",
+]);
+
+/**
+ * Sections that must render data rows when the return is open. Payment and
+ * Attachment do not own grids, so their emptiness proves nothing — that is the
+ * difference between "IRIS changed" and "this page has no table here".
+ */
+const ROW_BEARING_SECTION_IDS = Object.freeze([
+  "salary",
+  "tax_deductions",
+  "property_receipts",
+  "property_tax_deductions",
+  "allowance_credits",
+  "withholding",
+  "computations",
+  "wealth_assets",
+  "wealth_reconciliation",
+]);
 
 function normalizeSetupLabel(value) {
   return String(value || "")
@@ -102,8 +138,11 @@ function classifyNewReturnSetupStage(input = {}) {
   if (prompts.has("resident") || prompts.has("non-resident"))
     return "residency";
   if (actions.has("accept and continue")) return "accept_continue";
+  // The TY2026 dialog labels its field "Tax Period"; the dashboard period screen
+  // says "Period"/"Tax Year". All three are the same stage — this used to be the
+  // only reason the agent stopped at the dialog without clicking Continue.
   if (
-    (prompts.has("tax year") || prompts.has("period")) &&
+    (prompts.has("tax year") || prompts.has("period") || prompts.has("tax period")) &&
     actions.has("continue")
   )
     return "period";
@@ -117,10 +156,10 @@ function isRecognizedNewReturnSetup(input = {}) {
 
 // Phase 1.5b. The blue dashboard tile lands on
 // /nitr/summary-economic-transactions: a pre-filing gate that asks for income
-// sources and residency before "Start Return Filling" becomes enabled. The
-// agent must NEVER answer it (residency is a legal determination under ITO
-// s.82-84 and the source ticks decide which schedules IRIS opens). It only
-// recognises the gate and tells the operator exactly what is outstanding.
+// sources, residency and (when rendered) the wealth-statement choice before
+// "Start Return Filling" becomes enabled. These choices are now taken only from
+// the pinned approved packet/context; the agent never invents a source or a
+// legal status from the page itself.
 function describeEconomicTransactionsGate(gate) {
   if (!gate || !gate.present) return null;
   const sources = Array.isArray(gate.sources) ? gate.sources : [];
@@ -128,11 +167,16 @@ function describeEconomicTransactionsGate(gate) {
   const missing = [];
   if (!selected.length) missing.push("income sources");
   if (!gate.residencySelected) missing.push("tax residency");
+  if (gate.wealthChoicePresent && !gate.wealthSelected)
+    missing.push("wealth statement choice");
   return {
     ready: Boolean(gate.startEnabled),
     selectedSources: selected.map((source) => source.label).filter(Boolean),
     availableSources: sources.map((source) => source.label).filter(Boolean),
     residencySelected: Boolean(gate.residencySelected),
+    wealthChoicePresent: Boolean(gate.wealthChoicePresent),
+    wealthSelected: Boolean(gate.wealthSelected),
+    wealthStatementValue: gate.wealthStatementValue || null,
     startPresent: Boolean(gate.startPresent),
     startEnabled: Boolean(gate.startEnabled),
     missing,
@@ -219,6 +263,14 @@ function portalProbe(options = {}) {
     String(s || "")
       .replace(/\s+/g, " ")
       .trim();
+  const expectedOriginalTaxPeriod = (taxYear) => {
+    const year = Number(taxYear);
+    if (!Number.isInteger(year) || year < 2001) return null;
+    return {
+      startLabel: `01-Jul-${year - 1}`,
+      endLabel: `30-Jun-${year}`,
+    };
+  };
   // In-page mirror of classifyNewReturnSetupStage/isSafeAutoAdvanceNewReturnStage.
   // Electron serializes this function, so the module-scope originals are not
   // reachable here. scripts/verify-iris-navigation.cjs asserts the two stay in
@@ -240,12 +292,49 @@ function portalProbe(options = {}) {
       return "residency";
     if (actions.has("accept and continue")) return "accept_continue";
     if (
-      (prompts.has("tax year") || prompts.has("period")) &&
+      (
+        prompts.has("tax year") ||
+        prompts.has("period") ||
+        prompts.has("tax period")
+      ) &&
       actions.has("continue")
     )
       return "period";
     return null;
   };
+  // Material renders field captions as <mat-label>/<mdc-floating-label>, never as
+  // a bare <label>, so a selector limited to label/legend sees nothing in the
+  // Normal Return dialog. One constant for both prompt sources so they cannot
+  // drift apart again.
+  const SETUP_LABEL_SELECTOR =
+    'label,mat-label,.mat-mdc-form-field-label,.mdc-floating-label,legend,[role="heading"],h1,h2,h3,h4,.mat-mdc-dialog-title,.mdc-dialog__title,.dialog-title';
+  // A recognised setup stage may already carry portal-filled fields (the TY2026
+  // dialog shows Person + Tax Period and asks only for Continue): those are not
+  // waiting for a human. An EMPTY editable box is, and so is a 4-digit period
+  // that names a different year than the packet's. Values are compared inside
+  // the page; only the verdict is returned, never the value.
+  const setupFieldsAwaitHuman = (scope) =>
+    Array.from(scope.querySelectorAll("input, textarea"))
+      .filter(visible)
+      .some((input) => {
+        const type = input.getAttribute("type") || "text";
+        if (/^(?:radio|checkbox|button|submit|hidden)$/i.test(type)) return false;
+        // An OTP/password box is a human question even when the page happens to
+        // show a setup caption next to it and the box is already filled.
+        if (
+          type === "password" ||
+          input.getAttribute("autocomplete") === "one-time-code"
+        )
+          return true;
+        if (input.disabled || input.readOnly) return false;
+        const value = String(input.value || "").trim();
+        if (!value) return true;
+        return (
+          /^20\d\d$/.test(value) &&
+          Number(options.taxYear) > 0 &&
+          Number(value) !== Number(options.taxYear)
+        );
+      });
   const isSafeAutoAdvanceStage = (stage) =>
     ["menu", "return_type", "period", "accept_continue"].includes(stage);
   const attribute = (s) =>
@@ -519,6 +608,38 @@ function portalProbe(options = {}) {
     );
   };
   const allControls = controls();
+  // Evidence-backed selector from the supplied TY2026 dashboard capture. The
+  // Continue button has no stable id/aria-label, but this dialog component and
+  // its action class are specific: Cancel uses clear-btn-color. Keep the text
+  // check as a second guard against selector drift.
+  const capturedSetupContinueSelector =
+    'mat-dialog-container app-create-workflow mat-dialog-actions button.active-btn-color';
+  const capturedSetupContinue = () =>
+    Array.from(document.querySelectorAll(capturedSetupContinueSelector)).filter(
+      (el) => visible(el) && text(el) === "Continue",
+    );
+  // The updated capture shows IRIS opening a single autocomplete option for
+  // the original full-year period. Select that option before Continue; typing
+  // "2026" alone leaves Angular's form control uncommitted.
+  const capturedSetupPeriodOptions = () => {
+    const periodInputs = Array.from(
+      document.querySelectorAll('input[formcontrolname="taxPeriod"]'),
+    ).filter(visible);
+    if (periodInputs.length !== 1) return [];
+    const periodInput = periodInputs[0];
+    if (periodInput.getAttribute("aria-expanded") !== "true") return [];
+    const listboxId = periodInput.getAttribute("aria-owns");
+    const listbox = listboxId ? document.getElementById(listboxId) : null;
+    if (!listbox || listbox.getAttribute("role") !== "listbox") return [];
+    const expectedPeriod = expectedOriginalTaxPeriod(options.taxYear);
+    if (!expectedPeriod) return [];
+    const expectedLabel = setupLabel(
+      `${expectedPeriod.startLabel} - ${expectedPeriod.endLabel}`,
+    );
+    return Array.from(listbox.querySelectorAll('mat-option[role="option"]')).filter(
+      (el) => visible(el) && setupLabel(text(el)) === expectedLabel,
+    );
+  };
   const visibleInputs = Array.from(
     document.querySelectorAll("input, textarea, select"),
   ).filter(visible);
@@ -577,7 +698,8 @@ function portalProbe(options = {}) {
       dashboardColumns.includes("actions")),
   );
   // Phase 1.5b. The pre-filing gate reached from the blue dashboard tile.
-  // Presence and enablement ONLY: never read or write the taxpayer's answers.
+  // Read the live state for verification; actions below may only reconcile it
+  // with the pinned approved packet/context.
   const gateHost = Array.from(
     document.querySelectorAll("app-summary-economic-transactions"),
   ).find(visible);
@@ -612,9 +734,40 @@ function portalProbe(options = {}) {
           }),
         residencySelected: Array.from(
           gateHost.querySelectorAll(
-            'mat-radio-group input[type="radio"], mat-radio-button input[type="radio"]',
+            'mat-radio-group[aria-label="Select Residential Status"] input[type="radio"], mat-radio-group[aria-label="Select Residential Status"] mat-radio-button',
           ),
-        ).some((el) => el.checked),
+        ).some(
+          (el) =>
+            el.checked === true ||
+            el.classList.contains("mat-mdc-radio-checked") ||
+            el.classList.contains("radio-container--checked"),
+        ),
+        wealthChoicePresent: Boolean(
+          gateHost.querySelector('mat-radio-group[aria-label="Wealth Confirmation"]'),
+        ),
+        wealthSelected: Array.from(
+          gateHost.querySelectorAll(
+            'mat-radio-group[aria-label="Wealth Confirmation"] input[type="radio"], mat-radio-group[aria-label="Wealth Confirmation"] mat-radio-button',
+          ),
+        ).some(
+          (el) =>
+            el.checked === true ||
+            el.classList.contains("mat-mdc-radio-checked") ||
+            el.classList.contains("radio-container--checked"),
+        ),
+        wealthStatementValue: (() => {
+          const selected = Array.from(
+            gateHost.querySelectorAll(
+              'mat-radio-group[aria-label="Wealth Confirmation"] input[type="radio"], mat-radio-group[aria-label="Wealth Confirmation"] mat-radio-button',
+            ),
+          ).find(
+            (el) =>
+              el.checked === true ||
+              el.classList.contains("mat-mdc-radio-checked") ||
+              el.classList.contains("radio-container--checked"),
+          );
+          return selected?.getAttribute("value") || null;
+        })(),
         startPresent: Boolean(gateStartButton),
         startEnabled: Boolean(
           gateStartButton &&
@@ -623,6 +776,174 @@ function portalProbe(options = {}) {
         ),
       }
     : null;
+  const economicSourceLabelMap = Object.freeze({
+    salary: "Income from Salary",
+    pension: "Income from Other Sources",
+    property_rent: "Property Rental Income",
+    services: "Income from Business",
+    bank_profit: "Income from Other Sources",
+    dividend: "Income from Other Sources",
+    capital_gains: "Capital Gain",
+    capital_gain: "Capital Gain",
+    business: "Income from Business",
+    agriculture: "Income from Agriculture",
+    foreign_income_assets: "Income from Foreign Sources and Assets",
+    other_income: "Income from Other Sources",
+  });
+  const economicTransactionsContext =
+    options.economicTransactionsContext || {};
+  const economicSourceRows = () =>
+    gateHost
+      ? Array.from(gateHost.querySelectorAll("app-source-checkbox"))
+          .filter(visible)
+          .map((host) => {
+            const labelNode = host.querySelector(".source-checkbox__label");
+            const input = host.querySelector('input[type="checkbox"]');
+            return {
+              host,
+              label: setupLabel(text(labelNode || host)),
+              input,
+              checked: Boolean(input?.checked),
+            };
+          })
+      : [];
+  const selectedEconomicRadio = (group) =>
+    Array.from(
+      group?.querySelectorAll('mat-radio-button[value], input[type="radio"][value]') ||
+        [],
+    ).find(
+      (el) =>
+        el.checked === true ||
+        el.classList.contains("mat-mdc-radio-checked") ||
+        el.classList.contains("radio-container--checked"),
+    ) || null;
+  const economicTransactionsSetup = () => {
+    if (!gateHost) return { status: "not_present" };
+    if (!Array.isArray(economicTransactionsContext.incomeSources))
+      return { status: "context_required" };
+    const sourceIds = economicTransactionsContext.incomeSources
+      .map((source) =>
+        String(source || "")
+          .trim()
+          .toLowerCase(),
+      )
+      .filter(Boolean);
+    const unknownSourceIds = sourceIds.filter(
+      (source) =>
+        source !== "" &&
+        source !== "no_income" &&
+        !economicSourceLabelMap[source],
+    );
+    if (unknownSourceIds.length)
+      return {
+        status: "source_mapping_unverified",
+        unknownSourceCount: new Set(unknownSourceIds).size,
+      };
+    const explicitNoIncome =
+      sourceIds.length === 0 ||
+      (sourceIds.length === 1 && sourceIds[0] === "no_income");
+    const desiredSourceLabels = new Set(
+      explicitNoIncome
+        ? ["no income"]
+        : sourceIds.map((source) => setupLabel(economicSourceLabelMap[source])),
+    );
+    if (sourceIds.includes("no_income") && sourceIds.some((source) => source !== "no_income"))
+      return { status: "source_mapping_unverified" };
+    const sourceRows = economicSourceRows();
+    const currentSourceLabels = new Set(
+      sourceRows.filter((row) => row.checked).map((row) => row.label),
+    );
+    const unexpectedSource = Array.from(currentSourceLabels).some(
+      (label) => !desiredSourceLabels.has(label),
+    );
+    if (unexpectedSource) return { status: "source_state_mismatch" };
+    const desiredRows = Array.from(desiredSourceLabels).map((label) => ({
+      label,
+      rows: sourceRows.filter((row) => row.label === label),
+    }));
+    if (desiredRows.some((entry) => entry.rows.length !== 1))
+      return { status: "source_target_unavailable" };
+    const missingRows = desiredRows
+      .map((entry) => entry.rows[0])
+      .filter((row) => !row.checked);
+    if (missingRows.some((row) => !row.input || row.input.disabled))
+      return { status: "source_target_unavailable" };
+
+    const targetResidency = setupLabel(
+      economicTransactionsContext.residencyStatus,
+    );
+    const residencyValue =
+      targetResidency === "resident"
+        ? "yes"
+        : targetResidency === "non-resident" || targetResidency === "nonresident"
+          ? "no"
+          : null;
+    if (!residencyValue) return { status: "residency_context_required" };
+    const residencyGroup = gateHost.querySelector(
+      'mat-radio-group[aria-label="Select Residential Status"]',
+    );
+    const residencyTarget = residencyGroup?.querySelector(
+      `mat-radio-button[value="${residencyValue}"]`,
+    );
+    const residencyCurrent = selectedEconomicRadio(residencyGroup);
+    const residencyCurrentValue = residencyCurrent?.getAttribute("value") ||
+      residencyCurrent?.querySelector("input")?.getAttribute("value") ||
+      null;
+    if (!residencyTarget) return { status: "residency_target_unavailable" };
+    const residencyNeedsClick =
+      !residencyCurrentValue || residencyCurrentValue !== residencyValue;
+
+    const wealthGroup = gateHost.querySelector(
+      'mat-radio-group[aria-label="Wealth Confirmation"]',
+    );
+    const wealthTargetValue =
+      typeof economicTransactionsContext.wealthStatement === "boolean"
+        ? String(economicTransactionsContext.wealthStatement)
+        : null;
+    const wealthTarget = wealthGroup && wealthTargetValue
+      ? wealthGroup.querySelector(
+          `mat-radio-button[value="${wealthTargetValue}"]`,
+        )
+      : null;
+    const wealthCurrent = selectedEconomicRadio(wealthGroup);
+    const wealthCurrentValue = wealthCurrent?.getAttribute("value") ||
+      wealthCurrent?.querySelector("input")?.getAttribute("value") ||
+      null;
+    if (wealthGroup && !wealthTargetValue)
+      return { status: "wealth_context_required" };
+    if (wealthGroup && !wealthTarget)
+      return { status: "wealth_target_unavailable" };
+    const wealthNeedsClick =
+      Boolean(wealthGroup) &&
+      (!wealthCurrentValue || wealthCurrentValue !== wealthTargetValue);
+
+    for (const row of missingRows) row.input.click();
+    if (residencyNeedsClick) {
+      const input = residencyTarget.querySelector('input[type="radio"]');
+      (input || residencyTarget).click();
+    }
+    if (wealthNeedsClick) {
+      const input = wealthTarget.querySelector('input[type="radio"]');
+      (input || wealthTarget).click();
+    }
+    const changed =
+      missingRows.length +
+      (residencyCurrentValue ? 0 : 1) +
+      (wealthGroup && !wealthCurrentValue ? 1 : 0);
+    return {
+      status: changed ? "clicked" : "already_active",
+      sourceSelectionCount: missingRows.length,
+      residencySelected: true,
+      wealthSelected: Boolean(wealthGroup),
+    };
+  };
+  const capturedEconomicStart = () =>
+    gateHost
+      ? Array.from(gateHost.querySelectorAll("button.btn-start")).filter(
+          (el) => visible(el) && text(el) === "Start Return Filling",
+        )
+      : [];
+
   const workflow = Array.from(
     document.querySelectorAll("app-nitr-workflow"),
   ).find(visible);
@@ -678,7 +999,7 @@ function portalProbe(options = {}) {
     economicTransactionsGate.startPresent &&
     economicTransactionsGate.sources.length > 0,
   );
-  const authenticated =
+  let authenticated =
     !loginVisible &&
     !sessionExpired &&
     (dashboardWorkspace || returnWorkspace || headerWorkspace || gateWorkspace);
@@ -735,27 +1056,26 @@ function portalProbe(options = {}) {
     // heuristic itself stays untouched for every other dialog.
     const setupDescriptor = {
       documentPresent: false,
-      prompts: Array.from(el.querySelectorAll('label,legend,[role="heading"]'))
+      prompts: Array.from(el.querySelectorAll(SETUP_LABEL_SELECTOR))
         .filter(visible)
         .map(text),
       actions: dialogControls.map(text),
       nodeLabels: dialogControls.map(text),
     };
     const setupStage = classifySetupStage(setupDescriptor);
+    const capturedSetupContinueInDialog = capturedSetupContinue().some((button) =>
+      el.contains(button),
+    );
     if (
-      setupStage &&
-      isSafeAutoAdvanceStage(setupStage) &&
+      (
+        (setupStage && isSafeAutoAdvanceStage(setupStage)) ||
+        capturedSetupContinueInDialog
+      ) &&
       !verificationSignature &&
       !commitControlPresent &&
-      // A setup stage never asks for free text; only choices and Continue.
-      !Array.from(el.querySelectorAll("input, textarea"))
-        .filter(visible)
-        .some(
-          (input) =>
-            !/^(?:radio|checkbox|button|submit)$/i.test(
-              input.getAttribute("type") || "text",
-            ),
-        )
+      // A setup stage may show prefilled boxes, but nothing may still be waiting
+      // to be typed by a human (see setupFieldsAwaitHuman).
+      !setupFieldsAwaitHuman(el)
     )
       return "setup";
     // A real entry/verification field inside a dialog makes dismissal a
@@ -803,12 +1123,32 @@ function portalProbe(options = {}) {
   );
   // Phase 1.5a. A recognised setup dialog the agent itself opened is a stage to
   // advance, not an obstacle to pause on. Every other dialog kind -- protected,
-  // welcome, unknown -- still blocks exactly as before, and any live backdrop
-  // blocks unconditionally.
-  const blocking =
-    dialogKinds.some((kind) => kind !== "setup") || blockers.length > 0;
+  // welcome, unknown -- still blocks exactly as before.
   const setupDialogOnly =
     dialogs.length > 0 && dialogKinds.every((kind) => kind === "setup");
+  const blocking =
+    dialogKinds.some((kind) => kind !== "setup") || blockers.length > 0;
+  // `blocking` keeps its original meaning (any live backdrop counts), because
+  // fill and readiness consumers rely on that being conservative. Advancing a
+  // setup dialog is the one thing allowed through it: IRIS dialogs are Material
+  // overlays, so the dialog's OWN backdrop used to make its Continue button
+  // permanently unreachable — the loop tolerated it (frame.setupDialogOnly),
+  // the action path did not, and the two disagreed on every retry.
+  const setupAdvanceAllowed = setupDialogOnly;
+  // A recognised setup dialog is still the authenticated dashboard flow even
+  // though its modal backdrop hides the dashboard evidence from hit-testing.
+  // Without this, the agent stopped at portal_readiness_unverified before it
+  // ever reached the Continue action.
+  const setupDialogAuthenticated =
+    setupDialogOnly &&
+    capturedSetupContinue().length === 1 &&
+    !loginVisible &&
+    !sessionExpired;
+  if (!authenticated && setupDialogAuthenticated) {
+    authenticated = true;
+    readiness.state = "ready";
+    readiness.evidence = "setup_dialog";
+  }
   const isClose = (el) => {
     const label = normalize(
       el.getAttribute("aria-label") || el.getAttribute("title") || text(el),
@@ -1039,6 +1379,8 @@ function portalProbe(options = {}) {
   const sectionProfiles = {
     salary: { group: "Employment", tab: "Salary" },
     tax_deductions: { group: "Employment", tab: "Tax Deductions" },
+    property_receipts: { group: "Property", tab: "Receipts/Deductions" },
+    property_tax_deductions: { group: "Property", tab: "Tax Deductions" },
     allowance_credits: {
       group: "Tax Chargeable / Payments",
       tab: "Allowances, Reductions and Credits",
@@ -1613,6 +1955,7 @@ function portalProbe(options = {}) {
     "999909",
     "999910",
     "999911",
+    "999912",
   ]);
   const PUBLIC_COLUMN_LABELS = [
     "Addition (New)",
@@ -1907,6 +2250,106 @@ function portalProbe(options = {}) {
   const unboundRows = metadataRows.filter(
     (row) => !row.headerMatched || row.cells.length !== row.expectedCellCount,
   ).length;
+  // The supplied Tax Deductions capture has three independently headed grids.
+  // Verify all three panels and every rendered row before allowing a live fill
+  // to target this section; a generic "some rows exist" test is not enough.
+  const taxDeductionExpectedRows = {
+    "999909": [true, true],
+    "64020004": [false, false],
+    "64020005": [false, false],
+    "999910": [true, true, true],
+    "64210051": [false, false, true],
+    "64020007": [false, false, true],
+    "999911": [true, true, true],
+    "64210054": [false, false, true],
+    "64210056": [false, false, true],
+  };
+  const taxDeductionExpectedHeaders = [
+    ["Taxable Amount", "Tax Deducted"],
+    ["Taxable Amount", "Tax Deducted", "Tax Chargeable"],
+    ["Taxable Amount", "Tax Deducted", "Tax Chargeable"],
+  ];
+  const taxDeductionRows = metadataRows.filter((row) =>
+    Object.prototype.hasOwnProperty.call(taxDeductionExpectedRows, row.code),
+  );
+  const taxDeductionsVerified =
+    currentSectionId === "tax_deductions" &&
+    grids.length === 3 &&
+    grids.every(
+      (grid, index) =>
+        grid.title === ["Adjustable Tax", "Final Tax", "Average Tax"][index] &&
+        JSON.stringify(grid.columns) ===
+          JSON.stringify(taxDeductionExpectedHeaders[index]),
+    ) &&
+    taxDeductionRows.length === Object.keys(taxDeductionExpectedRows).length &&
+    taxDeductionRows.every((row) =>
+      JSON.stringify(row.cells.map((cell) => cell.disabled)) ===
+      JSON.stringify(taxDeductionExpectedRows[row.code]),
+    ) &&
+    unboundRows === 0;
+
+  // Property captures are a separate contract. In particular, the supplied
+  // Receipts/Deductions view is before a property has been selected: 2001 and
+  // 2031 render, but their cells are disabled. Treating those rows as writable
+  // would silently turn a page-coverage capture into an unverified mapping.
+  const propertyReceiptsExpectedRows = {
+    "2000": [true, true, true],
+    "2029": [true, true, true],
+    "2001": [true, true, true],
+    "2002": [false, true, true],
+    "2003": [false, true, true],
+    "2004": [false, false, true],
+    "2005": [false, false, true],
+    "2099": [true, true, true],
+    "2031": [true, true, true],
+  };
+  const propertyReceiptsExpectedHeaders = [
+    "Total Amount",
+    "Subject to Exemption",
+    "Subject to Normal Tax",
+  ];
+  const propertyReceiptsRows = metadataRows.filter((row) =>
+    Object.prototype.hasOwnProperty.call(
+      propertyReceiptsExpectedRows,
+      row.code,
+    ),
+  );
+  const propertyReceiptsVerified =
+    currentSectionId === "property_receipts" &&
+    grids.length === 1 &&
+    JSON.stringify(grids[0].columns) ===
+      JSON.stringify(propertyReceiptsExpectedHeaders) &&
+    propertyReceiptsRows.length ===
+      Object.keys(propertyReceiptsExpectedRows).length &&
+    propertyReceiptsRows.every(
+      (row) =>
+        JSON.stringify(row.cells.map((cell) => cell.disabled)) ===
+        JSON.stringify(propertyReceiptsExpectedRows[row.code]),
+    ) &&
+    unboundRows === 0;
+  const propertyTaxDeductionExpectedRows = {
+    "999912": [true, true],
+    "64080001": [false, false],
+  };
+  const propertyTaxDeductionRows = metadataRows.filter((row) =>
+    Object.prototype.hasOwnProperty.call(
+      propertyTaxDeductionExpectedRows,
+      row.code,
+    ),
+  );
+  const propertyTaxDeductionsVerified =
+    currentSectionId === "property_tax_deductions" &&
+    grids.length === 1 &&
+    JSON.stringify(grids[0].columns) ===
+      JSON.stringify(["Taxable Amount", "Tax Deducted"]) &&
+    propertyTaxDeductionRows.length ===
+      Object.keys(propertyTaxDeductionExpectedRows).length &&
+    propertyTaxDeductionRows.every(
+      (row) =>
+        JSON.stringify(row.cells.map((cell) => cell.disabled)) ===
+        JSON.stringify(propertyTaxDeductionExpectedRows[row.code]),
+    ) &&
+    unboundRows === 0;
   const collapsedGridCount = fieldGridPanels.filter(
     (panel) => !panel.expanded,
   ).length;
@@ -1957,6 +2400,130 @@ function portalProbe(options = {}) {
     ) &&
     attachmentSlots.length > 0,
   );
+  // Certificate audit is deliberately independent of visible text. A salary
+  // certificate can be represented by a hidden file input, an Angular
+  // form-control, an associated label, or a named control without any visible
+  // "certificate" heading. Inspect those DOM surfaces but export only safe
+  // metadata; never read file names, input values, blobs, or account data.
+  const certificatePattern = /(?:salary|withholding|tax)\s*certificate|certificate\s*(?:of\s*)?(?:salary|withholding|tax)/i;
+  const certificateAuditRoot =
+    ["tax_deductions", "property_tax_deductions"].includes(currentSectionId) &&
+    dataBody
+      ? dataBody
+      : document;
+  const certificateControls = Array.from(
+    certificateAuditRoot.querySelectorAll(
+      'input, select, textarea, button, [role="button"], [formcontrolname], label',
+    ),
+  );
+  const certificateControlMetadata = certificateControls
+    .map((el) => {
+      const labelFor = el.getAttribute("for");
+      const associatedLabel = labelFor
+        ? Array.from(certificateAuditRoot.querySelectorAll("label")).find(
+            (label) => label.getAttribute("for") === labelFor,
+          )
+        : el.closest("label");
+      const descriptorText = [
+        el.getAttribute("aria-label"),
+        el.getAttribute("name"),
+        el.getAttribute("id"),
+        el.getAttribute("formcontrolname"),
+        el.getAttribute("ng-reflect-name"),
+        el.getAttribute("ng-reflect-form-control-name"),
+        associatedLabel?.textContent,
+      ]
+        .filter(Boolean)
+        .join(" ");
+      if (!certificatePattern.test(descriptorText)) return null;
+      return {
+        ...descriptor(el),
+        type: attribute(el.getAttribute("type")),
+        name: attribute(el.getAttribute("name")),
+        formControlName: attribute(el.getAttribute("formcontrolname")),
+        ngReflectName: attribute(el.getAttribute("ng-reflect-name")),
+        ngReflectFormControlName: attribute(
+          el.getAttribute("ng-reflect-form-control-name"),
+        ),
+        hidden: el.hasAttribute("hidden") || !visible(el),
+        disabled: Boolean(el.disabled),
+        readOnly: Boolean(el.readOnly),
+        associatedLabel: associatedLabel ? normalize(associatedLabel.textContent) : null,
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 30);
+  const certificateFileInputs = Array.from(
+    certificateAuditRoot.querySelectorAll('input[type="file"]'),
+  ).map((input) => ({
+    ...descriptor(input),
+    name: attribute(input.getAttribute("name")),
+    formControlName: attribute(input.getAttribute("formcontrolname")),
+    ngReflectName: attribute(input.getAttribute("ng-reflect-name")),
+    ngReflectFormControlName: attribute(
+      input.getAttribute("ng-reflect-form-control-name"),
+    ),
+    hidden: input.hasAttribute("hidden") || !visible(input),
+    disabled: Boolean(input.disabled),
+  }));
+  const certificateAudit = {
+    scope:
+      currentSectionId === "tax_deductions"
+        ? "tax_deductions"
+        : currentSectionId === "property_tax_deductions"
+          ? "property_tax_deductions"
+          : "document",
+    inspectedFileInputs: certificateFileInputs,
+    matchingControls: certificateControlMetadata,
+    certificateControlPresent:
+      certificateFileInputs.length > 0 || certificateControlMetadata.length > 0,
+    // This is evidence about the live DOM only. It is not permission to invent
+    // a packet source or to upload anything.
+    mappingDecision:
+      certificateFileInputs.length > 0 || certificateControlMetadata.length > 0
+        ? "manual_certificate_mapping_required"
+        : "no_certificate_control_in_captured_scope",
+  };
+  const propertyAddControls = dataBody
+    ? Array.from(dataBody.querySelectorAll("button"))
+        .filter((button) => visible(button))
+        .filter((button) => text(button) === "+ Property")
+    : [];
+  const propertyDeductionControls = dataBody
+    ? Array.from(dataBody.querySelectorAll("button"))
+        .filter((button) => visible(button))
+        .filter((button) => text(button) === "+ Deduction")
+    : [];
+  const propertyRentRow = metadataRows.find((row) => row.code === "2001");
+  const propertyRentWritableInputIndexes = propertyRentRow
+    ? propertyRentRow.cells
+        .map((cell, index) =>
+          cell.kind !== "display" && cell.disabled === false && cell.readOnly !== true
+            ? index
+            : null,
+        )
+        .filter((index) => index !== null)
+    : [];
+  const propertySelectionAudit = {
+    addPropertyControlPresent: propertyAddControls.length === 1,
+    addPropertyControl: propertyAddControls.map((control) => ({
+      ...descriptor(control),
+      title: attribute(control.getAttribute("title")),
+      type: attribute(control.getAttribute("type")),
+    })),
+    addDeductionControlPresent: propertyDeductionControls.length === 1,
+    addDeductionControl: propertyDeductionControls.map((control) => ({
+      ...descriptor(control),
+      title: attribute(control.getAttribute("title")),
+      type: attribute(control.getAttribute("type")),
+    })),
+    selectedPropertyProven: propertyRentWritableInputIndexes.length > 0,
+    rentWritableInputIndexes: propertyRentWritableInputIndexes,
+    selectionActionTaken: false,
+    note:
+      "The navigation probe records + Property but never clicks it; property selection is a user decision.",
+  };
+
   const section = {
     id: currentSectionId,
     dataViewActive: Boolean(dataBody),
@@ -1985,6 +2552,22 @@ function portalProbe(options = {}) {
     unverifiedControlCount: metadataRows
       .flatMap((row) => row.cells)
       .filter((cell) => cell.kind === "unverified").length,
+    taxDeductions: {
+      verified: taxDeductionsVerified,
+      expectedRowCodes: Object.keys(taxDeductionExpectedRows),
+      certificateAudit,
+    },
+    propertyReceipts: {
+      verified: propertyReceiptsVerified,
+      expectedRowCodes: Object.keys(propertyReceiptsExpectedRows),
+      selectionRequiredForRentMapping: true,
+      ...propertySelectionAudit,
+    },
+    propertyTaxDeductions: {
+      verified: propertyTaxDeductionsVerified,
+      expectedRowCodes: Object.keys(propertyTaxDeductionExpectedRows),
+      certificateAudit,
+    },
     structureKey: JSON.stringify({
       grids,
       tables: tableMetadata,
@@ -1996,6 +2579,10 @@ function portalProbe(options = {}) {
       })),
       panels: paymentPanels,
       slots: attachmentSlots.map((slot) => slot.slot),
+      propertySelection:
+        currentSectionId === "property_receipts"
+          ? propertySelectionAudit
+          : null,
       empty: emptyNotice,
     }),
   };
@@ -2024,6 +2611,8 @@ function portalProbe(options = {}) {
       "new-return-form",
       "new-return-continue",
       "new-return-residency",
+      "economic-transactions-setup",
+      "economic-transactions-start",
       "expand-employment",
       "salary-tab",
       "section-panel",
@@ -2034,13 +2623,23 @@ function portalProbe(options = {}) {
   ) {
     actionResult.status = "not_found";
     let matches = [];
+    let capturedPeriodOptionSelected = false;
     if (!options.openReturn) actionResult.status = "navigation_not_enabled";
     else if (!authenticated) actionResult.status = "login_required";
-    else if (blocking || sensitiveInputVisible)
+    else if ((blocking && !setupAdvanceAllowed) || sensitiveInputVisible)
       actionResult.status = "blocked_by_dialog";
     else if (!identityConfigured) actionResult.status = "identity_required";
     else {
-      if (options.action === "open-matching-draft") {
+      if (options.action === "economic-transactions-setup") {
+        Object.assign(actionResult, economicTransactionsSetup());
+      } else if (options.action === "economic-transactions-start") {
+        const startControls = capturedEconomicStart();
+        if (startControls.length !== 1)
+          actionResult.status = startControls.length ? "ambiguous" : "not_found";
+        else if (startControls[0].disabled || startControls[0].getAttribute("aria-disabled") === "true")
+          actionResult.status = "not_ready";
+        else matches = startControls;
+      } else if (options.action === "open-matching-draft") {
         // Require the ENTIRE unfiltered grid to be represented. Do not pick
         // the first row on a paginated/filtered view, or create a duplicate.
         if (!completeGrid) actionResult.status = "grid_incomplete";
@@ -2085,15 +2684,36 @@ function portalProbe(options = {}) {
           );
         });
       } else if (options.action === "new-return-continue") {
-        const continueControls = allControls.filter((el) => {
-          const label = text(el);
-          return label === "Continue" || label === "Accept and Continue";
-        });
+        // Prefer the exact captured TY2026 dialog target. Fall back to the
+        // existing text allowlist for other IRIS setup screens.
+        let capturedContinue = capturedSetupContinue();
+        const periodOptions = capturedSetupPeriodOptions();
+        if (capturedContinue.length === 1 && periodOptions.length === 1) {
+          // This is a DOM click on the captured period option only; it is not a
+          // financial input. It commits the already-approved TY2026 period to
+          // Angular before the Continue button is evaluated.
+          periodOptions[0].click();
+          capturedPeriodOptionSelected = true;
+          // Angular may recreate the dialog action node while closing the list.
+          // Re-read the same capture-backed selector rather than clicking a
+          // detached element.
+          capturedContinue = capturedSetupContinue();
+        }
+        const continueControls = capturedContinue.length
+          ? capturedContinue
+          : capturedPeriodOptionSelected
+            ? []
+            : allControls.filter((el) => {
+              const label = text(el);
+              return label === "Continue" || label === "Accept and Continue";
+            });
         const acceptAndContinue = continueControls.filter(
           (el) => text(el) === "Accept and Continue",
         );
         matches =
           acceptAndContinue.length === 1 ? acceptAndContinue : continueControls;
+        if (capturedPeriodOptionSelected && !capturedContinue.length)
+          actionResult.status = "period_option_selected";
       } else if (options.action === "new-return-residency") {
         const targetResidency = String(options.residencyStatus || "").trim();
         matches = targetResidency
@@ -2210,18 +2830,34 @@ function portalProbe(options = {}) {
       }
       if (matches.length > 1) actionResult.status = "ambiguous";
       else if (matches.length === 1) {
-        if (!clickable(matches[0])) actionResult.status = "not_interactable";
+        const setupAdvanceAction =
+          setupAdvanceAllowed && options.action === "new-return-continue";
+        const hitTestPassed = clickable(matches[0]);
+        // IRIS opens a period suggestion list over the setup dialog. The exact
+        // Continue button is still the safe, allowlisted action, but a strict
+        // elementFromPoint hit-test sees that suggestion panel and labels the
+        // button "obstructed". Do not weaken hit-testing for normal navigation;
+        // only a recognised setup advance may use the DOM click fallback.
+        if (!hitTestPassed && !(setupAdvanceAction && interaction?.reason === "obstructed"))
+          actionResult.status = "not_interactable";
         else if (options.action === "declaration-hover") {
-          matches[0].dispatchEvent(
-            new MouseEvent("mouseover", { bubbles: true }),
-          );
-          matches[0].dispatchEvent(
-            new MouseEvent("mouseenter", { bubbles: false }),
-          );
-          actionResult.status = "hovered";
+          if (!hitTestPassed) {
+            actionResult.status = "not_interactable";
+          } else {
+            matches[0].dispatchEvent(
+              new MouseEvent("mouseover", { bubbles: true }),
+            );
+            matches[0].dispatchEvent(
+              new MouseEvent("mouseenter", { bubbles: false }),
+            );
+            actionResult.status = "hovered";
+          }
         } else {
           matches[0].click();
           actionResult.status = "clicked";
+          if (capturedPeriodOptionSelected) {
+            actionResult.periodOptionSelected = true;
+          }
         }
       }
     }
@@ -2316,13 +2952,14 @@ function portalProbe(options = {}) {
     .slice(0, 100);
   const newReturnPrompts = [
     "Tax Year",
+    "Tax Period",
     "Period",
     "Normal Return",
     "Simplified Return",
     "Resident",
     "Non-Resident",
   ].filter((label) =>
-    Array.from(document.querySelectorAll('label,legend,[role="heading"]'))
+    Array.from(document.querySelectorAll(SETUP_LABEL_SELECTOR))
       .filter(visible)
       .some((el) => text(el).toLowerCase() === label.toLowerCase()),
   );
@@ -2407,6 +3044,8 @@ async function probeFrames(
       "new-return-form",
       "new-return-continue",
       "new-return-residency",
+      "economic-transactions-setup",
+      "economic-transactions-start",
       "expand-employment",
       "salary-tab",
       "section-panel",
@@ -2427,7 +3066,7 @@ async function probeFrames(
       eligible.length !== 1 ||
       before.frames.some(
         (frame) =>
-          frame.hasBlockingOverlay ||
+          (frame.hasBlockingOverlay && !frame.setupDialogOnly) ||
           frame.loginVisible ||
           frame.readiness?.explicitSessionExpired,
       )
@@ -2591,7 +3230,6 @@ async function inspectNavigation(
     onSectionCaptured = async () => {},
   } = {},
 ) {
-  const options = { taxYear, openReturn, taxpayerIdentifier };
   const normalizedResidencyStatus = /non\s*-?resident/i.test(
     String(newReturnContext?.residencyStatus || ""),
   )
@@ -2608,6 +3246,22 @@ async function inspectNavigation(
         .toLowerCase() || "original",
     residencyStatus: normalizedResidencyStatus,
     expectedPeriod,
+  };
+  const economicTransactionsContext = {
+    incomeSources: Array.isArray(newReturnContext?.incomeSources)
+      ? newReturnContext.incomeSources.map((source) => String(source))
+      : null,
+    residencyStatus: normalizedResidencyStatus,
+    wealthStatement:
+      typeof newReturnContext?.wealthStatement === "boolean"
+        ? newReturnContext.wealthStatement
+        : null,
+  };
+  const options = {
+    taxYear,
+    openReturn,
+    taxpayerIdentifier,
+    economicTransactionsContext,
   };
   const tourPlan =
     sectionIds === null
@@ -2724,6 +3378,109 @@ async function inspectNavigation(
     }
     return read();
   };
+  // The economic-transactions screen can appear immediately after the guarded
+  // TY2026 period Continue click. Keep it in one handler so the stage machine
+  // cannot misclassify that screen as an unclassified return-setup dialog.
+  const handleEconomicTransactionsGate = async (initialInspection) => {
+    let current = initialInspection;
+    let gateFrame = current.frames.find(
+      (frame) => frame.economicTransactionsGate?.present,
+    );
+    if (!gateFrame) return null;
+
+    let gate = describeEconomicTransactionsGate(
+      gateFrame.economicTransactionsGate,
+    );
+    const gateContext = options.economicTransactionsContext || {};
+    const contextReady =
+      Array.isArray(gateContext.incomeSources) &&
+      Boolean(gateContext.residencyStatus) &&
+      (!gate.wealthChoicePresent ||
+        typeof gateContext.wealthStatement === "boolean");
+    if (!contextReady) {
+      onStep(
+        "economic_transactions_gate",
+        `IRIS is asking for ${gate.missing.join(" and ") || "an unprovided setup choice"}. The approved packet/context does not provide a complete answer, so the agent did not change this screen.`,
+      );
+      return {
+        inspection: current,
+        requiredAction: "portal_economic_transactions_gate",
+        economicTransactionsGate: gate,
+      };
+    }
+
+    // Angular may take a render pass after each checkbox/radio event. Re-read
+    // the same capture-backed controls until Start becomes enabled or a guard
+    // reports a mismatch. The choices come from the approved TaxRocket packet;
+    // they are never guessed from the live page.
+    for (let attempt = 0; attempt < 8; attempt++) {
+      gateFrame = current.frames.find(
+        (frame) => frame.economicTransactionsGate?.present,
+      );
+      if (!gateFrame) break;
+      gate = describeEconomicTransactionsGate(
+        gateFrame.economicTransactionsGate,
+      );
+      if (gate.ready) break;
+      const setupResponse = await act("economic-transactions-setup");
+      const setupStatus = getActionStatus(
+        setupResponse,
+        "economic-transactions-setup",
+      );
+      onStep(
+        "economic_transactions_setup",
+        `Approved packet choices: ${setupStatus}.`,
+      );
+      if (!["clicked", "already_active"].includes(setupStatus))
+        return {
+          inspection: setupResponse,
+          requiredAction: "portal_economic_transactions_gate",
+          economicTransactionsGate: gate,
+        };
+      await delay(500);
+      current = await read();
+    }
+
+    gateFrame = current.frames.find(
+      (frame) => frame.economicTransactionsGate?.present,
+    );
+    if (gateFrame) {
+      gate = describeEconomicTransactionsGate(
+        gateFrame.economicTransactionsGate,
+      );
+      if (!gate.ready) {
+        onStep(
+          "economic_transactions_gate",
+          `IRIS still has ${gate.missing.join(" and ") || "an unanswered choice"}; no unverified action was attempted.`,
+        );
+        return {
+          inspection: current,
+          requiredAction: "portal_economic_transactions_gate",
+          economicTransactionsGate: gate,
+        };
+      }
+      const startResponse = await act("economic-transactions-start");
+      const startStatus = getActionStatus(
+        startResponse,
+        "economic-transactions-start",
+      );
+      onStep(
+        "economic_transactions_start",
+        `Start Return Filling: ${startStatus}.`,
+      );
+      if (startStatus !== "clicked")
+        return {
+          inspection: startResponse,
+          requiredAction: "portal_economic_transactions_gate",
+          economicTransactionsGate: gate,
+        };
+      await delay(800);
+      current = await waitForDocument();
+    }
+
+    return { inspection: current };
+  };
+
   const publicTour = () =>
     state.sectionTour
       ? {
@@ -2804,7 +3561,13 @@ async function inspectNavigation(
       unknownColumnCount: metadata.unknownColumnCount || 0,
       unverifiedControlCount: metadata.unverifiedControlCount || 0,
       mappingVerified:
-        profile.id === "salary" && frame?.salary?.verified === true,
+        (profile.id === "salary" && frame?.salary?.verified === true) ||
+        (profile.id === "tax_deductions" &&
+          frame?.section?.taxDeductions?.verified === true) ||
+        (profile.id === "property_receipts" &&
+          frame?.section?.propertyReceipts?.verified === true) ||
+        (profile.id === "property_tax_deductions" &&
+          frame?.section?.propertyTaxDeductions?.verified === true),
     };
     state.sectionTour.sections = [
       ...state.sectionTour.sections.filter((entry) => entry.id !== profile.id),
@@ -3200,6 +3963,15 @@ async function inspectNavigation(
         };
       if (snapshot.frames.some((frame) => frame.document?.present))
         return verifyDocument(snapshot);
+      if (snapshot.frames.some((frame) => frame.economicTransactionsGate?.present))
+        return {
+          inspection: snapshot,
+          requiredAction: "portal_economic_transactions_gate",
+          economicTransactionsGate: describeEconomicTransactionsGate(
+            snapshot.frames.find((frame) => frame.economicTransactionsGate?.present)
+              .economicTransactionsGate,
+          ),
+        };
       const setup = describeSetupSnapshot(snapshot);
       if (setup.ambiguous)
         return { inspection: snapshot, requiredAction: "portal_navigation" };
@@ -3284,11 +4056,16 @@ async function inspectNavigation(
       const result = await act(action);
       const status = getActionStatus(result, action);
       onStep("new_return_setup_action", `${stage}: ${action} ${status}.`);
-      if (!["clicked", "already_active"].includes(status))
+      if (!["clicked", "already_active", "period_option_selected"].includes(status))
         return {
           inspection: result,
           requiredAction: "portal_new_return_setup",
         };
+      if (status === "period_option_selected") {
+        await delay(300);
+        snapshot = null;
+        continue;
+      }
       state.newEntryOpened = true;
       await delay(stage === "accept_continue" ? 1200 : 900);
       snapshot = null;
@@ -3297,6 +4074,19 @@ async function inspectNavigation(
     return {
       inspection: finalSnapshot,
       requiredAction: "portal_new_return_setup",
+    };
+  };
+  const continueAfterNewReturnSetup = async (setupOutcome) => {
+    if (setupOutcome.requiredAction !== "portal_economic_transactions_gate")
+      return setupOutcome;
+    const resumedGate = await handleEconomicTransactionsGate(
+      setupOutcome.inspection,
+    );
+    if (resumedGate?.requiredAction) return resumedGate;
+    if (resumedGate?.inspection) return verifyDocument(resumedGate.inspection);
+    return {
+      inspection: setupOutcome.inspection,
+      requiredAction: "portal_navigation",
     };
   };
   let inspection = await read();
@@ -3362,36 +4152,10 @@ async function inspectNavigation(
   if (!isAuthenticated(inspection))
     return { inspection, requiredAction: "portal_readiness_unverified" };
 
-  // Phase 1.5b. The pre-filing gate reached from the blue dashboard tile. It
-  // is read-only to the agent: the taxpayer's income sources and residency are
-  // legal determinations, so we report exactly what is outstanding and stop.
-  const gateFrame = inspection.frames.find(
-    (frame) => frame.economicTransactionsGate?.present,
-  );
-  if (gateFrame) {
-    const gate = describeEconomicTransactionsGate(
-      gateFrame.economicTransactionsGate,
-    );
-    if (!gate.ready) {
-      onStep(
-        "economic_transactions_gate",
-        `IRIS is asking for ${gate.missing.join(" and ")} before "Start Return Filling" is enabled. The agent does not answer this screen.`,
-      );
-      return {
-        inspection,
-        requiredAction: "portal_economic_transactions_gate",
-        economicTransactionsGate: gate,
-      };
-    }
-    onStep(
-      "economic_transactions_gate",
-      `Income sources (${gate.selectedSources.join(", ") || "none listed"}) and residency are answered; "Start Return Filling" is enabled. Click it locally to continue, then Retry.`,
-    );
-    return {
-      inspection,
-      requiredAction: "portal_economic_transactions_gate",
-      economicTransactionsGate: gate,
-    };
+  const gateOutcome = await handleEconomicTransactionsGate(inspection);
+  if (gateOutcome) {
+    if (gateOutcome.requiredAction) return gateOutcome;
+    inspection = gateOutcome.inspection;
   }
 
   if (openReturn && !inspection.frames.some((f) => f.identityConfigured))
@@ -3402,8 +4166,12 @@ async function inspectNavigation(
     openReturn &&
     (state.newEntryOpened ||
       inspection.frames.some((frame) => frame.setupDialogOnly))
-  )
-    return advanceNewReturnSetup(inspection);
+  ) {
+    const setupOutcome = await advanceNewReturnSetup(inspection);
+    if (setupOutcome.requiredAction === "portal_economic_transactions_gate")
+      return continueAfterNewReturnSetup(setupOutcome);
+    return setupOutcome;
+  }
 
   for (const action of ["draft-tab", "it-declaration-tab"]) {
     // Angular may render the next control after the click has returned.
@@ -3513,7 +4281,9 @@ async function inspectNavigation(
         "Declaration → Return Statements (Original for TY 2026 and onwards) opened. Continuing the guarded TY2026+ original setup flow.",
       );
       await delay(800);
-      return advanceNewReturnSetup(await read());
+      return continueAfterNewReturnSetup(
+        await advanceNewReturnSetup(await read()),
+      );
     }
     if (
       opened.frames.some((f) =>
@@ -3527,6 +4297,120 @@ async function inspectNavigation(
   return { inspection: await read(), requiredAction: "portal_navigation" };
 }
 
+
+/**
+ * "Selector drift" has to be an evidenced conclusion, not a string match.
+ *
+ * The captured section tour is the only ground truth the agent has: it says which
+ * panels were found and how many rows each rendered. Drift means rows that MUST be
+ * there are missing. `structure_changed` (the tour could not bind headers to rows)
+ * is a different failure — the DOM is present, our packet's claim about it is not
+ * verified — and telling an operator to rewrite selectors for that wastes a real
+ * filing window.
+ */
+function buildPortalEvidenceDiagnostics(sectionTour, rowBearingIds) {
+  const rowBearing = rowBearingIds || ROW_BEARING_SECTION_IDS;
+  const sections = Array.isArray(sectionTour && sectionTour.sections)
+    ? sectionTour.sections
+    : [];
+  if (!sections.length) {
+    return { state: "no_evidence", sections: [], drifted: [], unverified: [] };
+  }
+
+  const summary = sections.map((section) => ({
+    id: section && section.id != null ? section.id : null,
+    status: (section && section.status) || null,
+    transition: (section && section.transition) || null,
+    rowCount: Array.isArray(section && section.rows) ? section.rows.length : 0,
+    gridCount: Array.isArray(section && section.grids) ? section.grids.length : 0,
+    mappingVerified: Boolean(section && section.mappingVerified),
+  }));
+
+  const drifted = summary.filter(
+    (section) =>
+      rowBearing.includes(section.id) &&
+      section.rowCount === 0 &&
+      section.status === "captured",
+  );
+  const unverified = summary.filter(
+    (section) =>
+      section.rowCount > 0 &&
+      section.mappingVerified === false &&
+      String(section.transition || "").includes("structure_changed"),
+  );
+
+  return {
+    state: drifted.length
+      ? "rows_missing"
+      : unverified.length
+        ? "structure_unverified"
+        : "structure_present",
+    sections: summary,
+    drifted: drifted.map((section) => section.id),
+    unverified: unverified.map((section) => section.id),
+  };
+}
+
+/**
+ * The one predicate that says "this page IS the return workspace", as an in-page script.
+ *
+ * `countVisibleInputs() > 0` is NOT readiness: the Summary-of-Economic-Transactions
+ * gate renders ten visible inputs, so an agent waiting on that signal happily reports
+ * a form that was never opened. This is the same evidence `classifyPage` uses for
+ * `readiness.returnWorkspace`, exported so the autofill runner and the dashboard
+ * flow cannot drift into disagreeing about what "ready" means.
+ */
+const RETURN_WORKSPACE_PROBE = `(() => {
+  const clip = (t) => String(t == null ? '' : t).replace(/\\s+/g, ' ').trim();
+  // textContent, NOT innerText: innerText is undefined outside a browser and
+  // silently turns every label match into a false negative.
+  const labelled = (el) => clip(el && (el.innerText || el.textContent));
+  // Only explicit DOM markers count as hidden. A zero-width box is a stylesheet
+  // that failed to load, not evidence that the return is closed.
+  const isHidden = (el) => {
+    if (!el) return true;
+    if (el.closest('[hidden], [inert], [aria-hidden="true"]')) return true;
+    const panel = el.closest('mat-expansion-panel');
+    const header = panel && panel.querySelector(':scope > mat-expansion-panel-header');
+    if (header && !header.classList.contains('mat-expanded') &&
+        header.getAttribute('aria-expanded') !== 'true') return true;
+    try {
+      const s = (typeof getComputedStyle === 'function' ? getComputedStyle(el) : null);
+      if (s && (s.display === 'none' || s.visibility === 'hidden')) return true;
+    } catch (e) {}
+    return false;
+  };
+  const visible = (list) => {
+    const shown = list.filter((el) => !isHidden(el));
+    return shown.length ? shown : list;
+  };
+  const countInputs = (root) => (root ? root.querySelectorAll('input:not([type="hidden"])') : []).length;
+  const workflow = visible(Array.from(document.querySelectorAll('app-nitr-workflow')))[0];
+  if (!workflow) {
+    return { returnWorkspace: false, reason: 'app-nitr-workflow-absent', inputs: countInputs(document) };
+  }
+  const header = workflow.querySelector('app-wf-header');
+  if (!header) {
+    return { returnWorkspace: false, reason: 'app-wf-header-absent', inputs: countInputs(workflow) };
+  }
+  const year = visible(Array.from(header.querySelectorAll('h6')))
+    .some((el) => /^Year\\s+20\\d{2}$/i.test(labelled(el)));
+  const returnDocument = visible(Array.from(header.querySelectorAll('p,span')))
+    .some((el) => {
+      const label = labelled(el);
+      return label.length < 220 && /\\b(?:114|116)\\s*\\(\\s*\\d+\\s*\\)/i.test(label);
+    });
+  const registration = visible(Array.from(header.querySelectorAll('p')))
+    .some((el) => /^Registration\\s*(?:No|Number)\\s*:/i.test(labelled(el)));
+  return {
+    returnWorkspace: Boolean(year && returnDocument && registration),
+    evidence: { year, returnDocument, registration },
+    reason: year && returnDocument && registration ? null : 'workflow-header-incomplete',
+    inputs: countInputs(workflow),
+  };
+})()`;
+
+
 module.exports = {
   BUILD_TAG,
   DEFAULT_HOSTS,
@@ -3535,6 +4419,8 @@ module.exports = {
   ALL_SECTION_IDS,
   WEALTH_SECTION_IDS,
   INCOME_SECTION_IDS,
+  SALARY_ONLY_SECTION_IDS,
+  SALARY_WITHHOLDING_SECTION_IDS,
   normalizeSetupLabel,
   getExpectedOriginalTaxPeriod,
   classifyNewReturnSetupStage,
@@ -3550,4 +4436,7 @@ module.exports = {
   navigateToSection,
   isAuthenticated,
   inspectNavigation,
+  ROW_BEARING_SECTION_IDS,
+  buildPortalEvidenceDiagnostics,
+  RETURN_WORKSPACE_PROBE,
 };

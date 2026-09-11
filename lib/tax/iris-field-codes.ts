@@ -19,6 +19,9 @@ export const IRIS_CODES = {
   SALARY_ALLOWANCES: { code: "1049", description: "Allowances", portalArea: "Employment", section: "Salary", rowLevel: "Line item" },
   SALARY_PENSION_ANNUITY: { code: "1008", description: "Pension / Annuity u/s 12(2)(f)", portalArea: "Employment", section: "Salary", rowLevel: "Line item" },
   SALARY_PERQUISITES: { code: "1089", description: "Value of Perquisites", portalArea: "Employment", section: "Salary", rowLevel: "Line item" },
+  SALARY_ARREARS: { code: "1010", description: "Arrears of Salary", portalArea: "Employment", section: "Salary", rowLevel: "Line item" },
+  SALARY_EXPENDITURE_REIMBURSEMENT: { code: "1059", description: "Expenditure Reimbursement", portalArea: "Employment", section: "Salary", rowLevel: "Line item" },
+  SALARY_PROFITS_IN_LIEU: { code: "1099", description: "Profits in Lieu of or in Addition to Pay, Wages or Other Remuneration", portalArea: "Employment", section: "Salary", rowLevel: "Line item" },
 
   // Property
   PROPERTY_INCOME: { code: "2000", description: "Income / (Loss) from Property", portalArea: "Property", section: "Receipts / Deductions", rowLevel: "Summary" },
@@ -53,9 +56,17 @@ export const IRIS_CODES = {
   // Adjustable Taxes - CRITICAL
   ADJUSTABLE_TAX: { code: "640000", description: "Adjustable Tax", portalArea: "Tax Chargeable / Payments", section: "Adjustable Tax", rowLevel: "Summary" },
   ADJ_SALARY_149: { code: "64020004", description: "Salary of Employees u/s 149", portalArea: "Tax Chargeable / Payments", section: "Adjustable Tax", rowLevel: "Line item" },
+  ADJ_DIRECTORSHIP_149_3: { code: "64020005", description: "Directorship Fee u/s 149(3)", portalArea: "Tax Chargeable / Payments", section: "Adjustable Tax", rowLevel: "Line item" },
+  FINAL_TRANSPORT_MONETIZATION: { code: "64210051", description: "Transport Monetization for Government Servants (after deduction of drivers salary) u/c (27), Part II, 2nd Schedule", portalArea: "Tax Chargeable / Payments", section: "Final Tax", rowLevel: "Line item" },
+  FINAL_PENSION_OVER_10M: { code: "64020007", description: "149-Pension exceeding Rs. 10 million", portalArea: "Tax Chargeable / Payments", section: "Final Tax", rowLevel: "Line item" },
+  AVERAGE_TERMINATION_BENEFITS: { code: "64210054", description: "Employment Termination Benefits u/s 12(6)/Withdrawal from pension fund exceeding 50% of the accumulated balance u/c 23A Chargeable to Tax at Average Rate", portalArea: "Tax Chargeable / Payments", section: "Average Tax", rowLevel: "Line item" },
+  AVERAGE_SALARY_ARREARS: { code: "64210056", description: "Salary Arrears u/s 12(7) Chargeable to Tax at Relevant Rate", portalArea: "Tax Chargeable / Payments", section: "Average Tax", rowLevel: "Line item" },
+  ADJUSTABLE_TAX_GROUP: { code: "999909", description: "Adjustable Tax", portalArea: "Tax Chargeable / Payments", section: "Adjustable Tax", rowLevel: "Summary" },
+  FINAL_TAX_GROUP: { code: "999910", description: "Final Tax", portalArea: "Tax Chargeable / Payments", section: "Final Tax", rowLevel: "Summary" },
+  AVERAGE_TAX_GROUP: { code: "999911", description: "Average Tax", portalArea: "Tax Chargeable / Payments", section: "Average Tax", rowLevel: "Summary" },
   ADJ_PROFIT_DEBT_BANK_151_B: { code: "64040002", description: "Profit on Debt u/s 151(1)(b) from Bank Accounts / Deposits @15%", portalArea: "Tax Chargeable / Payments", section: "Adjustable Tax", rowLevel: "Line item" },
   ADJ_PROFIT_DEBT_NSC_151_A: { code: "64040001", description: "Profit on Debt u/s 151(1)(a) from NSC / PO Deposits @15%", portalArea: "Tax Chargeable / Payments", section: "Adjustable Tax", rowLevel: "Line item" },
-  ADJ_RENT_155: { code: "64080001", description: "Income from Property / Rent u/s 155", portalArea: "Tax Chargeable / Payments", section: "Adjustable Tax", rowLevel: "Line item" },
+  ADJ_RENT_155: { code: "64080001", description: "Rent of Immoveable Property u/s 155", portalArea: "Property", section: "Tax Deductions", rowLevel: "Line item" },
   ADJ_IMPORT_148_1PCT: { code: "64010002", description: "Import u/s 148 @1%", portalArea: "Tax Chargeable / Payments", section: "Adjustable Tax", rowLevel: "Line item" },
   ADJ_CASH_WITHDRAWAL_231AB: { code: "64100101", description: "Cash withdrawal from Bank u/s 231AB", portalArea: "Tax Chargeable / Payments", section: "Adjustable Tax", rowLevel: "Line item" },
   ADJ_VEHICLE_231B: { code: "64100301", description: "Motor Vehicle u/s 231B", portalArea: "Tax Chargeable / Payments", section: "Adjustable Tax", rowLevel: "Line item" },
@@ -90,13 +101,19 @@ export const CATEGORY_TO_IRIS_MAP: Record<string, { incomeCode: string; taxCode?
     { incomeCode: IRIS_CODES.SALARY_INCOME.code, description: "Salary main" },
     { incomeCode: IRIS_CODES.SALARY_PAY_WAGES.code, description: "Pay/Wages breakdown" },
   ],
+  // ONE IRIS line (1008) carries the pension figure; the engine's exempt/taxable split
+  // stays internal. The old double mapping (1008 + 5007) wrote the same pension amount
+  // into two schedules, i.e. counted it twice.
   PENSION: [
-    { incomeCode: IRIS_CODES.SALARY_PENSION_ANNUITY.code, description: "Pension in Salary" },
-    { incomeCode: IRIS_CODES.OTHER_SOURCES_ANNUITY_PENSION.code, description: "Pension in Other Sources fallback" },
+    { incomeCode: IRIS_CODES.SALARY_PENSION_ANNUITY.code, description: "Pension / Annuity u/s 12(2)(f) — whole figure; IRIS derives the split" },
   ],
-  BANK_PROFIT: [
-    { incomeCode: IRIS_CODES.OTHER_SOURCES_PROFIT_DEBT.code, taxCode: IRIS_CODES.ADJ_PROFIT_DEBT_BANK_151_B.code, description: "Bank profit" },
+  PENSION_OTHER_SOURCES: [
+    { incomeCode: IRIS_CODES.OTHER_SOURCES_ANNUITY_PENSION.code, description: "Annuity/pension reported under Other Sources (explicit only — never automatic)" },
   ],
+  // Verified line items only. BANK_PROFIT / PROFIT_ON_DEBT / DIVIDEND are final-tax
+  // routes: their AMOUNT belongs in Other Sources → 'Subject to Final Tax' (a column
+  // with no live capture yet) and their TAX arrives through the 151(a)/(b) taxCredit.
+  // Pointing the amount at 500312 + a normal-tax column under-stated the final tax.
   RENT: [
     { incomeCode: IRIS_CODES.PROPERTY_RENT_RECEIVED.code, taxCode: IRIS_CODES.ADJ_RENT_155.code, description: "Rent" },
   ],
@@ -106,27 +123,13 @@ export const CATEGORY_TO_IRIS_MAP: Record<string, { incomeCode: string; taxCode?
   PROPERTY_RENT: [
     { incomeCode: IRIS_CODES.PROPERTY_RENT_RECEIVED.code, taxCode: IRIS_CODES.ADJ_RENT_155.code, description: "Property Rent" },
   ],
-  DIVIDEND: [
-    { incomeCode: IRIS_CODES.OTHER_SOURCES_OTHER_RECEIPTS.code, description: "Dividend fallback to Other Receipts (need exact code from full IRIS)" },
-  ],
-  BUSINESS: [
-    { incomeCode: IRIS_CODES.OTHER_SOURCES_OTHER_RECEIPTS.code, description: "Business - needs detailed mapping" },
-  ],
-  CAPITAL_GAIN: [
-    { incomeCode: IRIS_CODES.CGT_GAINS.code, description: "Capital Gains" },
-  ],
-  CAPITAL_GAINS: [
-    { incomeCode: IRIS_CODES.CGT_GAINS.code, description: "Capital Gains plural" },
-  ],
-  OTHER_INCOME: [
-    { incomeCode: IRIS_CODES.OTHER_SOURCES_OTHER_RECEIPTS.code, description: "Other Income" },
-  ],
-  FOREIGN: [
-    { incomeCode: IRIS_CODES.FOREIGN_INCOME.code, description: "Foreign Income" },
-  ],
-  AGRICULTURE: [
-    { incomeCode: IRIS_CODES.AGRI_INCOME.code, description: "Agriculture Income" },
-  ],
+  // Intentionally unmapped — reported in `portalFieldMap.mappingGaps` instead of
+  // being guessed onto a code that does not exist on this taxpayer's return:
+  //   DIVIDEND, BUSINESS, SERVICES, OTHER_INCOME  (5028 "Other Receipts" is not a
+  //     substitute for an unknown source; it produced 3 × row_not_found live)
+  //   CAPITAL_GAIN / CAPITAL_GAINS (4000 is a Summary row — IRIS computes it)
+  //   FOREIGN (6000 is a Summary row), AGRICULTURE (sheet never captured)
+  //   BANK_PROFIT / PROFIT_ON_DEBT (final-tax placement above)
   // Advance tax categories - from our WHT Rate Card
   ADVANCE_TAX_236C: [
     { incomeCode: IRIS_CODES.ADJ_PROPERTY_TRANSFER_236C.code, description: "Property Transfer 236C" },

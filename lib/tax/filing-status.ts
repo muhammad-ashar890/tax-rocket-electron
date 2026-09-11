@@ -29,6 +29,23 @@ export const TRANSACTION_READY_STATUSES = [
   "CASH_MOVEMENT",
 ] as const;
 
+// ── Local-agent (FbrConnection) completion — exact DB values ──
+// "COMPLETED" is written by nothing: app/api/local-agent/jobs/[jobId]/status
+// writes FILING_COMPLETED for a filing job and DRY_RUN_COMPLETED for a dry run.
+// A gate that compares against "COMPLETED" is therefore permanently false, which
+// is exactly how the wizard's FBR rail stopped turning green.
+export const FBR_AGENT_COMPLETED_STATUSES = [
+  "FILING_COMPLETED",
+  "DRY_RUN_COMPLETED",
+] as const;
+
+/** True when the desktop agent finished the job — any of its two flavours. */
+export function isFbrAgentCompleted(status?: string | null): boolean {
+  return FBR_AGENT_COMPLETED_STATUSES.includes(
+    (status ?? "") as (typeof FBR_AGENT_COMPLETED_STATUSES)[number],
+  );
+}
+
 export type DocumentLike = { extractionStatus: string };
 export type TransactionLike = { classificationStatus: string };
 export type PacketLike = {

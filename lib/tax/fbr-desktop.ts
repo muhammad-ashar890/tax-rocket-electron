@@ -71,7 +71,6 @@ export function buildDesktopSessionConfig(params: {
     readySelector: irisReadySelector,
     readyUrlPattern,
     rejectSelector: auth.readyRejectSelector || "",
-    useMockIris: String(auth.useMockIris),
     accountReference: normalizeAccountReference(params.accountReference),
   });
 
