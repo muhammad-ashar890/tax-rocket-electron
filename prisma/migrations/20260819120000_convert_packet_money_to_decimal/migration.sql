@@ -1,0 +1,4 @@
+-- AlterTable
+ALTER TABLE "FilingPacket" ALTER COLUMN "taxPayable" SET DATA TYPE DECIMAL(18,2),
+ALTER COLUMN "refundDue" SET DATA TYPE DECIMAL(18,2);
+

@@ -1,0 +1,77 @@
+{
+  "name": "taxrocket-portal-agent",
+  "version": "1.0.0",
+  "description": "TaxRocket Portal Agent - Trusted Desktop Agent for FBR IRIS filing",
+  "main": "main.js",
+  "scripts": {
+    "dev": "electron . --dev",
+    "dev:live": "powershell -NoProfile -ExecutionPolicy Bypass -File ./start-live.ps1",
+    "start": "electron .",
+    "dist:win": "electron-builder --win --x64 --publish never",
+    "build": "electron-builder --publish never",
+    "desktop-connect:dev": "electron . --dev"
+  },
+  "author": "TaxRocket",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  },
+  "build": {
+    "appId": "com.taxrocket.portal-agent",
+    "productName": "Tax Rocket Portal Agent",
+    "copyright": "Copyright © TaxRocket",
+    "asar": true,
+    "files": [
+      "main.js",
+      "iris-navigation.js",
+      "iris-row-filler.js",
+      "preload.js",
+      "portal-agent.js",
+      "renderer.html",
+      "renderer.js",
+      "styles.css",
+      "assets/icon.ico",
+      "assets/icon.png"
+    ],
+    "extraMetadata": {
+      "main": "main.js"
+    },
+    "protocols": [
+      {
+        "name": "TaxRocket Connect",
+        "schemes": [
+          "taxrocket-connect"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "artifactName": "TaxRocket-Portal-Agent-Setup-${version}.${ext}",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Tax Rocket Portal Agent",
+      "uninstallDisplayName": "Tax Rocket Portal Agent",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico"
+    },
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    }
+  }
+}

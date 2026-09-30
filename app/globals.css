@@ -1,0 +1,85 @@
+@tailwind base;
+
+/* Bank transaction table: keep the horizontal scrollbar subtle until the
+   user hovers the table, then make it easy to discover/use on desktop. */
+.bank-table-scroll {
+  scrollbar-color: transparent transparent;
+  scrollbar-width: thin;
+}
+.bank-table-scroll:hover {
+  scrollbar-color: #376952 #e8eee9;
+}
+.bank-table-scroll::-webkit-scrollbar {
+  height: 8px;
+}
+.bank-table-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.bank-table-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 9999px;
+}
+.bank-table-scroll:hover::-webkit-scrollbar-track {
+  background: #e8eee9;
+}
+.bank-table-scroll:hover::-webkit-scrollbar-thumb {
+  background: #376952;
+}
+
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222 20% 14%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 20% 14%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 20% 14%;
+
+    --primary: 152 45% 24%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 210 20% 96%;
+    --secondary-foreground: 222 20% 14%;
+
+    --muted: 210 20% 96%;
+    --muted-foreground: 215 14% 45%;
+
+    --accent: 210 20% 96%;
+    --accent-foreground: 222 20% 14%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 214 18% 88%;
+    --input: 214 18% 88%;
+    --ring: 152 45% 24%;
+
+    --radius: 0.75rem;
+
+    /* ── TaxRocket cultural / semantic tokens ── */
+    --amanah: 152 45% 24%;
+    --amanah-foreground: 0 0% 100%;
+
+    --mizan: 38 65% 62%;
+    --mizan-foreground: 32 45% 28%;
+
+    --indus: 199 70% 38%;
+    --khewra: 340 55% 48%;
+    --risk: 0 72% 51%;
+    --daftar: 222 20% 14%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}

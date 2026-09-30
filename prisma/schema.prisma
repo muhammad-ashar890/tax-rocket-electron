@@ -1,0 +1,544 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ────────────────────────────────────────────────────────────────
+// Auth & User Profile (NextAuth Required Models)
+// ────────────────────────────────────────────────────────────────
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+
+  // TaxRocket Specific Profile Fields
+  cnic                      String?                    @unique
+  ntn                       String?                    @unique
+  phone                     String?
+  dateOfBirth               DateTime?
+  address                   String?
+  city                      String?
+  defaultTaxYear            Int?
+  notificationPreferences   String                     @default("{}")
+  practicePreferences       String                     @default("{}")
+  accounts                  Account[]
+  sessions                  Session[]
+  filings                   FilingDraft[]
+  documents                 Document[]
+  bankAccounts              BankAccount[]
+  bankStatements            BankStatement[]
+  bankTransactions          BankTransaction[]
+  ledgerEntries             LedgerEntry[]
+  filingIncomeSelections    FilingIncomeSelection[]
+  filingIncomeRecords       FilingIncomeRecord[]
+  filingTaxCredits          FilingTaxCredit[]
+  filingTaxCalculationLines FilingTaxCalculationLine[]
+  filingPackets             FilingPacket[]
+  fbrConnections            FbrConnection[]
+  trustedDevices            TrustedDevice[]
+  localAgentJobs            LocalAgentJob[]
+  taxAuditEvents            TaxAuditEvent[]
+  notifications             Notification[]
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ────────────────────────────────────────────────────────────────
+// Filing Journey Models
+// ────────────────────────────────────────────────────────────────
+model FilingDraft {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  taxYear              Int
+  status               String  @default("IN_PROGRESS")
+  currentStep          Int     @default(0)
+  wizardCompletionStep Int     @default(0)
+  filerType            String?
+  businessStructure    String?
+
+  // SQLite doesn't support arrays, so we store stringified JSON
+  incomeSources    String  @default("[]")
+  salaryPercentage String?
+  // Explicit IRIS tax-residency choice. Null is intentional for legacy/incomplete
+  // drafts; packet generation and the desktop agent must pause until it is set.
+  residencyStatus  String?
+
+  // SQLite doesn't support arrays, so we store stringified JSON
+  readinessChecks             String                     @default("[]")
+  openingWealth               Decimal? @db.Decimal(18, 2)
+  closingWealth               Decimal? @db.Decimal(18, 2)
+  taxableIncome               Decimal? @db.Decimal(18, 2)
+  taxWithheld                 Decimal? @db.Decimal(18, 2)
+  taxPayable                  Decimal? @db.Decimal(18, 2)
+  refundDue                   Decimal? @db.Decimal(18, 2)
+  taxCalculationStatus        String                     @default("NOT_CALCULATED")
+  taxpayerListStatus          String?
+  taxpayerListStatusSource    String?
+  taxpayerListStatusCheckedAt DateTime?
+  taxRuleSetVersion           String?
+  taxCalculationRevision      String?
+  packetApprovalConfirmed     Boolean                    @default(false)
+  packetApprovalAt            DateTime?
+  packetApprovalByUserId      String?
+  reconciliationGap           Decimal? @db.Decimal(18, 2)
+  reconciliationStatus        String                     @default("UNRESOLVED")
+  reconciliationMethod        String?
+  reconciliationNote          String?
+  documents                   Document[]
+  bankAccounts                BankAccount[]
+  bankStatements              BankStatement[]
+  bankTransactions            BankTransaction[]
+  ledgerEntries               LedgerEntry[]
+  incomeSelections            FilingIncomeSelection[]
+  incomeRecords               FilingIncomeRecord[]
+  taxCredits                  FilingTaxCredit[]
+  taxCalculationLines         FilingTaxCalculationLine[]
+  filingPackets               FilingPacket[]
+  fbrConnections              FbrConnection[]
+  localAgentJobs              LocalAgentJob[]
+  taxAuditEvents              TaxAuditEvent[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, taxYear])
+}
+
+model Document {
+  id            String       @id @default(cuid())
+  filingDraftId String?
+  filingDraft   FilingDraft? @relation(fields: [filingDraftId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  documentType String
+  fileName     String
+  fileUrl      String
+  mimeType     String
+  sizeBytes    Int
+
+  extractionStatus   String       @default("PENDING")
+  extractionProvider String?
+  extractionStartedAt DateTime?
+  extractedData      String?
+  extractionError    String?
+  extractedAt        DateTime?
+  bankAccountId      String?
+  bankAccount        BankAccount? @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+
+  incomeRecords FilingIncomeRecord[] @relation("IncomeRecordSourceDocument")
+  taxCredits    FilingTaxCredit[]    @relation("TaxCreditSourceDocument")
+
+  createdAt DateTime @default(now())
+}
+
+model BankAccount {
+  id            String      @id @default(cuid())
+  filingDraftId String
+  filingDraft   FilingDraft @relation(fields: [filingDraftId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  bankName            String
+  accountLabel        String
+  accountNumberMasked String?
+  currency            String  @default("PKR")
+
+  documents     Document[]
+  statements    BankStatement[]
+  transactions  BankTransaction[]
+  ledgerEntries LedgerEntry[]
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  @@unique([filingDraftId, accountLabel])
+  @@index([filingDraftId])
+  @@index([userId])
+}
+
+model BankStatement {
+  id            String      @id @default(cuid())
+  filingDraftId String
+  filingDraft   FilingDraft @relation(fields: [filingDraftId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  accountLabel        String
+  accountNumberMasked String?
+  currency            String       @default("PKR")
+  periodStart         DateTime?
+  periodEnd           DateTime?
+  openingBalance      Decimal  @db.Decimal(18, 2)
+  closingBalance      Decimal  @db.Decimal(18, 2)
+  sourceDocumentId    String?
+  bankAccountId       String?
+  bankAccount         BankAccount? @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+
+  transactions BankTransaction[]
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  @@index([filingDraftId])
+  @@index([userId])
+}
+
+model BankTransaction {
+  id              String         @id @default(cuid())
+  filingDraftId   String
+  filingDraft     FilingDraft    @relation(fields: [filingDraftId], references: [id], onDelete: Cascade)
+  bankStatementId String?
+  bankStatement   BankStatement? @relation(fields: [bankStatementId], references: [id], onDelete: SetNull)
+  userId          String
+  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  transactionDate  DateTime?
+  description      String
+  debit            Decimal? @db.Decimal(18, 2)
+  credit           Decimal? @db.Decimal(18, 2)
+  balance          Decimal? @db.Decimal(18, 2)
+  source           String       @default("MANUAL")
+  sourceDocumentId String?
+  bankAccountId    String?
+  bankAccount      BankAccount? @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+
+  classificationStatus String  @default("UNREVIEWED")
+  suggestedEntryType   String?
+  suggestedCategory    String?
+
+  incomeRecords FilingIncomeRecord[] @relation("IncomeRecordSourceTransaction")
+  taxCredits    FilingTaxCredit[]    @relation("TaxCreditSourceTransaction")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([filingDraftId])
+  @@index([userId])
+}
+
+model LedgerEntry {
+  id            String      @id @default(cuid())
+  filingDraftId String
+  filingDraft   FilingDraft @relation(fields: [filingDraftId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  entryDate           DateTime?
+  entryType           String
+  category            String?
+  description         String
+  amount              Decimal  @db.Decimal(18, 2)
+  source              String       @default("MANUAL")
+  sourceDocumentId    String?
+  sourceTransactionId String?
+  bankAccountId       String?
+  bankAccount         BankAccount? @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([filingDraftId, sourceTransactionId])
+  @@index([filingDraftId])
+  @@index([userId])
+  @@index([entryType])
+}
+
+// A selected PDF route/subcategory. This is separate from actual detected
+// amounts because one user can select several subcategories before upload.
+model FilingIncomeSelection {
+  id            String      @id @default(cuid())
+  filingDraftId String
+  filingDraft   FilingDraft @relation(fields: [filingDraftId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  source          String
+  subcategory     String
+  selectionSource String @default("MANUAL")
+  status          String @default("SELECTED")
+  detailsJson     String @default("{}")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([filingDraftId, source, subcategory])
+  @@index([filingDraftId])
+  @@index([userId])
+  @@index([source, subcategory])
+}
+
+// A normalized income amount backed by a document, bank transaction or
+// manual confirmation. Decimal fields avoid new Float-based money storage.
+model FilingIncomeRecord {
+  id            String      @id @default(cuid())
+  filingDraftId String
+  filingDraft   FilingDraft @relation(fields: [filingDraftId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  source        String
+  subcategory   String
+  grossAmount   Decimal  @db.Decimal(18, 2)
+  taxableAmount Decimal? @db.Decimal(18, 2)
+  currency      String   @default("PKR")
+  recordStatus  String   @default("DRAFT")
+  origin        String   @default("MANUAL")
+  detailsJson   String   @default("{}")
+
+  sourceDocumentId    String?
+  sourceDocument      Document?        @relation("IncomeRecordSourceDocument", fields: [sourceDocumentId], references: [id], onDelete: SetNull)
+  sourceTransactionId String?
+  sourceTransaction   BankTransaction? @relation("IncomeRecordSourceTransaction", fields: [sourceTransactionId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([filingDraftId, sourceTransactionId])
+  @@index([filingDraftId])
+  @@index([userId])
+  @@index([source, subcategory])
+  @@index([sourceDocumentId])
+}
+
+// Tax already deducted or paid. Treatment remains explicit so a later rule
+// can decide whether it is adjustable, final, minimum or non-creditable.
+model FilingTaxCredit {
+  id            String      @id @default(cuid())
+  filingDraftId String
+  filingDraft   FilingDraft @relation(fields: [filingDraftId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  section      String
+  ruleId       String?
+  source       String
+  subcategory  String
+  amount       Decimal @db.Decimal(18, 2)
+  currency     String  @default("PKR")
+  treatment    String  @default("UNCONFIRMED")
+  creditStatus String  @default("UNREVIEWED")
+  origin       String  @default("MANUAL")
+  detailsJson  String  @default("{}")
+
+  sourceDocumentId    String?
+  sourceDocument      Document?        @relation("TaxCreditSourceDocument", fields: [sourceDocumentId], references: [id], onDelete: SetNull)
+  sourceTransactionId String?
+  sourceTransaction   BankTransaction? @relation("TaxCreditSourceTransaction", fields: [sourceTransactionId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([filingDraftId, sourceTransactionId, section])
+  @@index([filingDraftId])
+  @@index([userId])
+  @@index([section])
+  @@index([ruleId])
+  @@index([sourceDocumentId])
+}
+
+// Immutable-by-revision calculation output. A recomputation writes a new
+// revision, preserving the source-wise audit trail used by packet approval.
+model FilingTaxCalculationLine {
+  id            String      @id @default(cuid())
+  filingDraftId String
+  filingDraft   FilingDraft @relation(fields: [filingDraftId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  calculationRevision String
+  ruleSetVersion      String
+  ruleId              String
+  section             String
+  source              String
+  subcategory         String
+  filerStatusUsed     String
+  taxBase             Decimal @db.Decimal(18, 2)
+  baseTax             Decimal @db.Decimal(18, 2)
+  surcharge           Decimal @default(0) @db.Decimal(18, 2)
+  calculatedTax       Decimal @db.Decimal(18, 2)
+  taxCreditApplied    Decimal @default(0) @db.Decimal(18, 2)
+  taxPayable          Decimal @default(0) @db.Decimal(18, 2)
+  refundDue           Decimal @default(0) @db.Decimal(18, 2)
+  detailsJson         String  @default("{}")
+
+  createdAt DateTime @default(now())
+
+  @@index([filingDraftId, calculationRevision])
+  @@index([userId])
+  @@index([ruleId])
+  @@index([source, subcategory])
+}
+
+model FilingPacket {
+  id            String      @id @default(cuid())
+  filingDraftId String
+  filingDraft   FilingDraft @relation(fields: [filingDraftId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  version          Int
+  packetHash       String
+  snapshotJson     String
+  status           String    @default("GENERATED")
+  approvalStatus   String    @default("PENDING")
+  approvedAt       DateTime?
+  approvedByUserId String?
+  fileUrl          String?
+  taxPayable       Decimal   @default(0) @db.Decimal(18, 2)
+  refundDue        Decimal   @default(0) @db.Decimal(18, 2)
+  createdAt        DateTime  @default(now())
+
+  @@unique([filingDraftId, version])
+  @@index([userId])
+}
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String    @default("GENERAL")
+  title     String
+  message   String
+  link      String?
+  isRead    Boolean   @default(false)
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([userId, isRead])
+}
+
+model FbrConnection {
+  id            String      @id @default(cuid())
+  filingDraftId String      @unique
+  filingDraft   FilingDraft @relation(fields: [filingDraftId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  status        String    @default("NOT_STARTED")
+  agentId       String?
+  partitionKey  String?
+  deviceId      String?
+  message       String?
+  errorMessage  String?
+  lastHeartbeat DateTime?
+  startedAt     DateTime?
+  completedAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([userId])
+  @@index([status])
+}
+
+model TrustedDevice {
+  id                  String   @id @default(cuid())
+  userId              String
+  user                User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceName          String?  @default("TaxRocket Desktop")
+  deviceTokenHash     String   @unique
+  partitionKey        String   @unique
+  status              String   @default("ACTIVE")
+  localFbrConnectedAt DateTime?
+  lastSeenAt          DateTime?
+  ipAddress           String?
+  userAgent           String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  jobs                LocalAgentJob[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model LocalAgentJob {
+  id              String         @id @default(cuid())
+  filingDraftId   String
+  filingDraft     FilingDraft    @relation(fields: [filingDraftId], references: [id], onDelete: Cascade)
+  userId          String
+  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  trustedDeviceId String?
+  trustedDevice   TrustedDevice? @relation(fields: [trustedDeviceId], references: [id], onDelete: SetNull)
+
+  jobType         String   @default("tax_dry_run")
+  status          String   @default("created")
+  payloadJson     String   @default("{}")
+  resultJson      String?
+  errorMessage    String?
+  screenshotsJson String?  @default("[]")
+  logsJson        String?  @default("[]")
+  pauseAction     String?
+  pauseMessage    String?
+  resumeDataJson  String?
+
+  expiresAt       DateTime?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([userId])
+  @@index([filingDraftId])
+  @@index([trustedDeviceId])
+  @@index([status])
+  @@index([jobType])
+}
+
+model TaxAuditEvent {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  filingDraftId String?
+  filingDraft   FilingDraft? @relation(fields: [filingDraftId], references: [id], onDelete: SetNull)
+  jobId         String?
+  deviceId      String?
+  eventType     String
+  eventDataJson String   @default("{}")
+  createdAt     DateTime @default(now())
+
+  @@index([userId])
+  @@index([filingDraftId])
+  @@index([eventType])
+}

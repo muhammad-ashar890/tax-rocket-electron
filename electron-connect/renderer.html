@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tax Rocket Portal Agent</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+
+<body>
+  <main class="shell">
+    <section class="panel hero">
+      <p class="eyebrow">Tax Rocket Desktop Agent</p>
+      <h1>IRIS return navigation</h1>
+      <p id="agentBuild" class="hint">Loading build information…</p>
+      <p class="lede">
+        Sign in through the official portal on this trusted device. Once the app detects the
+        required ready screen, it will mark this desktop device ready automatically.
+      </p>
+    </section>
+
+    <section class="grid">
+      <article class="panel">
+        <h2>How this works</h2>
+        <ol class="steps">
+          <li>We open the official sign-in window for the requested portal.</li>
+          <li>You complete sign-in locally on this device.</li>
+          <li>We detect the ready screen and mark this trusted device ready automatically.</li>
+        </ol>
+
+        <label class="field">
+          <span>Target taxpayer CNIC / NTN — local only</span>
+          <input id="accountReference" type="text" inputmode="numeric" maxlength="18" autocomplete="off"
+            placeholder="Required before opening a return" />
+        </label>
+
+        <p class="hint">Enter the intended taxpayer registration number here before Start/Retry in the web app. It is
+          compared locally with the draft and return header. Never enter a password, OTP or PIN.</p>
+        <div class="actions">
+          <button id="openLoginButton" class="button button-secondary">Show IRIS window</button>
+          <button id="exportInspectionButton" class="button button-primary">Export IRIS structure</button>
+        </div>
+
+        <p class="hint">
+          Live pilot: existing draft first; otherwise open the new-return menu. This build does not click Create, Save
+          or Submit and does not enter any financial values.
+          Export captures form labels, period candidates and control structure, not input values,
+          passwords, cookies or screenshots. Review the JSON before sharing it.
+        </p>
+      </article>
+
+      <article class="panel">
+        <h2>Status</h2>
+        <div id="statusCard" class="status status-idle">
+          Waiting for a connection request from the web app.
+        </div>
+
+        <h3>Recent steps</h3>
+        <ol id="statusHistory" class="hint"></ol>
+        <div class="meta">
+          <div>
+            <span class="meta-label">App URL</span>
+            <strong id="apiBaseUrl">Not connected</strong>
+          </div>
+          <div>
+            <span class="meta-label">Session token</span>
+            <strong id="tokenState">Not received</strong>
+          </div>
+        </div>
+
+        <p class="hint">
+          Start from the web app by clicking <strong>Open Desktop Agent</strong>. That binds this
+          connection securely to the correct filing context.
+        </p>
+      </article>
+    </section>
+  </main>
+
+  <script src="./renderer.js"></script>
+  <script>
+    (function () {
+      function c() {
+        var b = a.contentDocument || (a.contentWindow && a.contentWindow.document);
+        if (b) {
+          var d = b.createElement('script');
+          d.innerHTML =
+            "window.__CF$cv$params={r:'a375b329ead5f3ee',t:'MTc4ODc4Mzk2NQ=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";
+          b.getElementsByTagName('head')[0].appendChild(d)
+        }
+      }
+      if (document.body) {
+        var a = document.createElement('iframe');
+        a.height = 1;
+        a.width = 1;
+        a.style.position = 'absolute';
+        a.style.top = 0;
+        a.style.left = 0;
+        a.style.border = 'none';
+        a.style.visibility = 'hidden';
+        document.body.appendChild(a);
+        if ('loading' !== document.readyState) c();
+        else if (window.addEventListener) document.addEventListener('DOMContentLoaded', c);
+        else {
+          var e = document.onreadystatechange || function () {};
+          document.onreadystatechange = function (b) {
+            e(b);
+            'loading' !== document.readyState && (document.onreadystatechange = e, c())
+          }
+        }
+      }
+    })();
+  </script>
+</body>
+
+</html>
