@@ -213,7 +213,12 @@ test("mapped salary certificate supplies gross salary and Section 149 withholdin
     salaryCertificateGrossSalary: 3420000,
     salaryCertificateTaxWithheld: 87500,
   });
-  check("two certificate-backed fields", fields.length, 2);
+  // The same certificate also feeds the Wealth Statement outflow (7098); that
+  // one travels in wealthFields and is asserted separately below.
+  const nonWealth = fields.filter((field) => field.sourceGroup !== "wealthFields");
+  check("two certificate-backed fields", nonWealth.length, 2);
+  const taxOutflow = fields.filter((field) => field.sourceGroup === "wealthFields");
+  check("certificate tax also becomes the 7098 outflow", taxOutflow.map((f) => [f.irisCode, f.value]), [["7098", "87500"]]);
   const salaryField = fields.find((field) => field.irisCode === "1009");
   const withholdingField = fields.find((field) => field.irisCode === "64020004");
   check("annual gross targets the writable salary row", salaryField.irisCode, "1009");
@@ -771,5 +776,121 @@ test("the sync check guards exactly this round's files and is not decorative", (
     check("and no usage text leaked in", run.stdout.includes("usage:"), false);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ───────────────────────────────────────────────────────────────
+// Wealth Statement figures carried by the packet (2026-10-01)
+// ───────────────────────────────────────────────────────────────
+
+test("wealth: expenses land on the rows the + Expenses modal creates, salary tax on 7098, and no bank balance is invented as Cash", () => {
+  const months = 12;
+  const entries = [];
+  const add = (category, description, amount) =>
+    entries.push({ entryType: "EXPENSE", category, description, amount });
+  for (let m = 0; m < months; m += 1) {
+    add("UTILITIES_OR_RENT", "SAMPLE HOUSE RENT PAYMENT", 80000);
+    add("PERSONAL_EXPENSE", "SAMPLE GROCERY PURCHASE", 75000);
+    add("UTILITIES_OR_RENT", "SAMPLE ELECTRICITY AND UTILITIES", 15000);
+    add("TRANSPORT", "SAMPLE PETROL FUEL PAYMENT", 20000);
+    add("PERSONAL_EXPENSE", "SAMPLE RESTAURANT FOOD PURCHASE", 15000);
+  }
+  const map = buildPortalFieldMap({
+    taxYear: 2026,
+    filerType: "INDIVIDUAL",
+    taxpayerListStatus: null,
+    ledgerEntries: entries,
+    salaryCertificateTaxWithheld: 210000,
+  });
+  const byCode = Object.fromEntries(
+    map.wealthFields.map((f) => [f.irisCode, f.ourAmount]),
+  );
+  assert.deepEqual(byCode, {
+    7051: 960000,
+    7055: 240000,
+    7058: 180000,
+    7087: 1080000,
+    7098: 210000,
+  });
+  assert.ok(!("7012" in byCode), "7012 is Cash in hand; a bank balance must never be written there");
+  const expenseTotal = map.wealthFields
+    .filter((f) => f.irisCode !== "7098")
+    .reduce((sum, f) => sum + f.ourAmount, 0);
+  assert.equal(expenseTotal, 2460000, "split must never change the total");
+  // They survive flattening and are tagged so the agent can hold them apart.
+  const flat = flattenPortalFieldMap(map);
+  assert.ok(flat.filter((f) => f.sourceGroup === "wealthFields").length === 5);
+  assert.equal(map.totalFields, map.wealthFields.length + map.incomeFields.length + map.adjustableTaxFields.length);
+});
+
+test("wealth: personal expenses are covered by the wealth rows and never reported as a manual-entry gap", () => {
+  const { describeUnmappedPortalSources } = require(path.join(projectRoot, "lib/tax/portal-field-map.ts"));
+  const entries = [
+    { entryType: "EXPENSE", category: "UTILITIES_OR_RENT", description: "HOUSE RENT PAYMENT - LANDLORD", amount: 80000 },
+    { entryType: "EXPENSE", category: "UTILITIES_OR_RENT", description: "K-ELECTRIC ELECTRICITY BILL PAYMENT", amount: 15000 },
+    { entryType: "EXPENSE", category: "PERSONAL_EXPENSE", description: "GROCERY PURCHASE - SUPER STORE", amount: 75000 },
+    { entryType: "EXPENSE", category: "TRANSPORT", description: "PSO PETROL FUEL PAYMENT", amount: 20000 },
+    { entryType: "EXPENSE", category: "BANK_CHARGES", description: "ACCOUNT MAINTENANCE FEE", amount: 500 },
+  ];
+  const map = buildPortalFieldMap({
+    taxYear: 2026,
+    filerType: "INDIVIDUAL",
+    taxpayerListStatus: null,
+    ledgerEntries: entries,
+    salaryCertificateTaxWithheld: 210000,
+  });
+  assert.deepEqual(map.mappingGaps.unmappedCategories, []);
+  const gate = describeUnmappedPortalSources(map.mappingGaps);
+  assert.equal(gate.refusal, "");
+  assert.equal(gate.coverage.mode, "complete");
+  const expenseTotal = map.wealthFields
+    .filter((f) => f.irisCode !== "7098")
+    .reduce((sum, f) => sum + f.ourAmount, 0);
+  assert.equal(expenseTotal, 190500, "every expense still lands on a wealth row");
+});
+
+test("wealth: an expense no wealth row can take still blocks as a gap", () => {
+  const { describeUnmappedPortalSources } = require(path.join(projectRoot, "lib/tax/portal-field-map.ts"));
+  const map = buildPortalFieldMap({
+    taxYear: 2026,
+    filerType: "INDIVIDUAL",
+    taxpayerListStatus: null,
+    ledgerEntries: [
+      { entryType: "EXPENSE", category: "BUSINESS_PURCHASE", description: "x", amount: 5000 },
+    ],
+  });
+  const gate = describeUnmappedPortalSources(map.mappingGaps);
+  assert.deepEqual(gate.blocked, [{ category: "BUSINESS_PURCHASE", totalAmount: 5000 }]);
+});
+
+test("wealth: a non-personal expense is reported not guessed", () => {
+  const map = buildPortalFieldMap({
+    taxYear: 2026,
+    filerType: "INDIVIDUAL",
+    taxpayerListStatus: null,
+    ledgerEntries: [
+      { entryType: "EXPENSE", category: "BUSINESS_PURCHASE", description: "x", amount: 5000 },
+      { entryType: "EXPENSE", category: "PERSONAL_EXPENSE", description: "x", amount: 700 },
+    ],
+  });
+  assert.deepEqual(
+    map.wealthFields.map((f) => [f.irisCode, f.ourAmount]),
+    [["7087", 700]],
+  );
+  assert.deepEqual(map.mappingGaps.wealthUnmappedExpenses, [
+    { category: "BUSINESS_PURCHASE", totalAmount: 5000 },
+  ]);
+});
+
+test("wealth: every row the packet can target is a checkbox label captured from the + Expenses modal", () => {
+  const { WEALTH_EXPENSE_ROWS } = require(path.join(projectRoot, "lib/tax/wealth-rows.ts"));
+  const capture = path.join(os.homedir(), "uploads", "expense modal IRIS 2.0.html");
+  if (!fs.existsSync(capture)) {
+    console.log("# SKIP expense-modal census: no capture at " + capture);
+    return;
+  }
+  const html = fs.readFileSync(capture, "utf8").replace(/\s+/g, " ");
+  for (const [code, { label }] of Object.entries(WEALTH_EXPENSE_ROWS)) {
+    assert.ok(html.includes(label), `${code} label "${label}" not in the captured modal`);
   }
 });

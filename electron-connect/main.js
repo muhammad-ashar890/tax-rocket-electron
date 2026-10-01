@@ -51,6 +51,7 @@ let realPortalMode = false;
 let realPortalLoginUrl = "";
 const irisNavigation = require("./iris-navigation");
 const irisRowFiller = require("./iris-row-filler");
+const irisWealthDriver = require("./iris-wealth-driver");
 // Phase 1 — real-portal autofill.
 //
 // Until now every real-IRIS job short-circuited into a navigation-only
@@ -76,6 +77,24 @@ function getRealAutofillMode() {
   )
     return "live";
   return "off";
+}
+
+/**
+ * Wealth Statement entry (modal driver) is a second, separate opt-in. The Salary
+ * rows already exist on screen; the Wealth rows are CREATED by clicking through
+ * IRIS modals, which is a bigger step, so it has its own switch:
+ *
+ *   TAXROCKET_WEALTH_AUTOFILL=on   drive the Wealth modals (live) / plan them (dry)
+ *   (unset)                        wealth figures stay "prepared, not entered"
+ *
+ * It only ever applies on top of TAXROCKET_REAL_AUTOFILL: dry mode reports what
+ * it would add without clicking, live mode adds and fills. Never Save/Calculate.
+ */
+function getWealthAutofillEnabled() {
+  const raw = String(process.env.TAXROCKET_WEALTH_AUTOFILL || "")
+    .trim()
+    .toLowerCase();
+  return ["1", "true", "on", "yes", "live"].includes(raw);
 }
 
 /**
@@ -109,7 +128,7 @@ function resolveAutofillMode(jobContext) {
 }
 // Independent controller stamp: a new navigator must not make an OLD main
 // process appear fully updated (the mixed fix10/fix11 rollout hid this).
-const AGENT_BUILD_TAG = "fix26-salary-withholding-grid-settle-20260930";
+const AGENT_BUILD_TAG = "fix28-wealth-driver-20261001";
 function getAgentBuildLabel() {
   return `${AGENT_BUILD_TAG} | navigator: ${irisNavigation.BUILD_TAG} | filler: ${irisRowFiller.BUILD_TAG}`;
 }
@@ -3934,7 +3953,15 @@ async function runRealIrisAutofill(jobContext, job, mode) {
     ? snapshot.portalFieldMap
     : [];
 
-  const coded = portalFieldMap.filter((f) => f && f.irisCode);
+  const allCoded = portalFieldMap.filter((f) => f && f.irisCode);
+  // Wealth Statement figures travel in the packet, but this build does not enter
+  // them: wealth sections are not toured and the expense rows only exist after a
+  // modal step. Holding them out keeps the Salary handoff from pausing on codes
+  // it was never going to place, and they are reported as prepared-not-entered.
+  const wealthPrepared = allCoded.filter(
+    (f) => f.sourceGroup === "wealthFields",
+  );
+  const coded = allCoded.filter((f) => f.sourceGroup !== "wealthFields");
   const executionLog = [];
   activeJobExecutionLog = executionLog;
 
@@ -3948,6 +3975,18 @@ async function runRealIrisAutofill(jobContext, job, mode) {
     `Real-portal autofill (${mode === "dry" ? "DRY RUN — no writes" : "LIVE"}): ` +
       `${coded.length} IRIS-coded fields of ${portalFieldMap.length} in packet.`,
   );
+  if (wealthPrepared.length) {
+    onStep(
+      "real_autofill_wealth_prepared",
+      `${wealthPrepared.length} Wealth Statement figure(s) are in the packet (${wealthPrepared
+        .map((f) => `${f.irisCode}=${f.value}`)
+        .join(", ")}). ${
+        getWealthAutofillEnabled()
+          ? "The wealth driver will handle them after Salary."
+          : "TAXROCKET_WEALTH_AUTOFILL is off, so they are NOT entered."
+      }`,
+    );
+  }
 
   if (!coded.length) {
     const pauseMessage =
@@ -4019,6 +4058,7 @@ async function runRealIrisAutofill(jobContext, job, mode) {
   const taxpayerIdentifier = launchState.accountReference || "";
 
   let results = [];
+  const unexpectedPrefill = [];
   if (!plan.groups.length) {
     onStep(
       "real_autofill_no_plan",
@@ -4102,6 +4142,35 @@ async function runRealIrisAutofill(jobContext, job, mode) {
       );
       continue;
     }
+    // Read-only look at what is ALREADY in this grid before anything is typed.
+    // Rows the packet does not cover but which carry a figure are reported: the
+    // IRIS total would then differ from the packet, and the agent must not call
+    // that draft clean.
+    try {
+      const snapshot = await irisRowFiller.snapshotIrisRows(windowInstance);
+      const unexpected = irisRowFiller.findUnexpectedPrefill(
+        snapshot,
+        group.fields.map((field) => field.irisCode),
+      );
+      onStep(
+        "real_autofill_prefill_snapshot",
+        `${group.sectionId}: ${snapshot.length} row(s) read, ${unexpected.length} unexpected pre-filled row(s).`,
+      );
+      for (const row of unexpected) {
+        unexpectedPrefill.push({ ...row, sectionId: group.sectionId });
+        onStep(
+          "real_autofill_unexpected_prefill",
+          `${row.code} "${row.description}" already holds ${row.cells
+            .map((cell) => cell.value)
+            .join(" / ")} in IRIS but is not in the TaxRocket packet. Left untouched.`,
+        );
+      }
+    } catch (error) {
+      onStep(
+        "real_autofill_prefill_snapshot_failed",
+        `${group.sectionId}: pre-fill snapshot could not be read (${error?.message || error}). Fill continues; the overwrite guard still protects non-empty cells.`,
+      );
+    }
     const outcome = await irisRowFiller.fillIrisRows(
       windowInstance,
       group.fields,
@@ -4111,6 +4180,74 @@ async function runRealIrisAutofill(jobContext, job, mode) {
       outcome.results.map((entry) => ({
         ...entry,
         sectionId: group.sectionId,
+      })),
+    );
+  }
+  // Salary-only view, kept for the handoff label before wealth rows are added.
+  const salarySummary = irisRowFiller.summarise(results);
+
+  // Wealth Statement. Opt-in (TAXROCKET_WEALTH_AUTOFILL). The driver opens the
+  // Reconciliation / Personal Assets sections itself, creates the rows through
+  // the IRIS modals (live) or only reports what it would create (dry), and
+  // fills them through the same verified row filler.
+  let wealthOutcome = null;
+  const wealthEnabled = wealthPrepared.length > 0 && getWealthAutofillEnabled();
+  if (wealthEnabled) {
+    onStep(
+      "real_autofill_wealth_start",
+      `Wealth Statement (${mode === "dry" ? "DRY — nothing clicked" : "LIVE"}): ${wealthPrepared.length} figure(s). ` +
+        `The agent only adds rows and types amounts; it never saves, calculates or submits.`,
+    );
+    try {
+      wealthOutcome = await irisWealthDriver.runWealthDriver(
+        windowInstance,
+        wealthPrepared,
+        {
+          mode: mode === "dry" ? "dry" : "live",
+          navigate: (sectionId) =>
+            irisNavigation.navigateToSection(windowInstance, {
+              sectionId,
+              taxYear,
+              taxpayerIdentifier,
+            }),
+          // Wealth rows are single-column ("Amount"), so the filler's
+          // single_column match is a proven target, not a guess.
+          fillRows: (fields, opts) =>
+            irisRowFiller.fillIrisRows(windowInstance, fields, {
+              dryRun: Boolean(opts && opts.dryRun),
+              sectionVerified: true,
+            }),
+          // ensureNavigationJobActive compares against the NORMALISED account
+          // reference (no spaces/dashes); passing the raw value made it report
+          // "target changed" on a CNIC written with dashes.
+          beforeStep: () =>
+            ensureNavigationJobActive(
+              job.id,
+              String(taxpayerIdentifier || "")
+                .trim()
+                .replace(/[ -]/g, ""),
+            ),
+          onStep,
+        },
+      );
+    } catch (error) {
+      onStep(
+        "real_autofill_wealth_error",
+        `Wealth driver stopped: ${error instanceof Error ? error.message : String(error)}. Nothing further was clicked.`,
+      );
+      wealthOutcome = {
+        results: wealthPrepared.map((field) => ({
+          ...field,
+          status: irisWealthDriver.WEALTH_STATUS.SETUP_FAILED,
+          setupStatus: "driver_error",
+        })),
+        setup: [],
+      };
+    }
+    results = results.concat(
+      wealthOutcome.results.map((entry) => ({
+        ...entry,
+        sectionId: entry.sectionId || "wealth",
       })),
     );
   }
@@ -4132,7 +4269,7 @@ async function runRealIrisAutofill(jobContext, job, mode) {
   // Surface each refusal individually — a value that silently did not land is
   // exactly the failure mode this phase exists to prevent.
   for (const r of results) {
-    if (r.status === irisRowFiller.FILL_STATUS.FILLED) continue;
+    if (irisRowFiller.SUCCESS_STATUSES.has(r.status)) continue;
     onStep(
       "real_autofill_skip",
       `${r.irisCode} "${r.label || r.rowDescription || ""}" -> ${r.status}` +
@@ -4144,9 +4281,30 @@ async function runRealIrisAutofill(jobContext, job, mode) {
     await captureWindowScreenshot(windowInstance, "real_autofill"),
   ];
   const fillMessage = irisRowFiller.describeFillSummary(summary);
-  const autofillReviewRequired = summary.skipped > 0;
+  const overwriteConflicts = results.filter(
+    (r) =>
+      r.status === irisRowFiller.FILL_STATUS.OVERWRITE_NEEDS_CONFIRMATION,
+  );
+  const autofillReviewRequired =
+    summary.skipped > 0 || unexpectedPrefill.length > 0;
+  const conflictText = overwriteConflicts.length
+    ? ` IRIS already holds a different figure in ${overwriteConflicts
+        .map(
+          (r) =>
+            `${r.irisCode} (IRIS ${r.existingValue}, packet ${r.plannedValue})`,
+        )
+        .join("; ")} — it was NOT overwritten. Decide which figure is right in the FBR window.`
+    : "";
+  const prefillText = unexpectedPrefill.length
+    ? ` IRIS also holds figures the packet does not cover: ${unexpectedPrefill
+        .map(
+          (row) =>
+            `${row.code} ${row.cells.map((cell) => cell.value).join("/")}`,
+        )
+        .join("; ")} — the IRIS total will differ from the packet until this is resolved.`
+    : "";
   const pauseMessage = autofillReviewRequired
-    ? `The FBR return opened, but ${summary.skipped} approved field(s) could not be placed safely (${fillMessage}). Review those fields in the FBR window. Nothing was saved, submitted, calculated, or paid.`
+    ? `The FBR return opened, but ${summary.skipped} approved field(s) could not be placed safely (${fillMessage}).${conflictText}${prefillText} Review those fields in the FBR window. Nothing was saved, submitted, calculated, or paid.`
     : null;
 
   return {
@@ -4160,6 +4318,37 @@ async function runRealIrisAutofill(jobContext, job, mode) {
       results,
       captures,
       message: fillMessage,
+      wealthPrepared: wealthPrepared.map((f) => {
+        const placed = (wealthOutcome?.results || []).find(
+          (entry) => entry.key === f.key,
+        );
+        return {
+          irisCode: f.irisCode,
+          label: f.label,
+          value: f.value,
+          ...(placed
+            ? {
+                status: placed.status,
+                ...(placed.setupStatus ? { setupStatus: placed.setupStatus } : {}),
+              }
+            : {}),
+        };
+      }),
+      salarySummary,
+      wealth: {
+        enabled: wealthEnabled,
+        mode,
+        summary: wealthOutcome
+          ? irisRowFiller.summarise(wealthOutcome.results)
+          : null,
+        setup: wealthOutcome?.setup || [],
+      },
+      unexpectedPrefill,
+      overwriteConflicts: overwriteConflicts.map((r) => ({
+        irisCode: r.irisCode,
+        existingValue: r.existingValue,
+        plannedValue: r.plannedValue,
+      })),
       reviewRequired: autofillReviewRequired,
     },
   };
@@ -4181,6 +4370,70 @@ async function finishNavigationOnly(navigation, job) {
     executionLog: navigation.executionLog,
   });
   return { ...navigation, paused: true };
+}
+
+/**
+ * Plain statement of what this handoff covers. "Completed" only ever means the
+ * agent's own step finished: the Wealth Statement and everything after Salary is
+ * still the taxpayer's, so the return is never reported as ready to submit.
+ */
+function buildHandoffScopeSummary(
+  summary,
+  reviewRequired,
+  wealthPrepared,
+  extras = {},
+) {
+  // `summary` covers everything the agent attempted; the Salary label must not
+  // turn red because a Wealth row needed review (and vice versa), so the Salary
+  // half is read from its own summary when the run provides one.
+  const salary = extras.salarySummary || summary;
+  const salaryTotal = Number(salary?.total) || 0;
+  const salaryFilled = Number(salary?.filled) || 0;
+  const salaryNeedsReview = extras.salarySummary
+    ? Number(salary?.skipped) > 0
+    : reviewRequired;
+  const wealthRows = Array.isArray(wealthPrepared) ? wealthPrepared.length : 0;
+  const wealth = extras.wealth || null;
+  const wealthEntered = Boolean(wealth && wealth.enabled && wealth.summary);
+  const wealthFilled = Number(wealth?.summary?.filled) || 0;
+  const wealthTotal = Number(wealth?.summary?.total) || 0;
+  const wealthDry = wealthEntered && wealth.mode === "dry";
+  const wealthState = !wealthEntered
+    ? "pending"
+    : wealthDry
+      ? "dry_run_only"
+      : wealthFilled === wealthTotal && wealthTotal > 0
+        ? "entered_not_calculated"
+        : "needs_review";
+  const salaryText = `Salary ${
+    salaryNeedsReview
+      ? "\u26A0\uFE0F needs review"
+      : salaryTotal > 0 && salaryFilled === salaryTotal
+        ? "\u2705 filled"
+        : "\u26A0\uFE0F not entered"
+  }`;
+  const wealthText =
+    wealthState === "pending"
+      ? `Wealth \u26A0\uFE0F pending${
+          wealthRows ? ` (${wealthRows} row(s) prepared, not entered)` : ""
+        }`
+      : wealthState === "dry_run_only"
+        ? `Wealth \u26A0\uFE0F dry run only (${wealthTotal} row(s) checked, nothing entered)`
+        : wealthState === "entered_not_calculated"
+          ? `Wealth \u2705 ${wealthFilled}/${wealthTotal} row(s) entered \u2014 press Calculate in FBR and confirm the reconciliation difference is 0`
+          : `Wealth \u26A0\uFE0F needs review (${wealthFilled}/${wealthTotal} row(s) entered)`;
+  return {
+    wealthPreparedRows: wealthRows,
+    salary: salaryNeedsReview
+      ? "needs_review"
+      : salaryTotal > 0 && salaryFilled === salaryTotal
+        ? "filled"
+        : "not_entered",
+    wealthStatement: wealthState,
+    propertyPaymentsComputations: "pending",
+    readyToSubmit: false,
+    label: `${salaryText} \u00B7 ${wealthText} \u00B7 Return NOT ready to submit`,
+  };
 }
 
 function mergeNavigationAutofillOutcome(navigation, autofill, autofillMode) {
@@ -4220,6 +4473,15 @@ function mergeNavigationAutofillOutcome(navigation, autofill, autofillMode) {
     navigationMode: navigation?.result?.mode || null,
     autofillMode,
     autofillSummary: summary,
+    handoffScope: buildHandoffScopeSummary(
+      summary,
+      reviewRequired,
+      autofill?.result?.wealthPrepared,
+      {
+        salarySummary: autofill?.result?.salarySummary,
+        wealth: autofill?.result?.wealth,
+      },
+    ),
     autofill: autofill?.result || null,
     message: resultMessage,
     submitted: false,

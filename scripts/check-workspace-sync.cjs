@@ -78,7 +78,7 @@ const MARKERS = [
     "components/tax/fbr-connect-client.tsx",
     [
       "Start filing",
-      "Agent step complete — return",
+      "Salary step complete — return",
       "does <strong>not</strong> mean the return was filed",
     ],
     "the flow distinguishes a finished agent task from a filed return",
@@ -111,7 +111,7 @@ const MARKERS = [
   [
     "electron-connect/main.js",
     [
-      "fix26-salary-withholding-grid-settle-20260930",
+      "fix28-wealth-driver-20261001",
       "live_return_autofill",
       "Live entry entered and verified",
     ],

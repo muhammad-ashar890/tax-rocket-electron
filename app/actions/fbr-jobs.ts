@@ -272,10 +272,37 @@ export async function getLocalAgentJobsAction(draftId: string) {
         createdAt: true,
         startedAt: true,
         completedAt: true,
+        resultJson: true,
       },
     });
 
-    return { success: true, jobs };
+    // Only the handoff scope summary is sent to the browser, never the whole
+    // agent result.
+    const views = jobs.map(({ resultJson, ...job }) => {
+      let handoffScope: {
+        salary: string | null;
+        wealthStatement: string | null;
+        wealthRows: number;
+      } | null = null;
+      try {
+        const scope = JSON.parse(resultJson || "{}")?.handoffScope;
+        if (scope && typeof scope === "object") {
+          handoffScope = {
+            salary: typeof scope.salary === "string" ? scope.salary : null,
+            wealthStatement:
+              typeof scope.wealthStatement === "string"
+                ? scope.wealthStatement
+                : null,
+            wealthRows: Number(scope.wealthPreparedRows) || 0,
+          };
+        }
+      } catch {
+        handoffScope = null;
+      }
+      return { ...job, handoffScope };
+    });
+
+    return { success: true, jobs: views };
   } catch (error) {
     console.error("Error fetching jobs:", error);
     return { success: false, error: "Failed to fetch jobs" };

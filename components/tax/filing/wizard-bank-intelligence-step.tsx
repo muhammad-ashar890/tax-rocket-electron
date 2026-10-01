@@ -370,6 +370,19 @@ export function WizardBankIntelligenceStep({
 
   async function handleSaveStatement() {
     if (!draftId || !selectedBankAccountId) return;
+    // Number("") is 0, so a blank box would silently save a zero balance.
+    // Opening and closing balances are both required, and the closing balance
+    // becomes the bank's row in the FBR Wealth Statement.
+    if (!openingBalance.trim() || !closingBalance.trim()) {
+      setError(
+        "Enter both the opening and the closing balance from your bank statement.",
+      );
+      return;
+    }
+    if (!periodStart || !periodEnd) {
+      setError("Enter the statement period start and end dates.");
+      return;
+    }
     setSaving(true);
     setError(null);
     setStatementSaved(false);

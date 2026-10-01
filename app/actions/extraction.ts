@@ -27,10 +27,26 @@ import {
   isDocumentExtractionLeaseStale,
 } from "@/lib/tax/document-extraction-state";
 import {
+  bankStatementIbanValue,
+  ensureBankStatementReviewFields,
+} from "@/lib/tax/bank-statement-fields";
+import { validatePakistaniIban } from "@/lib/tax/iban";
+import {
   ensureSalaryCertificateReviewFields,
   parseSalaryCertificateAmount,
   salaryCertificateFieldValue,
 } from "@/lib/tax/salary-certificate-fields";
+
+/** Adds the visible blank placeholders a document type must have for review. */
+function ensureReviewFields(documentType: string, extracted: unknown): unknown {
+  if (documentType === "salary_certificate") {
+    return ensureSalaryCertificateReviewFields(extracted);
+  }
+  if (documentType === "bank_statement") {
+    return ensureBankStatementReviewFields(extracted);
+  }
+  return extracted;
+}
 
 const GEMINI_SUPPORTED_TYPES = new Set([
   "application/pdf",
@@ -62,7 +78,7 @@ Use this exact shape:
   ],
   "notes": ["string"]
 }
-For a bank statement, always return separate fields labelled exactly "Bank Name", "Account Label", "Account Number", "Currency", "Opening Balance", "Closing Balance", "Statement Period Start", and "Statement Period End". Never combine the statement dates into one field: read the start and end dates from the statement header and return each as ISO YYYY-MM-DD. Extract every visible transaction row from the statement table. Do not include opening-balance or closing-balance marker rows as transactions; those balances belong in fields. Do not invent rows. Return transaction dates as ISO YYYY-MM-DD whenever possible. Keep descriptions and currency amounts exactly as shown in the document.
+For a bank statement, always return separate fields labelled exactly "Bank Name", "Account Label", "Account Number", "Currency", "IBAN", "Opening Balance", "Closing Balance", "Statement Period Start", and "Statement Period End". "IBAN" is the account's 24-character Pakistani IBAN (starts with PK) exactly as printed, often in the statement header; if no IBAN is printed return null, and never build one from the account number. Never combine the statement dates into one field: read the start and end dates from the statement header and return each as ISO YYYY-MM-DD. Extract every visible transaction row from the statement table. Do not include opening-balance or closing-balance marker rows as transactions; those balances belong in fields. Do not invent rows. Return transaction dates as ISO YYYY-MM-DD whenever possible. Keep descriptions and currency amounts exactly as shown in the document.
 For a CNIC, always return separate fields labelled exactly "CNIC Number", "Name", "Father Name", "Date of Birth" and "Expiry Date", plus "Address" when the card prints one. Return "Date of Birth" and "Expiry Date" as ISO YYYY-MM-DD. Read the date of birth from the "Date of Birth" line only: never use the issue date or the expiry date for it, and never guess a date of birth that is not printed on the card. For "Expiry Date" return the card's own validity/expiry line ("Valid Upto", "Expiry", "Date of Expiry"), or null when the card prints none — never infer one from the issue date.
 For a salary certificate, always return separate required fields labelled exactly "Gross Salary (Annual PKR)" and "Tax Deducted u/s 149 (Annual PKR)". Use annual amounts explicitly stated on the certificate. If a value is not stated or cannot be read, return null; never infer gross salary from net bank deposits and never assume missing tax withheld is zero. Also preserve other tax-relevant details as separate optional fields when printed, including employer name/NTN, employee name/ID, tax year or salary period, basic pay, allowances, bonuses, benefits/perquisites, exempt or taxable components, and net pay. Do not invent missing details, combine separate components, or annualize monthly amounts unless the certificate explicitly states the annual total.`;
 
@@ -506,9 +522,7 @@ export async function getDocumentExtractionAction(documentId: string) {
       ? JSON.parse(document.extractedData)
       : null;
     const reviewReadyExtraction =
-      document.documentType === "salary_certificate"
-        ? ensureSalaryCertificateReviewFields(extracted)
-        : extracted;
+      ensureReviewFields(document.documentType, extracted);
 
     return {
       success: true,
@@ -531,10 +545,10 @@ export async function updateDocumentExtractionAction(
 ) {
   try {
     const document = await getOwnedDocument(documentId);
-    const reviewReadyExtraction =
-      document.documentType === "salary_certificate"
-        ? ensureSalaryCertificateReviewFields(extracted)
-        : extracted;
+    const reviewReadyExtraction = ensureReviewFields(
+      document.documentType,
+      extracted,
+    );
     const normalized = normalizeIdentityExtractionPayload(
       document.documentType,
       reviewReadyExtraction,
@@ -815,6 +829,55 @@ function parseExtractedTransactions(
   });
 }
 
+/**
+ * The statement's IBAN becomes the bank account's IBAN: that is what IRIS lists
+ * the account by in the Wealth Statement. The statement is authoritative, so a
+ * corrected IBAN replaces an older one; only a clash with ANOTHER account in
+ * the same filing is refused (usually the wrong statement under the wrong slot).
+ */
+async function resolveStatementIban(params: {
+  filingDraftId: string;
+  userId: string;
+  bankAccountId: string;
+  value: unknown;
+}): Promise<{ ok: boolean; iban: string; error: string }> {
+  const validation = validatePakistaniIban(
+    params.value as string | null | undefined,
+  );
+  if (!validation.valid) {
+    return {
+      ok: false,
+      iban: "",
+      error: `IBAN is required: ${validation.error}. Enter the IBAN printed on the statement.`,
+    };
+  }
+  const accounts = await prisma.bankAccount.findMany({
+    where: { filingDraftId: params.filingDraftId, userId: params.userId },
+    select: { id: true, bankName: true, accountLabel: true, iban: true },
+  });
+  if (!accounts.some((account) => account.id === params.bankAccountId)) {
+    return {
+      ok: false,
+      iban: "",
+      error: "The bank account linked to this statement is no longer valid",
+    };
+  }
+  const clash = accounts.find(
+    (account) =>
+      account.id !== params.bankAccountId &&
+      account.iban &&
+      validatePakistaniIban(account.iban).iban === validation.iban,
+  );
+  if (clash) {
+    return {
+      ok: false,
+      iban: "",
+      error: `This IBAN already belongs to ${clash.bankName} — ${clash.accountLabel}. Each account has its own IBAN; check that this statement is under the right account.`,
+    };
+  }
+  return { ok: true, iban: validation.iban, error: "" };
+}
+
 export async function approveAndMapExtractedDocumentAction(documentId: string) {
   try {
     const document = await getOwnedDocument(documentId);
@@ -916,6 +979,17 @@ export async function approveAndMapExtractedDocumentAction(documentId: string) {
         };
       }
 
+      // IBAN is required, like the salary certificate's annual amounts.
+      const ibanResolution = await resolveStatementIban({
+        filingDraftId: document.filingDraftId,
+        userId,
+        bankAccountId: bankAccount.id,
+        value: bankStatementIbanValue(fields),
+      });
+      if (!ibanResolution.ok) {
+        return { success: false, error: ibanResolution.error };
+      }
+
       const accountLabel = bankAccount.accountLabel;
       const existingStatement = await prisma.bankStatement.findFirst({
         where: {
@@ -952,6 +1026,11 @@ export async function approveAndMapExtractedDocumentAction(documentId: string) {
       if (!periodValidation.valid) {
         return { success: false, error: periodValidation.error };
       }
+
+      await prisma.bankAccount.update({
+        where: { id: bankAccount.id },
+        data: { iban: ibanResolution.iban },
+      });
 
       const existing = await prisma.bankStatement.findFirst({
         where: {
@@ -1499,10 +1578,10 @@ export async function extractDocumentWithGeminiAction(documentId: string) {
       document.documentType,
       normalizedExtraction,
     );
-    const extracted =
-      document.documentType === "salary_certificate"
-        ? ensureSalaryCertificateReviewFields(normalizedExtraction)
-        : normalizedExtraction;
+    const extracted = ensureReviewFields(
+      document.documentType,
+      normalizedExtraction,
+    );
 
     if (!validation.valid) {
       const saved = await updateThisAttempt({
@@ -1611,5 +1690,61 @@ export async function extractDocumentWithGeminiAction(documentId: string) {
           ? error.message
           : "Document extraction failed",
     };
+  }
+}
+
+
+/**
+ * Enter the IBAN on a bank statement that is ALREADY mapped (mapped before the
+ * IBAN became a required field). It updates the stored extraction and the
+ * account only; transactions, balances and reviews are not touched.
+ */
+export async function saveBankStatementIbanAction(
+  documentId: string,
+  iban: string,
+) {
+  try {
+    const document = await getOwnedDocument(documentId);
+    if (document.documentType !== "bank_statement") {
+      return { success: false, error: "This is not a bank statement" };
+    }
+    if (!document.filingDraftId || !document.bankAccountId) {
+      return {
+        success: false,
+        error: "This statement is not linked to a bank account",
+      };
+    }
+    const resolution = await resolveStatementIban({
+      filingDraftId: document.filingDraftId,
+      userId: document.userId,
+      bankAccountId: document.bankAccountId,
+      value: iban,
+    });
+    if (!resolution.ok) return { success: false, error: resolution.error };
+
+    const extracted = document.extractedData
+      ? (JSON.parse(document.extractedData) as {
+          fields?: Array<{ label: string; value: unknown; confidence?: number }>;
+        })
+      : { fields: [] };
+    const fields = (extracted.fields ?? []).filter(
+      (field) => normalizedLabel(field.label) !== "iban",
+    );
+    fields.push({ label: "IBAN", value: resolution.iban, confidence: 1 });
+
+    await prisma.$transaction([
+      prisma.bankAccount.update({
+        where: { id: document.bankAccountId },
+        data: { iban: resolution.iban },
+      }),
+      prisma.document.update({
+        where: { id: documentId },
+        data: { extractedData: JSON.stringify({ ...extracted, fields }) },
+      }),
+    ]);
+    return { success: true, iban: resolution.iban };
+  } catch (error) {
+    console.error("Error saving statement IBAN:", error);
+    return { success: false, error: "Failed to save the IBAN" };
   }
 }

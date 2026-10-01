@@ -20,6 +20,11 @@ import {
   getSalaryCertificateFieldKind,
   hasRequiredSalaryCertificateAmounts,
 } from "@/lib/tax/salary-certificate-fields";
+import {
+  hasRequiredBankStatementIban,
+  isBankStatementIbanLabel,
+  validateBankStatementIban,
+} from "@/lib/tax/bank-statement-fields";
 
 export type ExtractedTransaction = {
   date?: string | null;
@@ -95,6 +100,7 @@ type WizardDocumentsStepProps = Readonly<{
   ) => void;
   handleSaveDocumentReview: (documentType: string) => void;
   handleMapDocument: (documentType: string) => void;
+  handleSaveStatementIban: (documentType: string) => void;
 }>;
 
 export function WizardDocumentsStep({
@@ -119,6 +125,7 @@ export function WizardDocumentsStep({
   handleExtractedTransactionChange,
   handleSaveDocumentReview,
   handleMapDocument,
+  handleSaveStatementIban,
 }: WizardDocumentsStepProps) {
   const [now, setNow] = useState(() => Date.now());
   const hasProcessingDocument = Object.values(documentRecords).some(
@@ -218,6 +225,19 @@ export function WizardDocumentsStep({
           const requiredSalaryAmountsReady =
             !isSalaryCertificate ||
             hasRequiredSalaryCertificateAmounts(extracted?.fields);
+          const isBankStatement = slot.documentType === "bank_statement";
+          // The IBAN is read from the statement; when it is not on it the
+          // review shows a blank required field, like the salary amounts.
+          const requiredIbanReady =
+            !isBankStatement || hasRequiredBankStatementIban(extracted?.fields);
+          // A statement mapped before the IBAN was required stays mapped; only
+          // the IBAN is editable, with its own save (no re-mapping).
+          const ibanEditableAfterMap =
+            isMapped && isBankStatement && !requiredIbanReady;
+          const ibanProblem =
+            isBankStatement && extracted?.fields
+              ? validateBankStatementIban(extracted.fields).error
+              : "";
 
           return (
             <div
@@ -434,6 +454,19 @@ export function WizardDocumentsStep({
                       </p>
                     </div>
 
+                    {ibanEditableAfterMap && (
+                      <div className="flex flex-wrap gap-2 sm:justify-end">
+                        <Button
+                          type="button"
+                          size="sm"
+                          onClick={() => handleSaveStatementIban(slotKey)}
+                          disabled={isSavingReview}
+                        >
+                          {isSavingReview ? "Saving IBAN..." : "Save IBAN"}
+                        </Button>
+                      </div>
+                    )}
+
                     {!isMapped && (
                       <div className="flex flex-wrap gap-2 sm:justify-end">
                         {isMappableDocument ? (
@@ -445,7 +478,8 @@ export function WizardDocumentsStep({
                               isMapping ||
                               isSavingReview ||
                               !hasFields ||
-                              !requiredSalaryAmountsReady
+                              !requiredSalaryAmountsReady ||
+                              !requiredIbanReady
                             }
                           >
                             {isMapping
@@ -464,6 +498,18 @@ export function WizardDocumentsStep({
                       </div>
                     )}
                   </div>
+
+                  {isBankStatement && (
+                    <p className="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+                      The account IBAN (24 characters, starts with PK) is
+                      required: FBR IRIS lists each bank in your Wealth
+                      Statement by IBAN. It is read from the statement; if it is
+                      not printed on it, type it in the IBAN field below.
+                      {ibanEditableAfterMap
+                        ? " This statement was mapped before the IBAN was required — enter it and press Save IBAN. Nothing else is re-mapped."
+                        : ""}
+                    </p>
+                  )}
 
                   {isSalaryCertificate && (
                     <p className="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
@@ -525,6 +571,12 @@ export function WizardDocumentsStep({
                                     · Required
                                   </span>
                                 )}
+                              {isBankStatement &&
+                                isBankStatementIbanLabel(field.label) && (
+                                  <span className="ml-1 text-destructive">
+                                    · Required
+                                  </span>
+                                )}
                               {typeof field.confidence === "number" &&
                                 field.confidence > 0 &&
                                 ` · ${Math.round(field.confidence * 100)}% confidence`}
@@ -542,15 +594,37 @@ export function WizardDocumentsStep({
                                   : undefined
                               }
                               inputMode={isCnicField ? "numeric" : undefined}
-                              maxLength={isCnicField ? 15 : undefined}
                               required={Boolean(
-                                isSalaryCertificate &&
-                                getSalaryCertificateFieldKind(field.label),
+                                (isSalaryCertificate &&
+                                  getSalaryCertificateFieldKind(field.label)) ||
+                                (isBankStatement &&
+                                  isBankStatementIbanLabel(field.label)),
                               )}
                               aria-required={Boolean(
-                                isSalaryCertificate &&
-                                getSalaryCertificateFieldKind(field.label),
+                                (isSalaryCertificate &&
+                                  getSalaryCertificateFieldKind(field.label)) ||
+                                (isBankStatement &&
+                                  isBankStatementIbanLabel(field.label)),
                               )}
+                              aria-invalid={Boolean(
+                                isBankStatement &&
+                                isBankStatementIbanLabel(field.label) &&
+                                ibanProblem,
+                              )}
+                              placeholder={
+                                isBankStatement &&
+                                isBankStatementIbanLabel(field.label)
+                                  ? "PK36SCBL0000001123456702"
+                                  : undefined
+                              }
+                              maxLength={
+                                isBankStatement &&
+                                isBankStatementIbanLabel(field.label)
+                                  ? 24
+                                  : isCnicField
+                                    ? 15
+                                    : undefined
+                              }
                               value={displayValue}
                               onChange={(event) =>
                                 handleExtractedFieldChange(
@@ -559,7 +633,13 @@ export function WizardDocumentsStep({
                                   event.target.value,
                                 )
                               }
-                              readOnly={isMapped}
+                              readOnly={
+                                isMapped &&
+                                !(
+                                  ibanEditableAfterMap &&
+                                  isBankStatementIbanLabel(field.label)
+                                )
+                              }
                               className="h-9 rounded-lg border bg-background px-3 text-sm"
                             />
                           </label>
@@ -570,6 +650,16 @@ export function WizardDocumentsStep({
                     <p className="rounded-lg border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">
                       Gemini did not return any reviewable fields. Do not map
                       this document until extraction is corrected.
+                    </p>
+                  )}
+
+                  {isBankStatement && hasFields && !requiredIbanReady && (
+                    <p
+                      role="alert"
+                      className="mt-3 rounded-lg border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive"
+                    >
+                      IBAN: {ibanProblem}. Enter the IBAN printed on this bank
+                      statement before mapping it.
                     </p>
                   )}
 

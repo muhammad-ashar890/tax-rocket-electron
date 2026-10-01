@@ -273,6 +273,62 @@ test("assets: single-column row #7012 fills without needing header matching", ()
   assert.match(r.rowDescription, /Cash in hand/);
 });
 
+// A bank added through IRIS's Bank Account(s) modal becomes a SECOND row with
+// the same id 7030, described "Bank Account(s) - <IBAN> - <title> - <bank>".
+// Capture: "bank account field visibleIRIS 2.0" (2026-10-01).
+const BANK_IBAN = "PK35HABB0000001234567801";
+
+/** The capture holds one bank; clone its row to stand in for a second bank. */
+function withTwoBanks() {
+  const html = loadFixture("assets-with-bank.html");
+  const dom = new JSDOM(html, { runScripts: "outside-only" });
+  const rows = [...dom.window.document.querySelectorAll('[id="7030"]')];
+  const child = rows.find((r) => r.querySelector("input:not([disabled])"));
+  const clone = child.cloneNode(true);
+  const desc = clone.querySelector(".row-description-text");
+  desc.textContent = desc.textContent.replace(BANK_IBAN, "PK36SCBL0000001123456702");
+  child.after(clone);
+  return dom.serialize();
+}
+
+function runFillHtml(html, fields, options = {}) {
+  const dom = new JSDOM(html, { runScripts: "outside-only" });
+  const prepared = fields.map(filler.prepareField);
+  const results = dom.window.eval(filler.buildInPageFillScript(prepared, options));
+  return { results, dom, byKey: Object.fromEntries(results.map((r) => [r.key, r])) };
+}
+
+test("bank: a #7030 row is addressed by the IBAN in its description, never the disabled summary", () => {
+  const f = field("bank.hbl", "7030", "Amount", 2100000, "HBL closing");
+  f.rowDescriptionIncludes = BANK_IBAN;
+  const { byKey, dom } = runFill("assets-with-bank.html", [f]);
+  const r = byKey["bank.hbl"];
+  assert.equal(r.status, filler.FILL_STATUS.FILLED, JSON.stringify(r));
+  assert.match(r.rowDescription, new RegExp(BANK_IBAN));
+  assert.equal(r.readback, "2100000");
+});
+
+test("bank: with two banks each IBAN lands on its own row", () => {
+  const a = field("bank.a", "7030", "Amount", 2100000, "HBL");
+  a.rowDescriptionIncludes = BANK_IBAN;
+  const b = field("bank.b", "7030", "Amount", 750000, "SCB");
+  b.rowDescriptionIncludes = "PK36SCBL0000001123456702";
+  const { byKey } = runFillHtml(withTwoBanks(), [a, b]);
+  assert.equal(byKey["bank.a"].status, filler.FILL_STATUS.FILLED, JSON.stringify(byKey["bank.a"]));
+  assert.equal(byKey["bank.b"].status, filler.FILL_STATUS.FILLED, JSON.stringify(byKey["bank.b"]));
+  assert.match(byKey["bank.a"].rowDescription, new RegExp(BANK_IBAN));
+  assert.match(byKey["bank.b"].rowDescription, /PK36SCBL0000001123456702/);
+  assert.equal(byKey["bank.a"].readback, "2100000");
+  assert.equal(byKey["bank.b"].readback, "750000");
+});
+
+test("bank: an IBAN IRIS has not listed pauses as row_not_found instead of guessing another bank", () => {
+  const f = field("bank.x", "7030", "Amount", 1000, "Unlisted");
+  f.rowDescriptionIncludes = "PK00NOPE0000000000000000";
+  const { byKey } = runFill("assets-with-bank.html", [f]);
+  assert.equal(byKey["bank.x"].status, filler.FILL_STATUS.ROW_NOT_FOUND);
+});
+
 test("assets: derived totals like #7019 stay protected", () => {
   const { byKey } = runFill("assets.html", [
     field("assets.total", "7019", "Amount", 9999999),
@@ -569,4 +625,75 @@ test("prepareField normalises to the portal's whole-rupee digits-only form", () 
   });
   assert.equal(exponent.amountValid, false, "String(1e21) is not a portal amount");
   assert.equal(exponent.amountReason, "unparseable_amount");
+});
+
+// ───────────────────────────────────────────────────────────────
+// Overwrite guard + read-only pre-fill snapshot
+// ───────────────────────────────────────────────────────────────
+
+function runFillPrefilled(code, existing, planned, options = {}) {
+  const dom = new JSDOM(loadFixture("salary.html"), { runScripts: "outside-only" });
+  const row = dom.window.document.getElementById(code);
+  const input = row.querySelectorAll(".data-middle-child-wapper")[0].querySelector("input");
+  input.value = existing;
+  const prepared = [field("k", code, "Total Amount", planned, "row")].map(filler.prepareField);
+  const results = dom.window.eval(filler.buildInPageFillScript(prepared, options));
+  return { r: results[0], input };
+}
+
+test("overwrite guard: a different non-empty figure is never replaced", () => {
+  const { r, input } = runFillPrefilled("1009", "3,420,000", "1250000");
+  assert.equal(r.status, filler.FILL_STATUS.OVERWRITE_NEEDS_CONFIRMATION, JSON.stringify(r));
+  assert.equal(r.plannedValue, "1250000");
+  assert.equal(r.existingValue, "3,420,000");
+  assert.equal(input.value, "3,420,000", "the existing figure must stay untouched");
+});
+
+test("overwrite guard: the same figure (formatted with commas) is already_correct, not rewritten", () => {
+  const { r, input } = runFillPrefilled("1009", "3,420,000", "3420000");
+  assert.equal(r.status, filler.FILL_STATUS.ALREADY_CORRECT, JSON.stringify(r));
+  assert.equal(input.value, "3,420,000");
+});
+
+test("overwrite guard: empty and zero placeholders are still filled", () => {
+  for (const blank of ["", "0", "0.00"]) {
+    const { r, input } = runFillPrefilled("1009", blank, "1250000");
+    assert.equal(r.status, filler.FILL_STATUS.FILLED, `blank=${JSON.stringify(blank)} ${JSON.stringify(r)}`);
+    assert.equal(input.value, "1250000");
+  }
+});
+
+test("overwrite guard: dry run reports the conflict too, and summarise counts already_correct as satisfied", () => {
+  const { r } = runFillPrefilled("1009", "500000", "1250000", { dryRun: true });
+  assert.equal(r.status, filler.FILL_STATUS.OVERWRITE_NEEDS_CONFIRMATION);
+  const summary = filler.summarise([
+    { status: "filled" },
+    { status: "already_correct" },
+    { status: "overwrite_needs_confirmation" },
+  ]);
+  assert.equal(summary.filled, 2);
+  assert.equal(summary.skipped, 1);
+  assert.equal(summary.alreadyCorrect, 1);
+  assert.match(filler.describeFillSummary(summary), /overwrite_needs_confirmation/);
+  assert.doesNotMatch(filler.describeFillSummary(summary), /1 already_correct/);
+});
+
+test("snapshot is read-only and flags prefilled rows the packet does not cover", () => {
+  const dom = new JSDOM(loadFixture("salary.html"), { runScripts: "outside-only" });
+  const doc = dom.window.document;
+  const before = doc.documentElement.outerHTML;
+  const input1049 = doc.getElementById("1049").querySelectorAll(".data-middle-child-wapper")[0].querySelector("input");
+  input1049.value = "1,049";
+  const snapshot = dom.window.eval(filler.buildInPageSnapshotScript());
+  assert.ok(snapshot.length > 1);
+  const unexpected = filler.findUnexpectedPrefill(snapshot, ["1009"]);
+  assert.ok(unexpected.some((row) => row.code === "1049"), JSON.stringify(unexpected));
+  assert.ok(!unexpected.some((row) => row.code === "1009"));
+  assert.equal(
+    filler.findUnexpectedPrefill(snapshot, ["1009", "1049"]).some((row) => row.code === "1049"),
+    false,
+  );
+  // input.value set programmatically is a property, not markup; the DOM markup
+  // must be unchanged by taking a snapshot.
+  assert.equal(doc.documentElement.outerHTML, before);
 });

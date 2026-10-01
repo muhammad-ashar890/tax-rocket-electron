@@ -184,6 +184,11 @@ model BankAccount {
   bankName            String
   accountLabel        String
   accountNumberMasked String?
+  /// Full 24-character Pakistani IBAN. IRIS's Bank Account(s) modal cannot be
+  /// completed without it (it looks the account title up from the IBAN).
+  /// Nullable only so rows created before this column existed still load; the
+  /// completeness gate refuses to proceed until every account has one.
+  iban                String?
   currency            String  @default("PKR")
 
   documents     Document[]
@@ -194,6 +199,7 @@ model BankAccount {
   updatedAt     DateTime          @updatedAt
 
   @@unique([filingDraftId, accountLabel])
+  @@unique([filingDraftId, iban])
   @@index([filingDraftId])
   @@index([userId])
 }

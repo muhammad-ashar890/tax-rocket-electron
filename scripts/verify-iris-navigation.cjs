@@ -299,6 +299,18 @@ function sandbox(names, extras = {}) {
   ) {
     names = [...names, "resolveAutofillMode"];
   }
+  // The flows merge autofill output into the navigation result through this
+  // module-scope helper; the sandbox must be given it too.
+  if (
+    autofillFlows.some((flow) => names.includes(flow)) &&
+    !names.includes("mergeNavigationAutofillOutcome")
+  ) {
+    names = [
+      ...names,
+      "mergeNavigationAutofillOutcome",
+      "buildHandoffScopeSummary",
+    ];
+  }
   const ctx = vm.createContext({
     console,
     Promise,
@@ -1386,6 +1398,9 @@ test("Phase 2a: autofill walks each owning section and never fills the last-view
         skipped: results.length,
       }),
       describeFillSummary: () => "summary",
+      SUCCESS_STATUSES: new Set(["filled", "already_correct"]),
+      snapshotIrisRows: async () => [],
+      findUnexpectedPrefill: () => [],
       fillIrisRows: async (_win, fields) => {
         filled.push(fields.map((f) => f.irisCode).join(","));
         return {
@@ -1473,6 +1488,9 @@ test("TY2026 autofill passes only code 64020004 to the Adjustable Tax readiness 
       FILL_STATUS: { FILLED: "filled", ROW_NOT_FOUND: "row_not_found" },
       summarise: (results) => ({ total: results.length, filled: results.length, skipped: 0 }),
       describeFillSummary: () => "summary",
+      SUCCESS_STATUSES: new Set(["filled", "already_correct"]),
+      snapshotIrisRows: async () => [],
+      findUnexpectedPrefill: () => [],
       fillIrisRows: async (_win, fields) => {
         const codes = fields.map((field) => field.irisCode);
         filledCodes.push(...codes);
@@ -1554,6 +1572,9 @@ test("an unapproved extra tax-deduction code keeps the whole group untouched", a
       FILL_STATUS: { FILLED: "filled", ROW_NOT_FOUND: "row_not_found" },
       summarise: (results) => ({ total: results.length, filled: 0, skipped: results.length }),
       describeFillSummary: () => "summary",
+      SUCCESS_STATUSES: new Set(["filled", "already_correct"]),
+      snapshotIrisRows: async () => [],
+      findUnexpectedPrefill: () => [],
       fillIrisRows: async () => {
         fillCalls += 1;
         throw new Error("an unapproved code must not reach the filler");
@@ -1611,6 +1632,9 @@ test("Phase 2a: a section that will not open leaves its fields untouched", async
         skipped: results.length,
       }),
       describeFillSummary: () => "summary",
+      SUCCESS_STATUSES: new Set(["filled", "already_correct"]),
+      snapshotIrisRows: async () => [],
+      findUnexpectedPrefill: () => [],
       fillIrisRows: async () => {
         throw new Error("must not fill a section that did not open");
       },
@@ -1869,6 +1893,9 @@ test("P1 gate: live refuses a section the tour could not verify, dry still repor
           skipped: results.filter((r) => r.status !== "filled").length,
         }),
         describeFillSummary: () => "summary",
+      SUCCESS_STATUSES: new Set(["filled", "already_correct"]),
+      snapshotIrisRows: async () => [],
+      findUnexpectedPrefill: () => [],
         ...fillerStub,
       },
     });
@@ -1898,6 +1925,396 @@ test("P1 gate: live refuses a section the tour could not verify, dry still repor
     },
   }).runRealIrisAutofill(packet(), { id: "job-1" }, "dry");
   assert.equal(dryCalls, 1, "a dry run exists precisely to inspect unverified targets");
+});
+
+test("overwrite guard surfaces IRIS-vs-packet conflicts and unexpected pre-filled rows, and pauses", async () => {
+  const tour = {
+    complete: true,
+    sections: [
+      {
+        id: "salary",
+        rows: [{ code: "1009" }],
+        mappingVerified: true,
+        status: "captured",
+        transition: "structure_changed",
+      },
+    ],
+  };
+  const makeCtx = (fillerStub) =>
+    sandbox(["runRealIrisAutofill"], {
+      ensureWorkerWindow: async () => ({
+        isDestroyed: () => false,
+        webContents: {
+          executeJavaScript: async () => ({ returnWorkspace: true, inputs: 12 }),
+        },
+      }),
+      launchState: { accountReference: "1234567890123" },
+      activeJobExecutionLog: null,
+      pushStatus: () => {},
+      captureWindowScreenshot: async () => null,
+      lastSectionTour: tour,
+      irisNavigation: {
+        ...navigation,
+        navigateToSection: async () => ({ ok: true, status: "switched" }),
+      },
+      irisRowFiller: {
+        FILL_STATUS: {
+          FILLED: "filled",
+          ROW_NOT_FOUND: "row_not_found",
+          UNVERIFIED_TARGET: "unverified_target",
+          OVERWRITE_NEEDS_CONFIRMATION: "overwrite_needs_confirmation",
+          ALREADY_CORRECT: "already_correct",
+        },
+        summarise: (results) => ({
+          total: results.length,
+          filled: results.filter((r) => ["filled","already_correct"].includes(r.status)).length,
+          skipped: results.filter((r) => !["filled","already_correct"].includes(r.status)).length,
+        }),
+        describeFillSummary: () => "summary",
+      SUCCESS_STATUSES: new Set(["filled", "already_correct"]),
+      snapshotIrisRows: async () => [],
+      findUnexpectedPrefill: () => [],
+        ...fillerStub,
+      },
+    });
+  const packet = () => ({
+    filingPacket: {
+      taxYear: 2026,
+      snapshot: { portalFieldMap: [{ irisCode: "1009", column: "Total Amount", value: "1000" }] },
+    },
+  });
+  const run = await makeCtx({
+    snapshotIrisRows: async () => [{ code: "1049" }],
+    findUnexpectedPrefill: () => [
+      { code: "1049", description: "Allowances", cells: [{ columnIndex: 0, value: "1,049" }] },
+    ],
+    fillIrisRows: async (_win, fields) => ({
+      results: fields.map((f) => ({
+        ...f,
+        status: "overwrite_needs_confirmation",
+        existingValue: "3,420,000",
+        plannedValue: "1000",
+      })),
+      summary: {},
+    }),
+  }).runRealIrisAutofill(packet(), { id: "job-1" }, "live");
+  assert.equal(run.paused, true);
+  assert.equal(run.pauseAction, "portal_autofill_review");
+  assert.match(run.pauseMessage, /1009 \(IRIS 3,420,000, packet 1000\).*NOT overwritten/);
+  assert.match(run.pauseMessage, /1049 1,049/);
+  assert.equal(run.result.unexpectedPrefill.length, 1);
+  assert.equal(run.result.overwriteConflicts[0].existingValue, "3,420,000");
+
+  // A clean, already-correct draft is not a review case.
+  const clean = await makeCtx({
+    fillIrisRows: async (_win, fields) => ({
+      results: fields.map((f) => ({ ...f, status: "already_correct" })),
+      summary: {},
+    }),
+  }).runRealIrisAutofill(packet(), { id: "job-1" }, "live");
+  assert.equal(clean.paused, false);
+});
+
+test("wealth figures in the packet are held out of the Salary fill and reported as prepared, not entered", async () => {
+  const tour = {
+    complete: true,
+    sections: [
+      {
+        id: "salary",
+        rows: [{ code: "1009" }],
+        mappingVerified: true,
+        status: "captured",
+        transition: "structure_changed",
+      },
+    ],
+  };
+  const makeCtx = (fillerStub, extra = {}) =>
+    sandbox(["runRealIrisAutofill"], {
+      // Wealth entry is a separate opt-in; off unless a test turns it on.
+      getWealthAutofillEnabled: () => false,
+      irisWealthDriver: {
+        WEALTH_STATUS: { SETUP_FAILED: "wealth_setup_failed" },
+        runWealthDriver: async () => {
+          throw new Error("the wealth driver must not run when the switch is off");
+        },
+      },
+      ensureNavigationJobActive: async () => {},
+      ...extra,
+      ensureWorkerWindow: async () => ({
+        isDestroyed: () => false,
+        webContents: {
+          executeJavaScript: async () => ({ returnWorkspace: true, inputs: 12 }),
+        },
+      }),
+      launchState: { accountReference: "1234567890123" },
+      activeJobExecutionLog: null,
+      pushStatus: () => {},
+      captureWindowScreenshot: async () => null,
+      lastSectionTour: tour,
+      irisNavigation: {
+        ...navigation,
+        navigateToSection: async () => ({ ok: true, status: "switched" }),
+      },
+      irisRowFiller: {
+        FILL_STATUS: {
+          FILLED: "filled",
+          ROW_NOT_FOUND: "row_not_found",
+          UNVERIFIED_TARGET: "unverified_target",
+          OVERWRITE_NEEDS_CONFIRMATION: "overwrite_needs_confirmation",
+          ALREADY_CORRECT: "already_correct",
+        },
+        summarise: (results) => ({
+          total: results.length,
+          filled: results.filter((r) => ["filled","already_correct"].includes(r.status)).length,
+          skipped: results.filter((r) => !["filled","already_correct"].includes(r.status)).length,
+        }),
+        describeFillSummary: () => "summary",
+      SUCCESS_STATUSES: new Set(["filled", "already_correct"]),
+      snapshotIrisRows: async () => [],
+      findUnexpectedPrefill: () => [],
+        ...fillerStub,
+      },
+    });
+  const packet = () => ({
+    filingPacket: {
+      taxYear: 2026,
+      snapshot: {
+        portalFieldMap: [
+          { irisCode: "1009", column: "Total Amount", value: "1000", sourceGroup: "incomeFields" },
+          { irisCode: "7012", column: "Amount", value: "2100000", label: "Cash (Non-Business)", sourceGroup: "wealthFields" },
+          { irisCode: "7051", column: "Amount", value: "960000", label: "Rent", sourceGroup: "wealthFields" },
+        ],
+      },
+    },
+  });
+  const filledCodes = [];
+  const run = await makeCtx({
+    fillIrisRows: async (_win, fields) => {
+      filledCodes.push(...fields.map((f) => f.irisCode));
+      return { results: fields.map((f) => ({ ...f, status: "filled" })), summary: {} };
+    },
+  }).runRealIrisAutofill(packet(), { id: "job-1" }, "live");
+  assert.equal(filledCodes.join(","), "1009", "wealth codes must not reach the Salary filler");
+  assert.equal(run.paused, false, "held-out wealth rows are not a skipped field");
+  assert.equal(run.result.wealthPrepared.length, 2);
+  assert.match(run.executionLog.map((e) => e.step).join(","), /real_autofill_wealth_prepared/);
+  const scope = ctxMerge(run);
+  assert.match(scope.label, /2 row\(s\) prepared, not entered/);
+  assert.equal(scope.readyToSubmit, false);
+
+  function ctxMerge(autofill) {
+    const merged = sandbox([
+      "mergeNavigationAutofillOutcome",
+      "buildHandoffScopeSummary",
+    ]).mergeNavigationAutofillOutcome(
+      { paused: false, result: {}, executionLog: [] },
+      autofill,
+      "live",
+    );
+    return merged.result.handoffScope;
+  }
+});
+
+test("wealth driver: with the switch on, only wealth figures reach it and its outcome is merged and labelled honestly", async () => {
+  const wealthFields = [
+    { key: "7051:wealthFields:Amount", irisCode: "7051", column: "Amount", value: "960000", label: "Rent", sourceGroup: "wealthFields" },
+    { key: "7030:wealthFields:Amount:PK36SCBL0000001123456702", irisCode: "7030", column: "Amount", value: "2100000", label: "SCB", sourceGroup: "wealthFields", rowDescriptionIncludes: "PK36SCBL0000001123456702" },
+  ];
+  const packet = {
+    filingPacket: {
+      taxYear: 2026,
+      snapshot: {
+        portalFieldMap: [
+          { irisCode: "1009", column: "Total Amount", value: "1000", sourceGroup: "incomeFields" },
+          ...wealthFields,
+        ],
+      },
+    },
+  };
+  const tour = {
+    complete: true,
+    sections: [{ id: "salary", rows: [{ code: "1009" }], mappingVerified: true, status: "captured", transition: "structure_changed" }],
+  };
+  const build = (driverResult, mode, { realGuard = false, reference = "1234567890123" } = {}) => {
+    const seen = { driverFields: null, driverMode: null, salaryCodes: [], navigated: [] };
+    const guardExtras = realGuard
+      ? {
+          // The REAL ensureNavigationJobActive, with only the network stubbed.
+          getApiBaseUrl: () => "http://web.test",
+          loadAgentState: () => ({ deviceAuthToken: "t" }),
+          fetch: async () => ({ ok: true, json: async () => ({ ok: true, job: { status: "running", expired: false } }) }),
+          AbortSignal: { timeout: () => undefined },
+          encodeURIComponent,
+          updateLocalJobStatus: async () => {},
+        }
+      : { ensureNavigationJobActive: async () => {} };
+    const ctx = sandbox(realGuard ? ["runRealIrisAutofill", "ensureNavigationJobActive"] : ["runRealIrisAutofill"], {
+      ...guardExtras,
+      ensureWorkerWindow: async () => ({
+        isDestroyed: () => false,
+        webContents: { executeJavaScript: async () => ({ returnWorkspace: true, inputs: 12 }) },
+      }),
+      launchState: { accountReference: reference, deviceAuthToken: "t" },
+      activeJobExecutionLog: null,
+      pushStatus: () => {},
+      captureWindowScreenshot: async () => null,
+      lastSectionTour: tour,
+      getWealthAutofillEnabled: () => true,
+      irisNavigation: {
+        ...navigation,
+        navigateToSection: async (_win, opts) => {
+          seen.navigated.push(opts.sectionId);
+          return { ok: true, status: "switched" };
+        },
+      },
+      irisWealthDriver: {
+        WEALTH_STATUS: { SETUP_FAILED: "wealth_setup_failed" },
+        runWealthDriver: async (_win, fields, options) => {
+          seen.driverFields = fields.map((f) => f.irisCode);
+          seen.driverMode = options.mode;
+          // The navigate hook must open wealth sections through the guarded navigator.
+          await options.navigate("wealth_reconciliation");
+          await options.beforeStep();
+          return driverResult(fields);
+        },
+      },
+      irisRowFiller: {
+        FILL_STATUS: { FILLED: "filled", ROW_NOT_FOUND: "row_not_found", UNVERIFIED_TARGET: "unverified_target", OVERWRITE_NEEDS_CONFIRMATION: "overwrite_needs_confirmation", ALREADY_CORRECT: "already_correct" },
+        summarise: (results) => ({
+          total: results.length,
+          filled: results.filter((r) => ["filled", "already_correct"].includes(r.status)).length,
+          skipped: results.filter((r) => !["filled", "already_correct"].includes(r.status)).length,
+        }),
+        describeFillSummary: () => "summary",
+        SUCCESS_STATUSES: new Set(["filled", "already_correct"]),
+        snapshotIrisRows: async () => [],
+        findUnexpectedPrefill: () => [],
+        fillIrisRows: async (_win, fields) => {
+          seen.salaryCodes.push(...fields.map((f) => f.irisCode));
+          return { results: fields.map((f) => ({ ...f, status: "filled" })), summary: {} };
+        },
+      },
+    });
+    return { ctx, seen, run: () => ctx.runRealIrisAutofill(packet, { id: "job-1" }, mode) };
+  };
+  const merge = (autofill, mode) =>
+    sandbox(["mergeNavigationAutofillOutcome", "buildHandoffScopeSummary"]).mergeNavigationAutofillOutcome(
+      { paused: false, result: {}, executionLog: [] },
+      autofill,
+      mode,
+    );
+
+  // All rows entered.
+  const ok = build((fields) => ({ results: fields.map((f) => ({ ...f, status: "filled" })), setup: [] }), "live");
+  const okRun = await ok.run();
+  assert.deepEqual(ok.seen.driverFields, ["7051", "7030"], "driver receives wealth fields only");
+  assert.equal(ok.seen.driverMode, "live");
+  assert.deepEqual(ok.seen.salaryCodes, ["1009"], "salary filler still gets salary only");
+  assert.deepEqual(ok.seen.navigated.slice(-1), ["wealth_reconciliation"]);
+  assert.equal(okRun.paused, false);
+  assert.equal(okRun.result.summary.total, 3);
+  const okScope = merge(okRun, "live").result.handoffScope;
+  assert.equal(okScope.salary, "filled");
+  assert.equal(okScope.wealthStatement, "entered_not_calculated");
+  assert.match(okScope.label, /Wealth .* 2\/2 row\(s\) entered/);
+  assert.match(okScope.label, /Calculate/);
+  assert.equal(okScope.readyToSubmit, false);
+  assert.match(okScope.label, /NOT ready to submit/);
+
+  // One wealth row could not be created: pause for review, Salary stays green.
+  const bad = build(
+    (fields) => ({
+      results: fields.map((f, i) => (i === 0 ? { ...f, status: "filled" } : { ...f, status: "wealth_setup_failed", setupStatus: "bank_iban_not_resolved" })),
+      setup: [],
+    }),
+    "live",
+  );
+  const badRun = await bad.run();
+  assert.equal(badRun.paused, true);
+  assert.equal(badRun.pauseAction, "portal_autofill_review");
+  const badScope = merge(badRun, "live").result.handoffScope;
+  assert.equal(badScope.salary, "filled", "a wealth failure must not repaint Salary");
+  assert.equal(badScope.wealthStatement, "needs_review");
+  const prepared = badRun.result.wealthPrepared.find((f) => f.irisCode === "7030");
+  assert.equal(prepared.status, "wealth_setup_failed");
+  assert.equal(prepared.setupStatus, "bank_iban_not_resolved");
+
+  // Dry mode is passed through, and is labelled as not entered.
+  const dry = build((fields) => ({ results: fields.map((f) => ({ ...f, status: "wealth_row_missing_dry_run" })), setup: [] }), "dry");
+  const dryRun = await dry.run();
+  assert.equal(dry.seen.driverMode, "dry");
+  const dryScope = merge(dryRun, "dry").result.handoffScope;
+  assert.equal(dryScope.wealthStatement, "dry_run_only");
+  assert.match(dryScope.label, /nothing entered/);
+
+  // A thrown driver error holds the rows and says so; it never crashes the handoff.
+  const boom = build(() => { throw new Error("kaboom"); }, "live");
+  const boomRun = await boom.run();
+  assert.equal(boomRun.paused, true);
+  assert.ok(boomRun.executionLog.some((e) => e.step === "real_autofill_wealth_error"));
+  assert.ok(boomRun.result.wealthPrepared.every((f) => f.setupStatus === "driver_error"));
+});
+
+test("wealth driver: the job guard accepts a CNIC written with dashes/spaces (regression: 'target changed' stopped every wealth row)", async () => {
+  const packet = {
+    filingPacket: {
+      taxYear: 2026,
+      snapshot: { portalFieldMap: [{ irisCode: "1009", column: "Total Amount", value: "1000", sourceGroup: "incomeFields" }, { key: "7051:wealthFields:Amount", irisCode: "7051", column: "Amount", value: "960000", label: "Rent", sourceGroup: "wealthFields" }] },
+    },
+  };
+  const tour = { complete: true, sections: [{ id: "salary", rows: [{ code: "1009" }], mappingVerified: true, status: "captured", transition: "structure_changed" }] };
+  for (const reference of ["42201-1234567-1", " 42201 1234567 1 ", "4220112345671"]) {
+    let guardCalls = 0;
+    const ctx = sandbox(["runRealIrisAutofill", "ensureNavigationJobActive"], {
+      getApiBaseUrl: () => "http://web.test",
+      loadAgentState: () => ({ deviceAuthToken: "t" }),
+      fetch: async () => ({ ok: true, json: async () => ({ ok: true, job: { status: "running", expired: false } }) }),
+      AbortSignal: { timeout: () => undefined },
+      encodeURIComponent,
+      updateLocalJobStatus: async () => {},
+      ensureWorkerWindow: async () => ({ isDestroyed: () => false, webContents: { executeJavaScript: async () => ({ returnWorkspace: true, inputs: 12 }) } }),
+      launchState: { accountReference: reference, deviceAuthToken: "t" },
+      activeJobExecutionLog: null,
+      pushStatus: () => {},
+      captureWindowScreenshot: async () => null,
+      lastSectionTour: tour,
+      getWealthAutofillEnabled: () => true,
+      irisNavigation: { ...navigation, navigateToSection: async () => ({ ok: true, status: "switched" }) },
+      irisWealthDriver: {
+        WEALTH_STATUS: { SETUP_FAILED: "wealth_setup_failed" },
+        runWealthDriver: async (_w, fields, options) => {
+          await options.beforeStep(); // throws NAVIGATION_TARGET_CHANGED if the identifier is not normalised
+          guardCalls += 1;
+          return { results: fields.map((f) => ({ ...f, status: "filled" })), setup: [] };
+        },
+      },
+      irisRowFiller: {
+        FILL_STATUS: {}, SUCCESS_STATUSES: new Set(["filled", "already_correct"]),
+        summarise: (r) => ({ total: r.length, filled: r.filter((x) => x.status === "filled").length, skipped: r.filter((x) => x.status !== "filled").length }),
+        describeFillSummary: () => "summary", snapshotIrisRows: async () => [], findUnexpectedPrefill: () => [],
+        fillIrisRows: async (_w, fields) => ({ results: fields.map((f) => ({ ...f, status: "filled" })), summary: {} }),
+      },
+    });
+    const run = await ctx.runRealIrisAutofill(packet, { id: "job-1" }, "live");
+    assert.equal(guardCalls, 1, `guard passed for ${JSON.stringify(reference)}`);
+    assert.ok(!run.executionLog.some((e) => e.step === "real_autofill_wealth_error"), `no wealth error for ${JSON.stringify(reference)}`);
+  }
+});
+
+test("wealth driver switch: only explicit on-values enable it", () => {
+  const read = (value) =>
+    sandbox(["getWealthAutofillEnabled"], { process: { env: { TAXROCKET_WEALTH_AUTOFILL: value } } }).getWealthAutofillEnabled();
+  for (const on of ["on", "1", "true", "YES", " live "]) assert.equal(read(on), true, on);
+  for (const off of ["", "off", "0", "dry", "maybe", undefined]) assert.equal(read(off), false, String(off));
+});
+
+test("wealth driver: every file the agent needs is packaged and the three stamps agree", () => {
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "electron-connect", "package.json"), "utf8"));
+  assert.ok(pkg.build.files.includes("iris-wealth-driver.js"), "the driver must ship in the installer");
+  const driverTag = require("../electron-connect/iris-wealth-driver.js").BUILD_TAG;
+  assert.equal(driverTag, navigation.BUILD_TAG);
+  assert.equal(driverTag, require("../electron-connect/iris-row-filler.js").BUILD_TAG);
+  assert.ok(mainSource.includes(`AGENT_BUILD_TAG = "${driverTag}"`));
 });
 
 test("P3.2: real-portal readiness never falls through to the mock-era selector chain", () => {
@@ -1983,6 +2400,9 @@ test("P3.4: autofill holds when the return workspace cannot be proven", async ()
       FILL_STATUS: { FILLED: "filled", ROW_NOT_FOUND: "row_not_found" },
       summarise: (results) => ({ total: results.length, filled: 0, skipped: results.length }),
       describeFillSummary: () => "summary",
+      SUCCESS_STATUSES: new Set(["filled", "already_correct"]),
+      snapshotIrisRows: async () => [],
+      findUnexpectedPrefill: () => [],
       fillIrisRows: async () => {
         fillCalls += 1;
         return { results: [], summary: {} };
@@ -2174,4 +2594,32 @@ test("verification dialogs keep blocking even beside a recognised setup caption"
       assert.deepEqual(await page.evaluate("actions"), []);
     },
   );
+});
+
+test("handoff scope never reports a Salary-only handoff as ready to submit", () => {
+  const ctx = sandbox([
+    "mergeNavigationAutofillOutcome",
+    "buildHandoffScopeSummary",
+  ]);
+  const merged = ctx.mergeNavigationAutofillOutcome(
+    { paused: false, result: {}, executionLog: [] },
+    { paused: false, result: {}, executionLog: [], },
+    "live",
+  );
+  assert.equal(merged.result.handoffScope.readyToSubmit, false);
+  assert.equal(merged.result.handoffScope.wealthStatement, "pending");
+  const ok = ctx.mergeNavigationAutofillOutcome(
+    { paused: false, result: {}, executionLog: [] },
+    { paused: false, result: { summary: { total: 5, filled: 5, skipped: 0 } }, executionLog: [] },
+    "live",
+  );
+  assert.equal(ok.result.handoffScope.salary, "filled");
+  assert.match(ok.result.handoffScope.label, /Wealth .* pending/);
+  assert.match(ok.result.handoffScope.label, /NOT ready to submit/);
+  const review = ctx.mergeNavigationAutofillOutcome(
+    { paused: false, result: {}, executionLog: [] },
+    { paused: true, result: { summary: { total: 5, filled: 4, skipped: 1 } }, executionLog: [] },
+    "live",
+  );
+  assert.equal(review.result.handoffScope.salary, "needs_review");
 });

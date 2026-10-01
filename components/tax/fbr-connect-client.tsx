@@ -59,6 +59,11 @@ type JobView = {
   createdAt: string | Date;
   startedAt: string | Date | null;
   completedAt: string | Date | null;
+  handoffScope?: {
+    salary: string | null;
+    wealthStatement: string | null;
+    wealthRows: number;
+  } | null;
 };
 
 type DeviceView = {
@@ -507,7 +512,8 @@ export default function FbrConnectClient({
                   Your filing is ready for supervised entry.
                 </span>{" "}
                 TaxRocket will enter only the approved Salary and Salary
-                withholding information that can be verified. Property, Wealth,
+                withholding information that can be verified. Wealth Statement rows are
+                entered only if the agent&apos;s Wealth switch is on. Property,
                 Payments, and Computations remain outside this test. Nothing is
                 saved or submitted.
               </div>
@@ -751,8 +757,8 @@ export default function FbrConnectClient({
         <Card className="border-amber-300 bg-amber-50/60">
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-sm text-amber-900">
-              <CheckCircle className="h-4 w-4" /> Agent step complete — return
-              not filed
+              <CheckCircle className="h-4 w-4" /> Salary step complete — return
+              NOT ready to submit
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
@@ -768,6 +774,49 @@ export default function FbrConnectClient({
               may be in the open FBR draft, but the return was not saved or
               submitted. Review the FBR window before taking any further action.
             </p>
+            <ul className="space-y-1 rounded-md border border-amber-200 bg-white/70 p-3 text-xs">
+              <li>
+                ✅ <strong>Salary</strong> income and salary withholding (u/s
+                149) — entered and read back in the FBR draft
+              </li>
+              {completedAgentJob?.handoffScope?.wealthStatement ===
+              "entered_not_calculated" ? (
+                <li>
+                  ✅ <strong>Wealth Statement</strong> —{" "}
+                  {completedAgentJob.handoffScope.wealthRows} row(s) entered by
+                  the agent (personal expenses, tax paid, bank accounts). The
+                  agent never presses Calculate: press Calculate in FBR, then
+                  open Reconciliation of Net Assets and make sure the
+                  unreconciled amount is 0
+                </li>
+              ) : completedAgentJob?.handoffScope?.wealthStatement ===
+                "needs_review" ? (
+                <li>
+                  ⚠️ <strong>Wealth Statement</strong> — some rows could not be
+                  entered safely. Review the Reconciliation and Personal Assets
+                  pages in FBR and the agent log before continuing
+                </li>
+              ) : (
+                <li>
+                  ⚠️ <strong>Wealth Statement &amp; Reconciliation</strong> —
+                  NOT entered by this run (the agent&apos;s Wealth switch was
+                  off, or this was a dry run). Complete it in FBR, then
+                  calculate and make sure the unreconciled amount is 0
+                </li>
+              )}
+              <li>
+                ⚠️ <strong>Property, Payments, Computations</strong> — NOT
+                filled by the agent
+              </li>
+              <li>
+                ⚠️ <strong>Employer details</strong> — check in FBR whether your
+                return needs them
+              </li>
+              <li>
+                ⛔ The agent never saves, calculates, pays or submits. The
+                return is not ready to submit until the items above are done.
+              </li>
+            </ul>
             <Button
               type="button"
               size="sm"

@@ -26,6 +26,7 @@
       "main.js",
       "iris-navigation.js",
       "iris-row-filler.js",
+      "iris-wealth-driver.js",
       "preload.js",
       "portal-agent.js",
       "renderer.html",

@@ -350,7 +350,12 @@ test("completed agent work is never labeled as a filed FBR return", () => {
   );
   assert.match(main, /paused: reviewRequired/);
   assert.match(navigation, /This inspection did not enter values/);
-  assert.match(client, /Agent step complete — return[\s\S]{0,80}not filed/);
+  // Heading reworded in fix27: a Salary-only handoff must say the return is NOT
+  // ready to submit, which is stronger than "not filed".
+  assert.match(
+    client,
+    /Salary step complete — return[\s\S]{0,80}NOT ready to submit/,
+  );
   assert.match(client, /does <strong>not<\/strong> mean the return was filed/);
   assert.doesNotMatch(client, /FBR handoff complete — review required/);
 });
@@ -759,4 +764,28 @@ test("packet field map carries the IRIS code the filler addresses rows by", () =
   // worker payload must expose irisCode and the column name.
   assert.ok(mapSource.includes("irisCode: entry.irisCode"));
   assert.ok(mapSource.includes("column: entry.column"));
+});
+
+test("completion card reports what the agent actually did for the Wealth Statement", () => {
+  const client = fs.readFileSync(
+    path.join(__dirname, "..", "components/tax/fbr-connect-client.tsx"),
+    "utf8",
+  );
+  const jobs = fs.readFileSync(
+    path.join(__dirname, "..", "app/actions/fbr-jobs.ts"),
+    "utf8",
+  );
+  assert.match(
+    client,
+    /handoffScope\?\.wealthStatement ===\s+"entered_not_calculated"/,
+  );
+  assert.match(client, /"needs_review"/);
+  // Only the scope summary leaves the server, never the whole agent result.
+  assert.match(
+    jobs,
+    /const views = jobs\.map\(\(\{ resultJson, \.\.\.job \}\)/,
+  );
+  assert.ok(
+    !/resultJson: true[\s\S]{0,400}return \{ success: true, jobs \}/.test(jobs),
+  );
 });

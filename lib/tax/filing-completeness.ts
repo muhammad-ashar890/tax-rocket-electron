@@ -3,6 +3,7 @@ import type { PrismaClient } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { findLikelyInternalTransferPairs } from "@/lib/tax/bank-transfer-matching";
 import { getRequiredTaxDocumentTypesForCurrentFlow } from "@/lib/tax/document-requirements";
+import { validatePakistaniIban } from "@/lib/tax/iban";
 import type { TaxIncomeSource } from "@/lib/tax/filing-drafts";
 import { validateTaxYearStatement } from "@/lib/tax/tax-year-period";
 
@@ -86,6 +87,7 @@ export async function validateFilingCompleteness(
         id: true,
         bankName: true,
         accountLabel: true,
+        iban: true,
         currency: true,
       },
     }),
@@ -172,6 +174,12 @@ export async function validateFilingCompleteness(
       if (account.currency.trim().toUpperCase() !== "PKR") {
         blockers.push(`${label}: bank account currency must be PKR`);
       }
+      // IRIS lists a bank in the Wealth Statement by IBAN; without a valid one
+      // the account cannot be declared there, so the filing cannot proceed.
+      const ibanCheck = validatePakistaniIban(account.iban);
+      if (!ibanCheck.valid) {
+        blockers.push(`${label}: ${ibanCheck.error}`);
+      }
 
       const accountDocuments = documents.filter(
         (document) =>
@@ -215,6 +223,18 @@ export async function validateFilingCompleteness(
       ) {
         blockers.push(
           `${label}: saved statement must come from the current mapped account document`,
+        );
+      }
+
+      // A statement with no transactions cannot be reconciled or classified,
+      // so each account must carry the transactions it was filed from.
+      if (
+        !transactions.some(
+          (transaction) => transaction.bankStatementId === statement.id,
+        )
+      ) {
+        blockers.push(
+          `${label}: import the transactions from this bank statement`,
         );
       }
 

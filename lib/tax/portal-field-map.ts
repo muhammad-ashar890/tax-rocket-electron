@@ -15,6 +15,13 @@ import {
   PORTAL_WRITEABLE_CODES,
 } from "./portal-row-evidence";
 import { SALARY_CERTIFICATE_TAX_ROW } from "./iris-employment-capture";
+import {
+  WEALTH_BANK_ACCOUNT_CODE,
+  WEALTH_EXPENSE_ROWS,
+  WEALTH_TAX_OUTFLOW_CODE,
+  WEALTH_TAX_OUTFLOW_DESCRIPTION,
+  classifyExpenseToWealthCode,
+} from "./wealth-rows";
 
 export type PortalFieldMapEntry = {
   ledgerEntryId?: string;
@@ -38,6 +45,12 @@ export type PortalFieldMapEntry = {
   filerStatus?: string;
   propertyValue?: number;
   /**
+   * Several IRIS rows can share one code (every bank account is a `7030` row).
+   * When set, only a row whose visible description contains this text is a
+   * valid target — for a bank account, its IBAN.
+   */
+  rowDescriptionIncludes?: string;
+  /**
    * Packet v1.1.0: how many ledger rows were summed into this one IRIS cell.
    * A single IRIS row is one figure, so N ledger entries must collapse into one
    * field — see the aggregation note in buildPortalFieldMap.
@@ -51,6 +64,15 @@ export type PortalFieldMapEntry = {
  * wrong number on a government return is worse than an unfilled one.
  */
 export type PortalMappingGaps = {
+  /**
+   * Expense categories that are not a personal expense IRIS has a row for.
+   * They are NOT in the Wealth Statement outflows, so the reconciliation will
+   * not balance until a human places them. Informational (never gates).
+   */
+  wealthUnmappedExpenses?: {
+    category: string;
+    totalAmount: number;
+  }[];
   /** Ledger categories with no IRIS code — nothing was queued for these. */
   unmappedCategories: {
     category: string;
@@ -127,6 +149,8 @@ export type PortalAutofillField = {
   leftPanel: string | null;
   leftSection: string | null;
   sourceGroup: "incomeFields" | "adjustableTaxFields" | "wealthFields";
+  /** See PortalFieldMapEntry.rowDescriptionIncludes. */
+  rowDescriptionIncludes?: string;
   ledgerEntryId?: string;
   taxCreditId?: string;
   incomeRecordId?: string;
@@ -282,7 +306,9 @@ function toPortalAutofillField(
   const rowSelector = buildPortalFieldRowSelector(entry.irisCode);
   const hints = getPortalNavigationHints(entry);
   return {
-    key: `${entry.irisCode}:${sourceGroup}:${entry.column}`,
+    key: `${entry.irisCode}:${sourceGroup}:${entry.column}${
+      entry.rowDescriptionIncludes ? `:${entry.rowDescriptionIncludes}` : ""
+    }`,
     value: String(entry.ourAmount),
     label: entry.irisDescription,
     irisCode: entry.irisCode,
@@ -294,6 +320,9 @@ function toPortalAutofillField(
     rowSelector,
     ...hints,
     sourceGroup,
+    ...(entry.rowDescriptionIncludes
+      ? { rowDescriptionIncludes: entry.rowDescriptionIncludes }
+      : {}),
     ledgerEntryId: entry.ledgerEntryId,
     taxCreditId: entry.taxCreditId,
     incomeRecordId: entry.incomeRecordId,
@@ -505,6 +534,16 @@ export function buildPortalFieldMap(params: {
   salaryCertificateGrossSalary?: number | null;
   taxableIncome?: number;
   taxWithheld?: number;
+  /**
+   * One entry per configured bank account: its IBAN and the CLOSING balance of
+   * its approved statement. Becomes a `7030` Bank Account(s) row each.
+   */
+  bankAccounts?: {
+    iban: string;
+    bankName: string;
+    accountLabel: string;
+    closingBalance: number | { toString(): string } | string;
+  }[];
   pensionDetails?: {
     totalPension: number;
     exemptLimit: number;
@@ -523,6 +562,7 @@ export function buildPortalFieldMap(params: {
     salaryCertificateGrossSalary = null,
     taxableIncome = 0,
     taxWithheld = 0,
+    bankAccounts = [],
     pensionDetails,
   } = params;
 
@@ -667,6 +707,21 @@ export function buildPortalFieldMap(params: {
     // tax/IRIS source instead; do not send the bank credits to the salary row a
     // second time.
     if (replaceSalaryWithCertificate) continue;
+
+    // A personal expense is not an income-sheet line, so it can never have an
+    // entry in CATEGORY_TO_IRIS_MAP. It IS covered: the wealth block below
+    // carries it on the `+ Expenses` rows (7051, 7055, 7058, 7087 ...). Without
+    // this skip every expense category was reported as "needs a manual IRIS
+    // entry" and the packet step demanded an acknowledgement for amounts the
+    // agent enters itself. An expense that no wealth row can take still falls
+    // through to the gap report below.
+    if (entry.entryType === "EXPENSE") {
+      const wealthCode = classifyExpenseToWealthCode(
+        entry.category,
+        entry.description,
+      );
+      if (wealthCode && WEALTH_EXPENSE_ROWS[wealthCode]) continue;
+    }
 
     // No verified IRIS line for this category → report the gap. It used to fall
     // back to 5028 "Other Receipts", which produced the row_not_found entries the
@@ -909,26 +964,121 @@ export function buildPortalFieldMap(params: {
       (definition: any) => definition.code === salaryCode,
     ) as any;
     totalIncome += certificateGrossSalary;
-    addIncome(`${salaryCode}:${TOTAL_AMOUNT_COLUMN}`, () => ({
-      ourCategory: "SALARY_CERTIFICATE_GROSS",
-      ourDescription: "Annual gross salary from mapped salary certificate",
-      ourAmount: certificateGrossSalary,
-      irisCode: salaryCode,
-      irisDescription: salaryDef?.description || "Pay, Wages or Other Remuneration",
-      portalArea: salaryDef?.portalArea || "Employment",
-      section: salaryDef?.section || "Salary",
-      column: TOTAL_AMOUNT_COLUMN,
-      isTaxField: false,
-      filerStatus: taxpayerListStatus || undefined,
-    }), "salary-certificate");
+    addIncome(
+      `${salaryCode}:${TOTAL_AMOUNT_COLUMN}`,
+      () => ({
+        ourCategory: "SALARY_CERTIFICATE_GROSS",
+        ourDescription: "Annual gross salary from mapped salary certificate",
+        ourAmount: certificateGrossSalary,
+        irisCode: salaryCode,
+        irisDescription:
+          salaryDef?.description || "Pay, Wages or Other Remuneration",
+        portalArea: salaryDef?.portalArea || "Employment",
+        section: salaryDef?.section || "Salary",
+        column: TOTAL_AMOUNT_COLUMN,
+        isTaxField: false,
+        filerStatus: taxpayerListStatus || undefined,
+      }),
+      "salary-certificate",
+    );
   }
 
   for (const { entry } of incomeAgg.values()) incomeFields.push(entry);
   for (const { entry } of taxAgg.values()) adjustableTaxFields.push(entry);
 
-  // Wealth fields - from closing wealth etc (simplified)
-  // For now, we add a placeholder that agent can use to fill wealth statement if needed
-  // Actual wealth mapping needs user input - will be enhanced later
+  // Wealth Statement (116): the data the Mizan already holds, as IRIS cells.
+  //  - Personal expenses -> the child rows the `+ Expenses` modal creates.
+  //  - Salary tax deducted -> the row the Adjustments in Outflows `+` creates.
+  //  Bank balances are deliberately absent: they belong on 7030 Bank Account(s),
+  //  one row per IBAN, and 7012 is Cash in hand (see lib/tax/wealth-rows.ts).
+  // The agent decides whether/when to enter these; the packet only carries them.
+  const wealthExpenseTotals = new Map<
+    string,
+    { amount: number; ids: string[] }
+  >();
+  const wealthUnmappedExpenses = new Map<string, number>();
+  for (const entry of ledgerEntries) {
+    if (entry.entryType !== "EXPENSE") continue;
+    const amount = toNumber(entry.amount);
+    if (amount <= 0) continue;
+    const code = classifyExpenseToWealthCode(entry.category, entry.description);
+    if (!code || !WEALTH_EXPENSE_ROWS[code]) {
+      const cat = normalizeCategory(entry.category);
+      wealthUnmappedExpenses.set(
+        cat,
+        (wealthUnmappedExpenses.get(cat) || 0) + amount,
+      );
+      continue;
+    }
+    const bucket = wealthExpenseTotals.get(code) || { amount: 0, ids: [] };
+    bucket.amount += amount;
+    if (entry.id) bucket.ids.push(entry.id);
+    wealthExpenseTotals.set(code, bucket);
+  }
+  for (const [code, bucket] of [...wealthExpenseTotals.entries()].sort(
+    ([a], [b]) => a.localeCompare(b),
+  )) {
+    wealthFields.push({
+      ourCategory: "PERSONAL_EXPENSE_TOTAL",
+      ourDescription: `Personal expenses placed on IRIS "${WEALTH_EXPENSE_ROWS[code].label}"`,
+      ourAmount: Math.round(bucket.amount),
+      irisCode: code,
+      irisDescription: WEALTH_EXPENSE_ROWS[code].label,
+      portalArea: "116 - Wealth Statement",
+      section: "Reconciliation of Net Assets",
+      column: "Amount",
+      isTaxField: false,
+      filerStatus: taxpayerListStatus || undefined,
+      sourceEntryCount: bucket.ids.length,
+    });
+  }
+
+  // Bank balances: one 7030 row per account, matched in IRIS by IBAN. 7012 is
+  // "Cash in hand" and is never used for bank money.
+  for (const account of [...bankAccounts].sort((a, b) =>
+    a.iban.localeCompare(b.iban),
+  )) {
+    const closing = toNumber(account.closingBalance);
+    if (!account.iban || closing <= 0) continue;
+    wealthFields.push({
+      ourCategory: "BANK_CLOSING_BALANCE",
+      ourDescription: `${account.bankName} — ${account.accountLabel} closing balance`,
+      ourAmount: Math.round(closing),
+      irisCode: WEALTH_BANK_ACCOUNT_CODE,
+      irisDescription: `Bank Account(s) - ${account.iban}`,
+      portalArea: "116 - Wealth Statement",
+      section: "Personal Assets / Liabilities",
+      column: "Amount",
+      isTaxField: false,
+      filerStatus: taxpayerListStatus || undefined,
+      rowDescriptionIncludes: account.iban,
+      sourceEntryCount: 1,
+    });
+  }
+
+  const salaryTaxOutflow =
+    salaryCertificateTaxWithheld === null ||
+    salaryCertificateTaxWithheld === undefined
+      ? 0
+      : toNumber(salaryCertificateTaxWithheld);
+  if (salaryTaxOutflow > 0) {
+    wealthFields.push({
+      ourCategory: "SALARY_TAX_OUTFLOW",
+      ourDescription: WEALTH_TAX_OUTFLOW_DESCRIPTION,
+      ourAmount: Math.round(salaryTaxOutflow),
+      irisCode: WEALTH_TAX_OUTFLOW_CODE,
+      irisDescription: `Adjustments in Outflows - ${WEALTH_TAX_OUTFLOW_DESCRIPTION}`,
+      portalArea: "116 - Wealth Statement",
+      section: "Reconciliation of Net Assets",
+      column: "Amount",
+      isTaxField: false,
+      filerStatus: taxpayerListStatus || undefined,
+      // IRIS words the created row "Adjustments in Outflows - <description>"
+      // and every such row shares the id 7098; only ours may be written.
+      rowDescriptionIncludes: WEALTH_TAX_OUTFLOW_DESCRIPTION,
+      sourceEntryCount: 1,
+    });
+  }
 
   return {
     // 1.1.0 — one field per IRIS cell (aggregated), entered-column targeting,
@@ -944,6 +1094,9 @@ export function buildPortalFieldMap(params: {
     adjustableTaxFields,
     wealthFields,
     mappingGaps: {
+      wealthUnmappedExpenses: [...wealthUnmappedExpenses.entries()]
+        .map(([category, totalAmount]) => ({ category, totalAmount }))
+        .sort((a, b) => a.category.localeCompare(b.category)),
       unmappedCategories: [...unmapped.values()].sort((a, b) =>
         a.category.localeCompare(b.category),
       ),

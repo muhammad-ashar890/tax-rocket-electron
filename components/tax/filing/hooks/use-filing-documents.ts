@@ -11,6 +11,7 @@ import {
   extractDocumentWithGeminiAction,
   getDocumentExtractionAction,
   getFilingDocumentsAction,
+  saveBankStatementIbanAction,
   updateDocumentExtractionAction,
 } from "@/app/actions/extraction";
 import { getFilingSummaryAction } from "@/app/actions/filing-summary";
@@ -32,6 +33,8 @@ type UseFilingDocumentsInput = {
   step: number;
   resetDownstreamSteps: ResetDownstreamSteps;
   setFilingSummary: (summary: FilingSummary) => void;
+  /** Called when a mapped statement changed a bank account (its IBAN). */
+  onBankAccountsChanged?: () => void;
 };
 
 export function useFilingDocuments({
@@ -39,6 +42,7 @@ export function useFilingDocuments({
   step,
   resetDownstreamSteps,
   setFilingSummary,
+  onBankAccountsChanged,
 }: UseFilingDocumentsInput) {
   const [uploadedDocuments, setUploadedDocuments] = useState<
     Record<string, string>
@@ -421,7 +425,12 @@ export function useFilingDocuments({
         ? formatCnicInput(value)
         : ["name", "full_name", "taxpayer_name"].includes(label)
           ? normalizeIdentityName(value)
-          : value;
+          : /(^|_)iban(_|$)/.test(label)
+            ? value
+                .toUpperCase()
+                .replace(/[\s-]+/g, "")
+                .slice(0, 24)
+            : value;
       const fields = payload.fields.map((current, index) =>
         index === fieldIndex ? { ...current, value: nextValue } : current,
       );
@@ -520,6 +529,8 @@ export function useFilingDocuments({
       ...previous,
       [documentType]: { ...record, extractionStatus: "MAPPED" },
     }));
+    // Mapping a bank statement stores its IBAN on the account.
+    if (documentType.startsWith("bank_statement")) onBankAccountsChanged?.();
 
     if (draftId) {
       const refreshedSummary = await getFilingSummaryAction(draftId);
@@ -527,6 +538,34 @@ export function useFilingDocuments({
         setFilingSummary(refreshedSummary.summary as FilingSummary);
       }
     }
+  }
+
+  /**
+   * Enter the IBAN on a statement that is already mapped (it was mapped before
+   * the IBAN was required). Does not re-map or touch transactions.
+   */
+  async function handleSaveStatementIban(documentType: string) {
+    const record = documentRecords[documentType];
+    if (!record) return;
+    const payload = extractedByDocumentId[record.id];
+    const ibanField = payload?.fields?.find((field) =>
+      /(^|_)iban(_|$)/.test(
+        field.label.toLowerCase().replace(/[^a-z0-9]+/g, "_"),
+      ),
+    );
+
+    setSavingDocumentReviewId(record.id);
+    setDocumentUploadError(null);
+    const result = await saveBankStatementIbanAction(
+      record.id,
+      String(ibanField?.value ?? ""),
+    );
+    setSavingDocumentReviewId(null);
+    if (!result.success) {
+      setDocumentUploadError(result.error ?? "Failed to save the IBAN");
+      return;
+    }
+    onBankAccountsChanged?.();
   }
 
   return {
@@ -556,5 +595,6 @@ export function useFilingDocuments({
     handleExtractedTransactionChange,
     handleSaveDocumentReview,
     handleMapDocument,
+    handleSaveStatementIban,
   };
 }

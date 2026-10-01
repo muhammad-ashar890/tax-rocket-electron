@@ -61,7 +61,10 @@ import {
 import { evaluateSimplifiedReturnEligibility } from "@/lib/tax/simplified-eligibility";
 
 import type { TaxDraftMetadata } from "@/lib/tax/draft-metadata";
-import type { DraftBankAccount } from "@/components/tax/filing/config/bank-account-types";
+import {
+  isBankAccountComplete,
+  type DraftBankAccount,
+} from "@/components/tax/filing/config/bank-account-types";
 
 import type { StepsRailItem } from "@/components/tax/wizard-ui";
 import { WizardHeader } from "@/components/tax/filing/wizard-header";
@@ -87,6 +90,7 @@ import { WizardPacketStep } from "@/components/tax/filing/wizard-packet-step";
 import { WizardApprovalStep } from "@/components/tax/filing/wizard-approval-step";
 import { WizardFbrStep } from "@/components/tax/filing/wizard-fbr-step";
 import { WizardBankIntelligenceStep } from "@/components/tax/filing/wizard-bank-intelligence-step";
+import { validatePakistaniIban } from "@/lib/tax/iban";
 import { WizardIncomeSubcategoryStep } from "@/components/tax/filing/wizard-income-subcategory-step";
 import {
   getTy2026AutomaticIncomeSelections,
@@ -213,6 +217,7 @@ export function FilingWizard({
       clientId: "bank-account-1",
       bankName: "",
       accountLabel: "Account 1",
+      iban: "",
     },
   ]);
   const [salaryPercentage, setSalaryPercentage] = useState<
@@ -282,6 +287,25 @@ export function FilingWizard({
   const [filingSummaryError, setFilingSummaryError] = useState<string | null>(
     null,
   );
+  // The IBAN is read from the bank statement, so after a statement is mapped or
+  // its IBAN is saved the account list is re-read from the database; the
+  // "IBAN required" gate on the pipeline steps depends on it.
+  function refreshBankAccountsFromServer() {
+    if (!draftId) return;
+    getBankAccountsAction(draftId).then((result) => {
+      if (!result.success) return;
+      setBankAccounts(
+        result.accounts.map((account) => ({
+          id: account.id,
+          clientId: account.id,
+          bankName: account.bankName,
+          accountLabel: account.accountLabel,
+          iban: account.iban ?? "",
+        })),
+      );
+    });
+  }
+
   const {
     uploadedDocuments,
     documentRecords,
@@ -309,11 +333,13 @@ export function FilingWizard({
     handleExtractedTransactionChange,
     handleSaveDocumentReview,
     handleMapDocument,
+    handleSaveStatementIban,
   } = useFilingDocuments({
     draftId,
     step,
     resetDownstreamSteps,
     setFilingSummary,
+    onBankAccountsChanged: refreshBankAccountsFromServer,
   });
 
   // ── Resume an existing Prisma-backed filing draft ──
@@ -380,6 +406,7 @@ export function FilingWizard({
             clientId: account.id,
             bankName: account.bankName,
             accountLabel: account.accountLabel,
+            iban: account.iban ?? "",
           })),
         );
       });
@@ -1128,6 +1155,24 @@ export function FilingWizard({
     currentStepKey as PipelineStepKey,
   );
 
+  // Accounts that still lack a valid IBAN. Drafts made before the IBAN rule
+  // reach the pipeline with it empty, so the gate must hold there too, not only
+  // on the setup step.
+  const accountsMissingIban = useMemo(
+    () =>
+      requiresBankAccounts
+        ? bankAccounts.filter(
+            (account) => !validatePakistaniIban(account.iban).valid,
+          )
+        : [],
+    [requiresBankAccounts, bankAccounts],
+  );
+  const ibanGatedStep =
+    currentStepKey === "documents" ||
+    currentStepKey === "bank_intelligence" ||
+    currentStepKey === "ledgers" ||
+    currentStepKey === "reconciliation";
+
   // Whether the CURRENT step's own question has been answered — gates the "Next"/"Continue" button.
   const canGoNext = useMemo(() => {
     if (currentStepKey === "who") return Boolean(filerType);
@@ -1147,12 +1192,7 @@ export function FilingWizard({
     if (currentStepKey === "bank_accounts") {
       return (
         bankAccounts.length > 0 &&
-        bankAccounts.every(
-          (account) =>
-            account.bankName.trim().length > 0 &&
-            account.accountLabel.trim().length > 0 &&
-            account.bankName.trim().length > 0,
-        )
+        bankAccounts.every(isBankAccountComplete)
       );
     }
     // Readiness: every shown card must be tapped before leaving the step.
@@ -1164,6 +1204,9 @@ export function FilingWizard({
         )
       );
     }
+    // A required field that is still empty is never "clickable for feedback":
+    // Continue stays disabled and the blocker list names the account.
+    if (ibanGatedStep && accountsMissingIban.length > 0) return false;
     // Keep Continue clickable on review-gated pipeline steps so the user
     // receives a clear error explaining what remains instead of a disabled
     // button with no feedback.
@@ -1190,6 +1233,8 @@ export function FilingWizard({
     taxYear,
     residencyStatus,
     bankAccounts,
+    accountsMissingIban,
+    ibanGatedStep,
     readinessCompleted,
     bankIntelligenceClassified,
     reconciliationResolved,
@@ -1285,9 +1330,7 @@ export function FilingWizard({
     if (
       requiresBankAccounts &&
       (bankAccounts.length === 0 ||
-        bankAccounts.some(
-          (account) => !account.bankName.trim() || !account.accountLabel.trim(),
-        ))
+        bankAccounts.some((account) => !isBankAccountComplete(account)))
     ) {
       return false;
     }
@@ -1305,6 +1348,8 @@ export function FilingWizard({
     residencyStatus,
     requiresBankAccounts,
     bankAccounts,
+    accountsMissingIban,
+    ibanGatedStep,
     readinessCompleted.length,
   ]);
 
@@ -1589,12 +1634,7 @@ export function FilingWizard({
       if (
         requiresBankAccounts &&
         (bankAccounts.length === 0 ||
-          bankAccounts.some(
-            (account) =>
-              !account.bankName.trim() ||
-              !account.accountLabel.trim() ||
-              !account.bankName.trim(),
-          ))
+          bankAccounts.some((account) => !isBankAccountComplete(account)))
       ) {
         b.push("Add each bank account name and label");
       }
@@ -1605,6 +1645,13 @@ export function FilingWizard({
         b.push(`Complete ${missingReadiness} readiness check(s)`);
     } else {
       // Only show relevant blockers per step — avoid confusing user with future steps
+      if (ibanGatedStep) {
+        for (const account of accountsMissingIban) {
+          b.push(
+            `${account.bankName} — ${account.accountLabel}: IBAN is required — enter it on that account's statement card under Upload documents`,
+          );
+        }
+      }
       if (currentStepKey === "bank_intelligence") {
         if (!bankStatementSaved) {
           b.push("Save statement balances before continuing");
@@ -1685,6 +1732,8 @@ export function FilingWizard({
     residencyStatus,
     requiresBankAccounts,
     bankAccounts,
+    accountsMissingIban,
+    ibanGatedStep,
     readinessCompleted.length,
     documentSlots,
     uploadedDocuments,
@@ -1730,6 +1779,25 @@ export function FilingWizard({
       navigationStepKey === "documents"
         ? Math.max(0, navigationStep - 1)
         : navigationCompletionStep;
+
+    if (
+      requiresBankAccounts &&
+      ["documents", "bank_intelligence", "ledgers", "reconciliation"].includes(
+        navigationStepKey,
+      )
+    ) {
+      const noIban = bankAccounts.filter(
+        (account) => !validatePakistaniIban(account.iban).valid,
+      );
+      if (noIban.length > 0) {
+        setFilingActionError(
+          `IBAN is required for ${noIban
+            .map((account) => `${account.bankName} — ${account.accountLabel}`)
+            .join(", ")} before you can continue.`,
+        );
+        return;
+      }
+    }
 
     if (navigationStepKey === "documents") {
       // Required documents must be reviewed before leaving this step. Bank
@@ -2161,6 +2229,7 @@ export function FilingWizard({
         handleExtractedTransactionChange={handleExtractedTransactionChange}
         handleSaveDocumentReview={handleSaveDocumentReview}
         handleMapDocument={handleMapDocument}
+        handleSaveStatementIban={handleSaveStatementIban}
       />
     );
   }

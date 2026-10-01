@@ -13,10 +13,12 @@ The current supervised handoff is deliberately limited to the verified areas nee
 - Salary income rows
 - Salary withholding in **Tax Deductions → Adjustable Tax → Salary of Employees u/s 149** (`64020004`)
 
+Optional, off by default: with `TAXROCKET_WEALTH_AUTOFILL=on` (and `TAXROCKET_REAL_AUTOFILL=live`) the agent also adds Wealth Statement rows through the IRIS modals — personal expenses (Reconciliation → `+ Expenses`), the tax-paid outflow `7098`, and bank accounts by IBAN (Personal Assets → `+ Assets`) — then types the packet amounts. In dry mode it only reports what it would add. The only buttons it presses are the `+` icons that open those dialogs, the tick-boxes inside them, and the dialog's own ADD/SAVE; it never presses the return's Save, Calculate or Submit, and never edits or deletes an existing row.
+
 The agent does **not** automatically open or fill:
 
 - Property
-- Wealth Statement or Wealth Reconciliation
+- Wealth Statement rows, unless the Wealth switch above is on
 - Payments
 - Computations
 - Save, Submit, Calculate, payment, or other filing controls
@@ -164,7 +166,7 @@ Even in live mode, the agent:
 - writes only into verified Salary and Salary-withholding cells;
 - never writes into derived/disabled cells;
 - never guesses a row or column;
-- never opens Property, Wealth, Payments, or Computations automatically;
+- never opens Property, Payments, or Computations automatically (Wealth only when `TAXROCKET_WEALTH_AUTOFILL=on`);
 - never clicks Calculate, Save, Submit, payment, or other filing controls.
 
 ## Windows desktop agent
@@ -237,7 +239,7 @@ The packaged app includes the synchronized build files:
 5. Queue the supervised Salary test.
 6. Confirm that only Salary and Salary-withholding are inspected.
 7. Confirm the expected approved values appear in the FBR fields.
-8. Confirm that Calculate, Save, Submit, Payment, Property, Wealth, and Computations are not automatically used.
+8. Confirm that Calculate, Save, Submit, Payment, Property, and Computations are not automatically used, and that Wealth rows were touched only if `TAXROCKET_WEALTH_AUTOFILL` was on.
 
 The download button serves the installer from:
 

@@ -400,6 +400,11 @@ export async function generateFilingPacketAction(
       salaryCertificate?.extractedData ?? null,
     );
 
+    const bankAccountsForPacket = await prisma.bankAccount.findMany({
+      where: { filingDraftId: draft.id, userId: draft.userId },
+      select: { id: true, iban: true },
+    });
+
     // Build portalFieldMap using IRIS codes for Electron agent
     const portalFieldMap = buildPortalFieldMap({
       taxYear: draftData.taxYear,
@@ -425,6 +430,25 @@ export async function generateFilingPacketAction(
       taxWithheld: draftData.taxWithheld ? Number(draftData.taxWithheld) : 0,
       salaryCertificateTaxWithheld,
       salaryCertificateGrossSalary,
+      // Wealth Statement bank rows (7030): IBAN + closing balance per account.
+      bankAccounts:
+        "preview" in reconciliation && reconciliation.preview
+          ? reconciliation.preview.accountBalances.flatMap((balance) => {
+              const account = bankAccountsForPacket.find(
+                (candidate) => candidate.id === balance.bankAccountId,
+              );
+              return account?.iban
+                ? [
+                    {
+                      iban: account.iban,
+                      bankName: balance.bankName,
+                      accountLabel: balance.accountLabel,
+                      closingBalance: balance.closingBalance,
+                    },
+                  ]
+                : [];
+            })
+          : [],
     });
     const routeMetadata = buildPacketRouteMetadata({
       taxYear: draftData.taxYear,

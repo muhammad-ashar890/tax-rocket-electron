@@ -14,6 +14,7 @@ import { getServerSession } from "next-auth/next";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { deriveOpeningBalance, toMoneyAmount } from "@/lib/money";
+import { findPakistaniIbans } from "@/lib/tax/bank-statement-fields";
 import {
   getTaxYearStatementRange,
   validateDateWithinTaxYear,
@@ -453,8 +454,20 @@ export async function extractStructuredBankDocumentAction(documentId: string) {
         last.balance === null ? null : toMoneyAmount(last.balance);
     }
 
+    // Exports often print the IBAN in a header row above the table. Use it
+    // only when exactly one valid IBAN appears; otherwise the review form shows
+    // a blank required IBAN field for the user to fill in.
+    const ibansInSheet = findPakistaniIbans(
+      rows
+        .slice(0, Math.max(headerIndex, 0))
+        .map((row) => row.map((cell) => String(cell ?? "")).join(" "))
+        .join(" "),
+    );
     const fields = [
       { label: "Currency", value: "PKR", confidence: 1 },
+      ...(ibansInSheet.length === 1
+        ? [{ label: "IBAN", value: ibansInSheet[0], confidence: 1 }]
+        : []),
       {
         label: "From Date",
         value: statementStartDate.toISOString().slice(0, 10),

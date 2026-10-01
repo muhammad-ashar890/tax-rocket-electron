@@ -46,7 +46,7 @@ const DESCRIPTION_SELECTOR = ".row-description-text";
  * a stale copy is a correctness risk, not a cosmetic one — main.js refuses to run
  * the real-portal flow when the three files disagree.
  */
-const BUILD_TAG = "fix26-salary-withholding-grid-settle-20260930";
+const BUILD_TAG = "fix28-wealth-driver-20261001";
 
 /** Outcome reason codes. `filled` is the only success. */
 const FILL_STATUS = {
@@ -66,7 +66,17 @@ const FILL_STATUS = {
   UNVERIFIED_TARGET: "unverified_target",
   /** The element no longer holds what we wrote (Angular rewrote/rejected it). */
   READBACK_MISMATCH: "readback_mismatch",
+  /**
+   * The cell already holds a DIFFERENT non-empty figure. IRIS (or the taxpayer)
+   * put it there, so it is treated as authoritative: never silently replaced.
+   */
+  OVERWRITE_NEEDS_CONFIRMATION: "overwrite_needs_confirmation",
+  /** The cell already holds exactly the planned figure; nothing to write. */
+  ALREADY_CORRECT: "already_correct",
 };
+
+/** Statuses that mean "the cell ends up holding the packet value". */
+const SUCCESS_STATUSES = new Set(["filled", "already_correct"]);
 
 /**
  * Amounts the portal will actually accept. The captured amount inputs are
@@ -238,9 +248,14 @@ function buildInPageFillScript(fields, options) {
 
     // Row ids repeat (summary row + child row share a code). Prefer a row that
     // actually has an editable cell; that is the data-entry row.
-    const findRows = (code) =>
+    const findRows = (code, descriptionIncludes) =>
       Array.from(document.querySelectorAll(CFG.rowSelector)).filter(
-        (r) => r.id === String(code)
+        (r) =>
+          r.id === String(code) &&
+          // Rows that share a code (one 7030 row per bank account) are told
+          // apart by text IRIS prints in the row, e.g. the IBAN.
+          (!descriptionIncludes ||
+            norm(descOf(r)).includes(norm(descriptionIncludes)))
       );
 
     const pickRow = (rows) => {
@@ -394,7 +409,7 @@ function buildInPageFillScript(fields, options) {
       const amount = { value: String(field.value) };
       if (field.roundedFrom) base.roundedFrom = field.roundedFrom;
 
-      const rows = findRows(field.irisCode);
+      const rows = findRows(field.irisCode, field.rowDescriptionIncludes);
       if (!rows.length) {
         results.push({ ...base, status: S.ROW_NOT_FOUND });
         continue;
@@ -509,6 +524,29 @@ function buildInPageFillScript(fields, options) {
         continue;
       }
 
+      // Overwrite guard. A non-empty cell is somebody's data. Identical figure:
+      // nothing to do. Different figure: stop and report both values; the
+      // operator decides. Empty or "0" is IRIS's blank state, safe to fill.
+      const existingDigits = (input.value || "").replace(/[\\s,]/g, "");
+      const existingIsBlank = existingDigits === "" || /^0+(\\.0+)?$/.test(existingDigits);
+      if (!existingIsBlank) {
+        const sameFigure = existingDigits === amount.value;
+        if (sameFigure) {
+          results.push({
+            ...base, status: S.ALREADY_CORRECT, columnIndex: index, matchedBy,
+            rowDescription: descOf(row), existingValue: input.value,
+            plannedValue: amount.value, dryRun: Boolean(CFG.dryRun),
+          });
+          continue;
+        }
+        results.push({
+          ...base, status: S.OVERWRITE_NEEDS_CONFIRMATION, columnIndex: index,
+          matchedBy, rowDescription: descOf(row), existingValue: input.value,
+          plannedValue: amount.value, dryRun: Boolean(CFG.dryRun),
+        });
+        continue;
+      }
+
       if (CFG.dryRun) {
         results.push({
           ...base, status: S.FILLED, columnIndex: index, matchedBy,
@@ -571,6 +609,67 @@ function buildInPageFillScript(fields, options) {
 }
 
 /**
+ * READ-ONLY snapshot of every data row on the screen: code, description and the
+ * current value of each cell. It never focuses, types, clicks or dispatches an
+ * event, so it is safe to run before any write and in dry-run mode.
+ */
+function buildInPageSnapshotScript() {
+  return `
+  (() => {
+    const clean = (v) => String(v == null ? "" : v).replace(/\\s+/g, " ").trim();
+    return Array.from(document.querySelectorAll(${JSON.stringify(ROW_SELECTOR)})).map((row) => {
+      const desc = row.querySelector(${JSON.stringify(DESCRIPTION_SELECTOR)});
+      const cells = Array.from(row.querySelectorAll(${JSON.stringify(CELL_WRAPPER_SELECTOR)})).map((w) => {
+        const el = w.querySelector('input:not([type="hidden"]), select, textarea');
+        return el
+          ? { value: clean(el.value), editable: !el.disabled && !el.readOnly }
+          : null;
+      });
+      return { code: row.id, description: desc ? clean(desc.textContent) : "", cells };
+    });
+  })()
+  `;
+}
+
+/** A cell value that is neither empty nor IRIS's zero placeholder. */
+function isNonBlankAmount(value) {
+  const digits = String(value == null ? "" : value).replace(/[\s,]/g, "");
+  return digits !== "" && !/^0+(\.0+)?$/.test(digits);
+}
+
+/**
+ * Compare a snapshot against the packet. Returns the rows that already carry a
+ * figure IRIS (or the taxpayer) entered but which the packet does not cover, so
+ * the operator is warned instead of the agent assuming the draft is clean.
+ */
+function findUnexpectedPrefill(snapshot, plannedCodes) {
+  const planned = new Set((plannedCodes || []).map((c) => String(c)));
+  const out = [];
+  for (const row of snapshot || []) {
+    if (planned.has(String(row.code))) continue;
+    const filledEditable = (row.cells || [])
+      .map((cell, columnIndex) => ({ cell, columnIndex }))
+      .filter(({ cell }) => cell && cell.editable && isNonBlankAmount(cell.value));
+    if (!filledEditable.length) continue;
+    out.push({
+      code: row.code,
+      description: row.description,
+      cells: filledEditable.map(({ cell, columnIndex }) => ({
+        columnIndex,
+        value: cell.value,
+      })),
+    });
+  }
+  return out;
+}
+
+async function snapshotIrisRows(windowInstance) {
+  return windowInstance.webContents.executeJavaScript(
+    buildInPageSnapshotScript(),
+  );
+}
+
+/**
  * Turn a packet autofill field into the shape the in-page script consumes.
  * Column resolution happens here (Node side) so the alias table stays in one
  * place and is unit-testable without a browser.
@@ -600,6 +699,7 @@ function prepareField(field) {
     amountReason: amount.ok ? null : amount.reason,
     amountExact: amount.ok ? amount.exact : false,
     roundedFrom: amount.ok && !amount.exact ? String(field.value) : undefined,
+    rowDescriptionIncludes: field.rowDescriptionIncludes || undefined,
     headerPatterns: Array.from(new Set(headerPatterns)),
     fallbackIndex: intent != null ? FOUR_COLUMN_FALLBACK[intent] : undefined,
   };
@@ -651,10 +751,14 @@ function summarise(results) {
   for (const r of results || []) {
     byStatus[r.status] = (byStatus[r.status] || 0) + 1;
   }
-  const filled = byStatus[FILL_STATUS.FILLED] || 0;
+  const filled = Array.from(SUCCESS_STATUSES).reduce(
+    (sum, status) => sum + (byStatus[status] || 0),
+    0,
+  );
   return {
     total: (results || []).length,
     filled,
+    alreadyCorrect: byStatus[FILL_STATUS.ALREADY_CORRECT] || 0,
     skipped: (results || []).length - filled,
     byStatus,
   };
@@ -668,8 +772,10 @@ function describeFillSummary(summary) {
   if (!summary || !summary.total)
     return "No IRIS-coded fields were available to fill.";
   const parts = [`${summary.filled}/${summary.total} fields filled`];
+  if (summary.alreadyCorrect)
+    parts.push(`${summary.alreadyCorrect} already correct (left untouched)`);
   const skips = Object.entries(summary.byStatus || {})
-    .filter(([status]) => status !== FILL_STATUS.FILLED)
+    .filter(([status]) => !SUCCESS_STATUSES.has(status))
     .map(([status, count]) => `${count} ${status}`);
   if (skips.length) parts.push(`skipped: ${skips.join(", ")}`);
   return parts.join("; ");
@@ -688,6 +794,11 @@ module.exports = {
   normaliseText,
   prepareField,
   buildInPageFillScript,
+  buildInPageSnapshotScript,
+  snapshotIrisRows,
+  findUnexpectedPrefill,
+  isNonBlankAmount,
+  SUCCESS_STATUSES,
   fillIrisRows,
   summarise,
   describeFillSummary,

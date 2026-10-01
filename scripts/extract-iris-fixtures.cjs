@@ -36,6 +36,12 @@ const FIXTURES = [
   ["IRIS 2.0 form 6.html", "computations.html", "Computations"],
   ["IRIS 2.0 form 8.html", "assets.html", "Personal Assets / Liabilities"],
   [
+    // After adding a bank through the Bank Account(s) modal (2026-10-01).
+    "bank account field visibleIRIS 2.0.html",
+    "assets-with-bank.html",
+    "Personal Assets / Liabilities",
+  ],
+  [
     "IRIS 2.0 form 9.html",
     "reconciliation.html",
     "Reconciliation of Net Assets",

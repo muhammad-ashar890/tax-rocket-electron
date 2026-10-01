@@ -4,12 +4,19 @@ import { getServerSession } from "next-auth/next";
 
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { validatePakistaniIban } from "@/lib/tax/iban";
 
 export type BankAccountInput = {
   id?: string;
   bankName: string;
   accountLabel: string;
   accountNumberMasked?: string;
+  /**
+   * Not asked for here: it is read from the bank statement (a required field of
+   * the statement review). Kept only so an IBAN already on the account is
+   * carried through a re-save instead of being wiped.
+   */
+  iban?: string;
   currency?: string;
 };
 
@@ -50,6 +57,43 @@ export async function saveBankAccountsAction(
       currency: account.currency?.trim().toUpperCase() || "PKR",
     }));
 
+    const existing = await prisma.bankAccount.findMany({
+      where: { filingDraftId: draft.id, userId: draft.userId },
+      select: { id: true, iban: true },
+    });
+    const existingIds = new Set(existing.map((account) => account.id));
+    const existingIbanById = new Map(
+      existing.map((account) => [account.id, account.iban] as const),
+    );
+
+    // The IBAN comes from the statement. A re-save of this list must neither
+    // require it nor erase it; anything typed in is still validated.
+    const ibans: (string | null)[] = [];
+    for (const account of accounts) {
+      const typed = (account.iban ?? "").trim();
+      if (typed) {
+        const validation = validatePakistaniIban(typed);
+        if (!validation.valid) {
+          return {
+            success: false,
+            error: `${account.bankName.trim() || "Bank account"} — ${account.accountLabel.trim() || "unnamed"}: ${validation.error}`,
+          };
+        }
+        ibans.push(validation.iban);
+      } else {
+        ibans.push(
+          (account.id ? existingIbanById.get(account.id) : null) ?? null,
+        );
+      }
+    }
+    const present = ibans.filter((iban): iban is string => Boolean(iban));
+    if (new Set(present).size !== present.length) {
+      return {
+        success: false,
+        error: "Each bank account needs its own IBAN — one IBAN is used twice",
+      };
+    }
+
     if (
       normalized.some((account) => !account.bankName || !account.accountLabel)
     ) {
@@ -69,19 +113,14 @@ export async function saveBankAccountsAction(
       };
     }
 
-    const existing = await prisma.bankAccount.findMany({
-      where: { filingDraftId: draft.id, userId: draft.userId },
-      select: { id: true },
-    });
-    const existingIds = new Set(existing.map((account) => account.id));
-
     const saved = await prisma.$transaction(async (tx) => {
       const savedAccounts = [];
-      for (const account of accounts) {
+      for (const [accountIndex, account] of accounts.entries()) {
         const normalizedAccount = {
           bankName: account.bankName.trim(),
           accountLabel: account.accountLabel.trim(),
           accountNumberMasked: account.accountNumberMasked?.trim() || null,
+          iban: ibans[accountIndex],
           currency: account.currency?.trim().toUpperCase() || "PKR",
         };
 
@@ -98,6 +137,7 @@ export async function saveBankAccountsAction(
                 bankName: true,
                 accountLabel: true,
                 accountNumberMasked: true,
+                iban: true,
                 currency: true,
               },
             }),
@@ -111,7 +151,14 @@ export async function saveBankAccountsAction(
                   accountLabel: normalizedAccount.accountLabel,
                 },
               },
-              update: normalizedAccount,
+              // Never null out an IBAN already read from a statement.
+              update: normalizedAccount.iban
+                ? normalizedAccount
+                : {
+                    bankName: normalizedAccount.bankName,
+                    accountNumberMasked: normalizedAccount.accountNumberMasked,
+                    currency: normalizedAccount.currency,
+                  },
               create: {
                 ...normalizedAccount,
                 filingDraftId: draft.id,
@@ -122,6 +169,7 @@ export async function saveBankAccountsAction(
                 bankName: true,
                 accountLabel: true,
                 accountNumberMasked: true,
+                iban: true,
                 currency: true,
               },
             }),
@@ -180,6 +228,7 @@ export async function getBankAccountsAction(draftId: string) {
         bankName: true,
         accountLabel: true,
         accountNumberMasked: true,
+        iban: true,
         currency: true,
       },
     });

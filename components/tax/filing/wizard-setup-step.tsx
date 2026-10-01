@@ -266,6 +266,7 @@ export function WizardSetupStep({
           clientId: crypto.randomUUID(),
           bankName: "",
           accountLabel: `Account ${bankAccounts.length + 1}`,
+          iban: "",
         },
       ]);
     }
@@ -281,7 +282,7 @@ export function WizardSetupStep({
       <div className="space-y-6">
         <StepHeading
           title="Which bank accounts did you use?"
-          description="Add every account used during this tax year. Statements will be uploaded separately later."
+          description="Add every account used during this tax year. Statements will be uploaded separately later; the IBAN is read from each statement."
         />
         <div className="space-y-4">
           {bankAccounts.map((account, index) => (
