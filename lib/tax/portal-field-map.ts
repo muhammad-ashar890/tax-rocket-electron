@@ -118,6 +118,12 @@ export type PortalFieldMap = {
   incomeFields: PortalFieldMapEntry[];
   adjustableTaxFields: PortalFieldMapEntry[];
   wealthFields: PortalFieldMapEntry[];
+  /**
+   * Employer names to add on the IRIS Salary page (Employer Details). Names
+   * only: IRIS fills the registration number when the exact registered name is
+   * chosen from its list, so the agent never types a registration number.
+   */
+  employers?: string[];
   /** Codes with no verified IRIS target, reported rather than guessed. */
   mappingGaps?: PortalMappingGaps;
   computationHints: {
@@ -505,15 +511,30 @@ export function describeUnmappedPortalSources(gaps: unknown): {
     )
     .join(", ");
 
-  return {
-    blocked,
-    refusal:
-      `Your filing packet needs a manual IRIS entry for ${listed}. ` +
-      "The desktop agent cannot enter this item automatically. You can still " +
+  // The reconciliation amount is TaxRocket's own balancing entry, not income:
+  // there is no IRIS field to "choose", so the wording differs.
+  const onlyReconciliation = blocked.every((gap) =>
+    gap.category.startsWith("RECONCILIATION_ADJUSTMENT"),
+  );
+  const instruction = onlyReconciliation
+    ? "This is a notice, not an error: the desktop agent does not enter this " +
+      "item. The reconciliation amount is TaxRocket's own balancing entry. " +
+      "IRIS has no field the agent may fill for it without declaring " +
+      'something on your behalf (an "Other" inflow tells FBR where money ' +
+      "came from), and IRIS works out its own reconciliation from the rows " +
+      "entered. After the agent finishes, check the Unreconciled amount in " +
+      "IRIS and enter or explain any difference yourself. Before continuing, " +
+      "confirm that you will handle it yourself in IRIS or that it should not " +
+      "be entered anywhere."
+    : "The desktop agent cannot enter this item automatically. You can still " +
       "generate the packet and use the PDF as a guide, then enter or explain " +
       "this amount yourself in IRIS. Before continuing, please tell TaxRocket " +
       "which FBR/IRIS field should receive this amount, or confirm that it " +
-      "should not be entered anywhere.",
+      "should not be entered anywhere.";
+
+  return {
+    blocked,
+    refusal: `Your filing packet needs a manual IRIS entry for ${listed}. ${instruction}`,
     coverage: {
       mode: "partial_manual_entry_required",
       acceptedByOperator: true,
@@ -532,6 +553,8 @@ export function buildPortalFieldMap(params: {
   salaryCertificateTaxWithheld?: number | null;
   /** Annual gross pay is the salary tax base; bank deposits remain cash evidence. */
   salaryCertificateGrossSalary?: number | null;
+  /** Employer names from the reviewed salary certificate. */
+  employers?: string[];
   taxableIncome?: number;
   taxWithheld?: number;
   /**
@@ -563,6 +586,7 @@ export function buildPortalFieldMap(params: {
     taxableIncome = 0,
     taxWithheld = 0,
     bankAccounts = [],
+    employers = [],
     pensionDetails,
   } = params;
 
@@ -1093,6 +1117,7 @@ export function buildPortalFieldMap(params: {
     incomeFields,
     adjustableTaxFields,
     wealthFields,
+    ...(employers.length > 0 ? { employers } : {}),
     mappingGaps: {
       wealthUnmappedExpenses: [...wealthUnmappedExpenses.entries()]
         .map(([category, totalAmount]) => ({ category, totalAmount }))

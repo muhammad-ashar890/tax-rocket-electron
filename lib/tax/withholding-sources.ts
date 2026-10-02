@@ -1,5 +1,8 @@
 import { toMoneyAmount, type MoneyInput } from "@/lib/money";
-import { extractSalaryCertificateAmounts } from "@/lib/tax/salary-certificate-fields";
+import {
+  extractSalaryCertificateAmounts,
+  extractSalaryCertificateEmployers,
+} from "@/lib/tax/salary-certificate-fields";
 import { prisma } from "@/lib/prisma";
 
 /**
@@ -189,6 +192,10 @@ export function resolveTaxWithheld(input: {
  * salary rows are cash movements; this is the source used for the salary tax
  * base and the IRIS salary income row.
  */
+export function extractMappedSalaryEmployers(extractedData: string | null) {
+  return extractSalaryCertificateEmployers(extractedData);
+}
+
 export function extractMappedSalaryGross(extractedData: string | null) {
   return extractSalaryCertificateAmounts(extractedData).grossSalary;
 }

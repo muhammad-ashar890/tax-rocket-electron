@@ -19,6 +19,7 @@ import {
   describeUnmappedPortalSources,
 } from "@/lib/tax/portal-field-map";
 import {
+  extractMappedSalaryEmployers,
   extractMappedSalaryGross,
   extractMappedSalaryWithholding,
 } from "@/lib/tax/withholding-sources";
@@ -430,6 +431,11 @@ export async function generateFilingPacketAction(
       taxWithheld: draftData.taxWithheld ? Number(draftData.taxWithheld) : 0,
       salaryCertificateTaxWithheld,
       salaryCertificateGrossSalary,
+      // Employers named on the reviewed salary certificate; the agent adds
+      // each one by name on the IRIS Salary page.
+      employers: extractMappedSalaryEmployers(
+        salaryCertificate?.extractedData ?? null,
+      ),
       // Wealth Statement bank rows (7030): IBAN + closing balance per account.
       bankAccounts:
         "preview" in reconciliation && reconciliation.preview

@@ -46,12 +46,17 @@ let workerIdleAnnounced = false;
 // currently running, so the failure handler in processLocalJob can persist
 // the FULL step history instead of a single generic line.
 let activeJobExecutionLog = null;
+// TaxRocket buttons the taxpayer pressed before the current run (read from the
+// job payload); printed in the job report.
+let activeJobConfirmations = [];
 let realEntryFallbackAnnounced = false;
 let realPortalMode = false;
 let realPortalLoginUrl = "";
 const irisNavigation = require("./iris-navigation");
 const irisRowFiller = require("./iris-row-filler");
 const irisWealthDriver = require("./iris-wealth-driver");
+const irisEmployerDriver = require("./iris-employer-driver");
+const { buildJobReport } = require("./job-report");
 // Phase 1 — real-portal autofill.
 //
 // Until now every real-IRIS job short-circuited into a navigation-only
@@ -85,11 +90,24 @@ function getRealAutofillMode() {
  * IRIS modals, which is a bigger step, so it has its own switch:
  *
  *   TAXROCKET_WEALTH_AUTOFILL=on   drive the Wealth modals (live) / plan them (dry)
+ *   TAXROCKET_EMPLOYER_AUTOFILL=on add the packet's employers by registered name (live) / plan (dry)
  *   (unset)                        wealth figures stay "prepared, not entered"
  *
  * It only ever applies on top of TAXROCKET_REAL_AUTOFILL: dry mode reports what
  * it would add without clicking, live mode adds and fills. Never Save/Calculate.
  */
+/**
+ * Employer Details on the IRIS Salary page. Opt-in like the wealth driver:
+ * TAXROCKET_EMPLOYER_AUTOFILL=on adds each employer named in the approved packet
+ * by its registered name (live) or only reports what it would add (dry).
+ */
+function getEmployerAutofillEnabled() {
+  const raw = String(process.env.TAXROCKET_EMPLOYER_AUTOFILL || "")
+    .trim()
+    .toLowerCase();
+  return ["1", "true", "on", "yes", "live"].includes(raw);
+}
+
 function getWealthAutofillEnabled() {
   const raw = String(process.env.TAXROCKET_WEALTH_AUTOFILL || "")
     .trim()
@@ -128,7 +146,7 @@ function resolveAutofillMode(jobContext) {
 }
 // Independent controller stamp: a new navigator must not make an OLD main
 // process appear fully updated (the mixed fix10/fix11 rollout hid this).
-const AGENT_BUILD_TAG = "fix28-wealth-driver-20261001";
+const AGENT_BUILD_TAG = "fix34-tax-year-employer-20261002";
 function getAgentBuildLabel() {
   return `${AGENT_BUILD_TAG} | navigator: ${irisNavigation.BUILD_TAG} | filler: ${irisRowFiller.BUILD_TAG}`;
 }
@@ -3673,7 +3691,12 @@ async function runLocalIrisNavigationCheck(jobContext, job) {
   const executionLog = [];
   activeJobExecutionLog = executionLog;
   const onStep = (step, detail) => {
-    executionLog.push({ step, label: step.replace(/_/g, " "), detail });
+    executionLog.push({
+      step,
+      label: step.replace(/_/g, " "),
+      detail,
+      at: new Date().toISOString(),
+    });
     pushStatus("progress", detail);
   };
   onStep(
@@ -3852,6 +3875,8 @@ async function runLocalIrisNavigationCheck(jobContext, job) {
       "The requested part of the FBR return could not be opened safely. Your progress is retained; choose Continue to try again. No amounts were changed.",
     portal_section_capture:
       "The current part of the FBR return is not ready. No fields were mislabeled or changed. Choose Continue to try again.",
+    portal_employer_review:
+      "An employer could not be added by its exact registered name. Add it in the FBR window (Employment > Salary > + Add Employer Details), then choose Continue. Nothing was saved or submitted.",
     portal_autofill_review:
       "Some approved packet fields could not be placed safely. Review the named fields in the FBR window. Nothing was saved or submitted.",
     portal_identity_changed:
@@ -3966,7 +3991,12 @@ async function runRealIrisAutofill(jobContext, job, mode) {
   activeJobExecutionLog = executionLog;
 
   const onStep = (step, detail) => {
-    executionLog.push({ step, label: step.replace(/_/g, " "), detail });
+    executionLog.push({
+      step,
+      label: step.replace(/_/g, " "),
+      detail,
+      at: new Date().toISOString(),
+    });
     pushStatus("progress", detail);
   };
 
@@ -4059,6 +4089,127 @@ async function runRealIrisAutofill(jobContext, job, mode) {
 
   let results = [];
   const unexpectedPrefill = [];
+
+  // Employer Details (Employment > Salary). Names only: IRIS fills the
+  // registration number when the exact registered name is chosen. Done before
+  // the salary figures so an employer card appearing cannot disturb them.
+  const employersPrepared = irisEmployerDriver.planEmployers(
+    snapshot.portalFieldMapDetailed?.employers,
+  );
+  const employerConfirmed =
+    employersPrepared.length > 0 && hasConfirmedEmployerReview(jobContext);
+  const employerEnabled =
+    employersPrepared.length > 0 &&
+    getEmployerAutofillEnabled() &&
+    !employerConfirmed;
+  let employerOutcome = null;
+  if (employerConfirmed) {
+    onStep(
+      "real_autofill_employer_confirmed",
+      `The taxpayer confirmed that the employer details were added in FBR (${employersPrepared.join(
+        "; ",
+      )}). The agent trusts that and does not search or change employers again.`,
+    );
+  }
+  if (employersPrepared.length && !employerEnabled && !employerConfirmed) {
+    onStep(
+      "real_autofill_employer_prepared",
+      `${employersPrepared.length} employer(s) are in the packet (${employersPrepared.join(
+        "; ",
+      )}) but TAXROCKET_EMPLOYER_AUTOFILL is off, so they are NOT added. Add them in the FBR window (Employment > Salary > + Add Employer Details).`,
+    );
+  }
+  if (employerEnabled) {
+    onStep(
+      "real_autofill_employer_start",
+      `Employer Details (${mode === "dry" ? "DRY - nothing clicked" : "LIVE"}): ${employersPrepared.length} employer(s) by registered name. The agent never types a registration number and never picks a name that is not an exact match.`,
+    );
+    try {
+      employerOutcome = await irisEmployerDriver.runEmployerDriver(
+        windowInstance,
+        employersPrepared,
+        {
+          mode: mode === "dry" ? "dry" : "live",
+          navigate: (sectionId) =>
+            irisNavigation.navigateToSection(windowInstance, {
+              sectionId,
+              taxYear,
+              taxpayerIdentifier,
+            }),
+          beforeStep: () =>
+            ensureNavigationJobActive(
+              job.id,
+              String(taxpayerIdentifier || "")
+                .trim()
+                .replace(/[ -]/g, ""),
+            ),
+          onStep,
+        },
+      );
+    } catch (error) {
+      onStep(
+        "real_autofill_employer_error",
+        `Employer driver stopped: ${error instanceof Error ? error.message : String(error)}. Nothing further was clicked.`,
+      );
+      employerOutcome = {
+        results: employersPrepared.map((name) => ({
+          name,
+          status: irisEmployerDriver.EMPLOYER_STATUS.SETUP_FAILED,
+          setupStatus: "driver_error",
+        })),
+        setup: [],
+      };
+    }
+  }
+  const employerIssues = employerOutcome
+    ? irisEmployerDriver.describeEmployerIssues(employerOutcome.results)
+    : [];
+  const employersResult = {
+    enabled: employerEnabled,
+    mode,
+    prepared: employersPrepared,
+    confirmedByTaxpayer: employerConfirmed,
+    summary: employerOutcome
+      ? irisEmployerDriver.summariseEmployers(employerOutcome.results)
+      : null,
+    results: employerOutcome?.results || [],
+  };
+  // Employers come first. When one cannot be added by its exact registered name
+  // the run stops HERE: the taxpayer adds it in IRIS and presses Continue, and
+  // the figures are entered on the resumed run (which is idempotent).
+  if (employerIssues.length) {
+    const pauseMessage =
+      `Employer details need you: ${employerIssues.join(". ")}. ` +
+      `Add the employer yourself in the FBR window (Employment > Salary > + Add Employer Details), ` +
+      `then press "I have added the employer in FBR - Continue". ` +
+      `The salary and wealth figures have not been entered yet; they are entered after you continue. ` +
+      `Nothing was saved, submitted, calculated, or paid.`;
+    onStep("real_autofill_employer_pause", pauseMessage);
+    return {
+      paused: true,
+      pauseAction: getEmployerReviewAction(),
+      pauseMessage,
+      executionLog,
+      result: {
+        mode,
+        summary: { total: 0, filled: 0, skipped: 0, byStatus: {} },
+        salarySummary: { total: 0, filled: 0, skipped: 0, byStatus: {} },
+        results: [],
+        message: pauseMessage,
+        wealthPrepared: wealthPrepared.map((f) => ({
+          irisCode: f.irisCode,
+          label: f.label,
+          value: f.value,
+        })),
+        wealth: { enabled: false, mode, summary: null, setup: [] },
+        employers: employersResult,
+        unexpectedPrefill: [],
+        overwriteConflicts: [],
+        reviewRequired: true,
+        handoffReviewConfirmed: false,
+      },
+    };
+  }
   if (!plan.groups.length) {
     onStep(
       "real_autofill_no_plan",
@@ -4162,7 +4313,9 @@ async function runRealIrisAutofill(jobContext, job, mode) {
           "real_autofill_unexpected_prefill",
           `${row.code} "${row.description}" already holds ${row.cells
             .map((cell) => cell.value)
-            .join(" / ")} in IRIS but is not in the TaxRocket packet. Left untouched.`,
+            .join(
+              " / ",
+            )} in IRIS but is not in the TaxRocket packet. Left untouched.`,
         );
       }
     } catch (error) {
@@ -4282,8 +4435,7 @@ async function runRealIrisAutofill(jobContext, job, mode) {
   ];
   const fillMessage = irisRowFiller.describeFillSummary(summary);
   const overwriteConflicts = results.filter(
-    (r) =>
-      r.status === irisRowFiller.FILL_STATUS.OVERWRITE_NEEDS_CONFIRMATION,
+    (r) => r.status === irisRowFiller.FILL_STATUS.OVERWRITE_NEEDS_CONFIRMATION,
   );
   const autofillReviewRequired =
     summary.skipped > 0 || unexpectedPrefill.length > 0;
@@ -4293,7 +4445,9 @@ async function runRealIrisAutofill(jobContext, job, mode) {
           (r) =>
             `${r.irisCode} (IRIS ${r.existingValue}, packet ${r.plannedValue})`,
         )
-        .join("; ")} — it was NOT overwritten. Decide which figure is right in the FBR window.`
+        .join(
+          "; ",
+        )} — it was NOT overwritten. Decide which figure is right in the FBR window.`
     : "";
   const prefillText = unexpectedPrefill.length
     ? ` IRIS also holds figures the packet does not cover: ${unexpectedPrefill
@@ -4301,15 +4455,39 @@ async function runRealIrisAutofill(jobContext, job, mode) {
           (row) =>
             `${row.code} ${row.cells.map((cell) => cell.value).join("/")}`,
         )
-        .join("; ")} — the IRIS total will differ from the packet until this is resolved.`
+        .join(
+          "; ",
+        )} — the IRIS total will differ from the packet until this is resolved.`
     : "";
+  // A clean LIVE fill in an assisted-filing job hands the rest of the return to
+  // the taxpayer: the agent shows the pages it does not fill and waits for the
+  // taxpayer's Continue. The resumed run sees the recorded confirmation and
+  // finishes without pausing again.
+  const handoffReviewDue =
+    mode === "live" &&
+    !autofillReviewRequired &&
+    job?.type === "tax_assisted_filing" &&
+    !hasConfirmedHandoffReview(jobContext);
+  if (handoffReviewDue) {
+    await runHandoffReviewTour(windowInstance, {
+      taxYear,
+      taxpayerIdentifier,
+      onStep,
+    });
+  }
   const pauseMessage = autofillReviewRequired
     ? `The FBR return opened, but ${summary.skipped} approved field(s) could not be placed safely (${fillMessage}).${conflictText}${prefillText} Review those fields in the FBR window. Nothing was saved, submitted, calculated, or paid.`
-    : null;
+    : handoffReviewDue
+      ? buildHandoffReviewMessage()
+      : null;
 
   return {
-    paused: autofillReviewRequired,
-    pauseAction: autofillReviewRequired ? "portal_autofill_review" : null,
+    paused: autofillReviewRequired || handoffReviewDue,
+    pauseAction: autofillReviewRequired
+      ? "portal_autofill_review"
+      : handoffReviewDue
+        ? getHandoffReviewAction()
+        : null,
     pauseMessage,
     executionLog,
     result: {
@@ -4329,7 +4507,9 @@ async function runRealIrisAutofill(jobContext, job, mode) {
           ...(placed
             ? {
                 status: placed.status,
-                ...(placed.setupStatus ? { setupStatus: placed.setupStatus } : {}),
+                ...(placed.setupStatus
+                  ? { setupStatus: placed.setupStatus }
+                  : {}),
               }
             : {}),
         };
@@ -4344,12 +4524,14 @@ async function runRealIrisAutofill(jobContext, job, mode) {
         setup: wealthOutcome?.setup || [],
       },
       unexpectedPrefill,
+      employers: employersResult,
       overwriteConflicts: overwriteConflicts.map((r) => ({
         irisCode: r.irisCode,
         existingValue: r.existingValue,
         plannedValue: r.plannedValue,
       })),
       reviewRequired: autofillReviewRequired,
+      handoffReviewConfirmed: hasConfirmedHandoffReview(jobContext),
     },
   };
 }
@@ -4370,6 +4552,109 @@ async function finishNavigationOnly(navigation, job) {
     executionLog: navigation.executionLog,
   });
   return { ...navigation, paused: true };
+}
+
+/**
+ * The pause the agent raises after a clean LIVE fill so the taxpayer reviews the
+ * parts of the return the agent does not touch. The pause action is recorded as
+ * a confirmation when the taxpayer presses Continue, and that confirmation is
+ * what lets the resumed run finish instead of pausing again.
+ */
+function getHandoffReviewAction() {
+  return "portal_handoff_review";
+}
+
+/**
+ * The pause raised when an employer could not be added by exact registered name.
+ * The taxpayer adds it in IRIS and presses Continue; that recorded confirmation
+ * makes the resumed run trust the taxpayer and skip the employer step, instead
+ * of searching again and pausing on the same employer.
+ */
+function getEmployerReviewAction() {
+  return "portal_employer_review";
+}
+
+function hasConfirmedEmployerReview(jobContext) {
+  const confirmations = jobContext?.livePilotState?.confirmations;
+  return (
+    Array.isArray(confirmations) &&
+    confirmations.some(
+      (entry) =>
+        String(entry?.action || "").toLowerCase() === getEmployerReviewAction(),
+    )
+  );
+}
+
+function hasConfirmedHandoffReview(jobContext) {
+  const confirmations = jobContext?.livePilotState?.confirmations;
+  return (
+    Array.isArray(confirmations) &&
+    confirmations.some(
+      (entry) =>
+        String(entry?.action || "").toLowerCase() === getHandoffReviewAction(),
+    )
+  );
+}
+
+/**
+ * Read-only tour of the pages the taxpayer must still review: property (top of
+ * Personal Assets), the Payment tab, and Computations. It only switches views;
+ * IRIS recalculates by itself while tabs switch, the agent never presses
+ * Calculate, Save or Submit. A view that will not open is reported, never
+ * forced.
+ */
+async function runHandoffReviewTour(
+  windowInstance,
+  { taxYear, taxpayerIdentifier, onStep },
+) {
+  const views = [
+    {
+      sectionId: "wealth_assets",
+      label:
+        "Personal Assets / Liabilities (Immovable Properties are at the top)",
+    },
+    { sectionId: "payment", label: "Payment tab" },
+    {
+      sectionId: "computations",
+      label: "Tax Chargeable / Payments - Computations",
+    },
+  ];
+  const opened = [];
+  const skipped = [];
+  for (const view of views) {
+    let moved;
+    try {
+      moved = await irisNavigation.navigateToSection(windowInstance, {
+        sectionId: view.sectionId,
+        taxYear,
+        taxpayerIdentifier,
+      });
+    } catch (error) {
+      moved = { ok: false, status: error?.message || "error" };
+    }
+    if (moved?.ok) {
+      opened.push(view.label);
+      onStep("handoff_review_opened", `Review view opened: ${view.label}.`);
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    } else {
+      skipped.push(view.label);
+      onStep(
+        "handoff_review_skipped",
+        `Review view could not be opened (${moved?.status || "unknown"}): ${view.label}. Open it yourself in the FBR window.`,
+      );
+    }
+  }
+  return { opened, skipped };
+}
+
+function buildHandoffReviewMessage() {
+  return (
+    "The agent finished entering your approved figures in the FBR draft. Now review the rest of the return in the FBR window: " +
+    "(1) Personal Assets / Liabilities - check Immovable Properties and every other asset you own, and add anything missing yourself. " +
+    "(2) Payment tab - check whether any payment is due; the agent never pays. " +
+    "(3) Computations - IRIS recalculates by itself when you switch tabs; compare the tax with TaxRocket's estimate and confirm the Reconciliation amount is 0. " +
+    "When everything is correct, press Continue here. The agent did not press Calculate, and nothing was saved, submitted or paid."
+  );
 }
 
 /**
@@ -4422,17 +4707,54 @@ function buildHandoffScopeSummary(
         : wealthState === "entered_not_calculated"
           ? `Wealth \u2705 ${wealthFilled}/${wealthTotal} row(s) entered \u2014 press Calculate in FBR and confirm the reconciliation difference is 0`
           : `Wealth \u26A0\uFE0F needs review (${wealthFilled}/${wealthTotal} row(s) entered)`;
+  const employers = extras.employers || null;
+  const employerRows = Array.isArray(employers?.prepared)
+    ? employers.prepared.length
+    : 0;
+  const employerEntered = Boolean(
+    employers && employers.enabled && employers.summary,
+  );
+  const employerState = !employerRows
+    ? "none"
+    : employers.confirmedByTaxpayer
+      ? "confirmed_by_taxpayer"
+      : !employerEntered
+        ? "pending"
+        : employers.mode === "dry"
+          ? "dry_run_only"
+          : Number(employers.summary.needsReview) > 0
+            ? "needs_review"
+            : "listed";
+  const employerText =
+    employerState === "none"
+      ? ""
+      : employerState === "confirmed_by_taxpayer"
+        ? ` \u00B7 Employers \u2705 added by the taxpayer in FBR`
+        : employerState === "pending"
+          ? ` \u00B7 Employers \u26A0\uFE0F pending (${employerRows} prepared, not added)`
+          : employerState === "dry_run_only"
+            ? ` \u00B7 Employers \u26A0\uFE0F dry run only (${employerRows} checked, nothing added)`
+            : employerState === "needs_review"
+              ? ` \u00B7 Employers \u26A0\uFE0F needs review (${employers.summary.ok}/${employers.summary.total} listed)`
+              : ` \u00B7 Employers \u2705 ${employers.summary.ok}/${employers.summary.total} listed`;
   return {
     wealthPreparedRows: wealthRows,
+    employers: employerState,
     salary: salaryNeedsReview
       ? "needs_review"
       : salaryTotal > 0 && salaryFilled === salaryTotal
         ? "filled"
         : "not_entered",
     wealthStatement: wealthState,
-    propertyPaymentsComputations: "pending",
+    propertyPaymentsComputations: extras.reviewConfirmed
+      ? "reviewed_by_taxpayer"
+      : "pending",
     readyToSubmit: false,
-    label: `${salaryText} \u00B7 ${wealthText} \u00B7 Return NOT ready to submit`,
+    label: `${salaryText} \u00B7 ${wealthText}${employerText}${
+      extras.reviewConfirmed
+        ? " \u00B7 Property, Payments and Computations reviewed by the taxpayer"
+        : ""
+    } \u00B7 Return NOT ready to submit`,
   };
 }
 
@@ -4480,6 +4802,8 @@ function mergeNavigationAutofillOutcome(navigation, autofill, autofillMode) {
       {
         salarySummary: autofill?.result?.salarySummary,
         wealth: autofill?.result?.wealth,
+        employers: autofill?.result?.employers,
+        reviewConfirmed: Boolean(autofill?.result?.handoffReviewConfirmed),
       },
     ),
     autofill: autofill?.result || null,
@@ -5581,8 +5905,51 @@ async function writeJobLogToDisk(job, data) {
       /[^a-zA-Z0-9_-]/g,
       "",
     );
+    // A job that pauses and is resumed runs several times under one id. Keep
+    // a compact record of the earlier runs inside the same file so a single
+    // file shows the whole story (for example, why a pause happened).
+    const jobFile = path.join(dir, `job-${id}.json`);
+    let previousRuns = [];
+    try {
+      const before = JSON.parse(fs.readFileSync(jobFile, "utf8"));
+      previousRuns = [
+        ...(Array.isArray(before.previousRuns) ? before.previousRuns : []),
+        {
+          savedAt: before.savedAt || null,
+          build: before.build || null,
+          finalStatus: before.finalStatus || null,
+          pauseAction: before.pauseAction || null,
+          pauseMessage: before.pauseMessage || null,
+          report: Array.isArray(before.report) ? before.report : undefined,
+          executionLog: (Array.isArray(before.executionLog)
+            ? before.executionLog
+            : []
+          ).map((entry) => ({
+            step: entry?.step,
+            at: entry?.at,
+            detail: String(entry?.detail ?? "").slice(0, 600),
+          })),
+        },
+      ].slice(-8);
+    } catch {
+      previousRuns = [];
+    }
+    const savedAt = new Date().toISOString();
+    let report = [];
+    try {
+      report = buildJobReport({
+        savedAt,
+        jobId: job?.id || null,
+        build: AGENT_BUILD_TAG,
+        confirmations: activeJobConfirmations,
+        ...data,
+      });
+    } catch (error) {
+      report = [`Report could not be built: ${String(error)}`];
+    }
     const payload = {
-      savedAt: new Date().toISOString(),
+      report,
+      savedAt,
       jobId: job?.id || null,
       jobType: job?.type || null,
       build: AGENT_BUILD_TAG,
@@ -5590,9 +5957,10 @@ async function writeJobLogToDisk(job, data) {
       runtimeMainFile: __filename,
       realPortalMode,
       ...data,
+      previousRuns,
     };
     const json = JSON.stringify(payload, null, 2);
-    fs.writeFileSync(path.join(dir, `job-${id}.json`), json, "utf8");
+    fs.writeFileSync(jobFile, json, "utf8");
     fs.writeFileSync(path.join(dir, "latest-job.json"), json, "utf8");
     return path.join(dir, "latest-job.json");
   } catch (error) {
@@ -5621,6 +5989,11 @@ async function processLocalJob(job) {
       if (job.payload.livePilotState) {
         context.livePilotState = job.payload.livePilotState;
       }
+      activeJobConfirmations = Array.isArray(
+        job.payload.livePilotState?.confirmations,
+      )
+        ? job.payload.livePilotState.confirmations
+        : [];
     }
 
     // Filing jobs always use the live FBR portal. Normalize the server response

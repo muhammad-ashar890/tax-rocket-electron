@@ -334,6 +334,9 @@ export function FilingWizard({
     handleSaveDocumentReview,
     handleMapDocument,
     handleSaveStatementIban,
+    handleSaveSalaryEmployers,
+    isSalaryEmployerDirty,
+    hasUnsavedSalaryEmployers,
   } = useFilingDocuments({
     draftId,
     step,
@@ -639,9 +642,7 @@ export function FilingWizard({
     employerCount: employerCount as "single" | "multiple" | "unsure",
     hasServicesIncome: hasServicesIncome as "yes" | "no" | "unsure",
     hasForeignIncomeOrAssets: hasForeignIncomeOrAssets as
-      | "yes"
-      | "no"
-      | "unsure",
+      "yes" | "no" | "unsure",
     hasAopCompanyLink: hasAopCompanyLink as "yes" | "no" | "unsure",
     highProfitOnDebt: highProfitOnDebt as "yes" | "no" | "unsure",
     filingIntent: filingIntent as "original" | "revised" | "unsure",
@@ -1191,8 +1192,7 @@ export function FilingWizard({
     if (currentStepKey === "residency") return Boolean(residencyStatus);
     if (currentStepKey === "bank_accounts") {
       return (
-        bankAccounts.length > 0 &&
-        bankAccounts.every(isBankAccountComplete)
+        bankAccounts.length > 0 && bankAccounts.every(isBankAccountComplete)
       );
     }
     // Readiness: every shown card must be tapped before leaving the step.
@@ -1652,6 +1652,9 @@ export function FilingWizard({
           );
         }
       }
+      if (currentStepKey === "documents" && hasUnsavedSalaryEmployers) {
+        b.push("Press Save employer to save the employer names you changed");
+      }
       if (currentStepKey === "bank_intelligence") {
         if (!bankStatementSaved) {
           b.push("Save statement balances before continuing");
@@ -1719,6 +1722,7 @@ export function FilingWizard({
     return b;
   }, [
     draftId,
+    hasUnsavedSalaryEmployers,
     isPipelinePhase,
     filerType,
     businessStructure,
@@ -1797,6 +1801,13 @@ export function FilingWizard({
         );
         return;
       }
+    }
+
+    if (navigationStepKey === "documents" && hasUnsavedSalaryEmployers) {
+      setFilingActionError(
+        "The employer names on the salary certificate were changed but not saved. Press Save employer first, then continue.",
+      );
+      return;
     }
 
     if (navigationStepKey === "documents") {
@@ -2230,6 +2241,8 @@ export function FilingWizard({
         handleSaveDocumentReview={handleSaveDocumentReview}
         handleMapDocument={handleMapDocument}
         handleSaveStatementIban={handleSaveStatementIban}
+        handleSaveSalaryEmployers={handleSaveSalaryEmployers}
+        isSalaryEmployerDirty={isSalaryEmployerDirty}
       />
     );
   }

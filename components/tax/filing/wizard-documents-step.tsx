@@ -18,7 +18,10 @@ import { getTaxYearDateInputBounds } from "@/lib/tax/tax-year-period";
 import { isDocumentExtractionLeaseStale } from "@/lib/tax/document-extraction-state";
 import {
   getSalaryCertificateFieldKind,
+  isSalaryCertificateRequiredField,
   hasRequiredSalaryCertificateAmounts,
+  hasRequiredSalaryCertificateEmployer,
+  checkSalaryCertificateTaxYear,
 } from "@/lib/tax/salary-certificate-fields";
 import {
   hasRequiredBankStatementIban,
@@ -101,6 +104,8 @@ type WizardDocumentsStepProps = Readonly<{
   handleSaveDocumentReview: (documentType: string) => void;
   handleMapDocument: (documentType: string) => void;
   handleSaveStatementIban: (documentType: string) => void;
+  handleSaveSalaryEmployers: (documentType: string) => void;
+  isSalaryEmployerDirty: (documentType: string) => boolean;
 }>;
 
 export function WizardDocumentsStep({
@@ -126,6 +131,8 @@ export function WizardDocumentsStep({
   handleSaveDocumentReview,
   handleMapDocument,
   handleSaveStatementIban,
+  handleSaveSalaryEmployers,
+  isSalaryEmployerDirty,
 }: WizardDocumentsStepProps) {
   const [now, setNow] = useState(() => Date.now());
   const hasProcessingDocument = Object.values(documentRecords).some(
@@ -225,6 +232,17 @@ export function WizardDocumentsStep({
           const requiredSalaryAmountsReady =
             !isSalaryCertificate ||
             hasRequiredSalaryCertificateAmounts(extracted?.fields);
+          // IRIS needs the employer added by its registered name.
+          const requiredSalaryEmployerReady =
+            !isSalaryCertificate ||
+            hasRequiredSalaryCertificateEmployer(extracted?.fields);
+          // The certificate must be for THIS return's tax year.
+          const salaryTaxYearCheck = isSalaryCertificate
+            ? checkSalaryCertificateTaxYear(extracted?.fields, taxYear)
+            : { ok: true, error: undefined, certificateTaxYear: null };
+          const requiredSalaryTaxYearReady = salaryTaxYearCheck.ok;
+          const employerEditsUnsaved =
+            isSalaryCertificate && isSalaryEmployerDirty(slotKey);
           const isBankStatement = slot.documentType === "bank_statement";
           // The IBAN is read from the statement; when it is not on it the
           // review shows a blank required field, like the salary amounts.
@@ -234,6 +252,10 @@ export function WizardDocumentsStep({
           // the IBAN is editable, with its own save (no re-mapping).
           const ibanEditableAfterMap =
             isMapped && isBankStatement && !requiredIbanReady;
+          // The employer names stay editable after mapping (own save, no
+          // re-extraction): the taxpayer may only learn the exact IRIS name
+          // when the FBR list is open.
+          const employersEditableAfterMap = isMapped && isSalaryCertificate;
           const ibanProblem =
             isBankStatement && extracted?.fields
               ? validateBankStatementIban(extracted.fields).error
@@ -449,7 +471,9 @@ export function WizardDocumentsStep({
                       </p>
                       <p className="text-xs text-muted-foreground">
                         {isMapped
-                          ? "This document is already mapped. The persisted values below are read-only."
+                          ? employersEditableAfterMap
+                            ? "This document is already mapped. The values below are read-only, except the employer names: change them and press Save employer."
+                            : "This document is already mapped. The persisted values below are read-only."
                           : "Check the values below before approving and mapping this document."}
                       </p>
                     </div>
@@ -467,6 +491,27 @@ export function WizardDocumentsStep({
                       </div>
                     )}
 
+                    {employersEditableAfterMap && (
+                      <div className="flex flex-wrap gap-2 sm:justify-end">
+                        <Button
+                          type="button"
+                          size="sm"
+                          onClick={() => handleSaveSalaryEmployers(slotKey)}
+                          disabled={
+                            isSavingReview ||
+                            !requiredSalaryEmployerReady ||
+                            !employerEditsUnsaved
+                          }
+                        >
+                          {isSavingReview
+                            ? "Saving employer..."
+                            : employerEditsUnsaved
+                              ? "Save employer"
+                              : "Employer saved"}
+                        </Button>
+                      </div>
+                    )}
+
                     {!isMapped && (
                       <div className="flex flex-wrap gap-2 sm:justify-end">
                         {isMappableDocument ? (
@@ -479,6 +524,8 @@ export function WizardDocumentsStep({
                               isSavingReview ||
                               !hasFields ||
                               !requiredSalaryAmountsReady ||
+                              !requiredSalaryEmployerReady ||
+                              !requiredSalaryTaxYearReady ||
                               !requiredIbanReady
                             }
                           >
@@ -566,7 +613,9 @@ export function WizardDocumentsStep({
                             <span className="text-xs font-medium text-muted-foreground">
                               {field.label}
                               {isSalaryCertificate &&
-                                getSalaryCertificateFieldKind(field.label) && (
+                                isSalaryCertificateRequiredField(
+                                  field.label,
+                                ) && (
                                   <span className="ml-1 text-destructive">
                                     · Required
                                   </span>
@@ -596,13 +645,17 @@ export function WizardDocumentsStep({
                               inputMode={isCnicField ? "numeric" : undefined}
                               required={Boolean(
                                 (isSalaryCertificate &&
-                                  getSalaryCertificateFieldKind(field.label)) ||
+                                  isSalaryCertificateRequiredField(
+                                    field.label,
+                                  )) ||
                                 (isBankStatement &&
                                   isBankStatementIbanLabel(field.label)),
                               )}
                               aria-required={Boolean(
                                 (isSalaryCertificate &&
-                                  getSalaryCertificateFieldKind(field.label)) ||
+                                  isSalaryCertificateRequiredField(
+                                    field.label,
+                                  )) ||
                                 (isBankStatement &&
                                   isBankStatementIbanLabel(field.label)),
                               )}
@@ -638,6 +691,14 @@ export function WizardDocumentsStep({
                                 !(
                                   ibanEditableAfterMap &&
                                   isBankStatementIbanLabel(field.label)
+                                ) &&
+                                !(
+                                  employersEditableAfterMap &&
+                                  ["employer_name", "other_employers"].includes(
+                                    getSalaryCertificateFieldKind(
+                                      field.label,
+                                    ) ?? "",
+                                  )
                                 )
                               }
                               className="h-9 rounded-lg border bg-background px-3 text-sm"
@@ -675,6 +736,47 @@ export function WizardDocumentsStep({
                         withheld.
                       </p>
                     )}
+
+                  {isSalaryCertificate &&
+                    hasFields &&
+                    requiredSalaryAmountsReady &&
+                    !requiredSalaryEmployerReady && (
+                      <p
+                        role="alert"
+                        className="mt-3 rounded-lg border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive"
+                      >
+                        Enter the employer name exactly as it is registered with
+                        FBR. The agent adds it on IRIS by name, and the name
+                        must match IRIS&apos;s list. If you had more than one
+                        employer this year, add the others under &quot;Other
+                        Employer Names&quot; separated by semicolons or
+                        commas.
+                      </p>
+                    )}
+
+                  {isSalaryCertificate &&
+                    hasFields &&
+                    !isMapped &&
+                    requiredSalaryAmountsReady &&
+                    requiredSalaryEmployerReady &&
+                    !requiredSalaryTaxYearReady && (
+                      <p
+                        role="alert"
+                        className="mt-3 rounded-lg border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive"
+                      >
+                        {salaryTaxYearCheck.error}
+                      </p>
+                    )}
+
+                  {employerEditsUnsaved && (
+                    <p
+                      role="alert"
+                      className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+                    >
+                      The employer names were changed but not saved yet. Press
+                      Save employer before you continue.
+                    </p>
+                  )}
 
                   {extracted.transactions &&
                     extracted.transactions.length > 0 && (

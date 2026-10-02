@@ -283,6 +283,8 @@ export async function getLocalAgentJobsAction(draftId: string) {
         salary: string | null;
         wealthStatement: string | null;
         wealthRows: number;
+        employers: string | null;
+        propertyPaymentsComputations: string | null;
       } | null = null;
       try {
         const scope = JSON.parse(resultJson || "{}")?.handoffScope;
@@ -294,6 +296,12 @@ export async function getLocalAgentJobsAction(draftId: string) {
                 ? scope.wealthStatement
                 : null,
             wealthRows: Number(scope.wealthPreparedRows) || 0,
+            employers:
+              typeof scope.employers === "string" ? scope.employers : null,
+            propertyPaymentsComputations:
+              typeof scope.propertyPaymentsComputations === "string"
+                ? scope.propertyPaymentsComputations
+                : null,
           };
         }
       } catch {
@@ -416,6 +424,25 @@ export async function resumeJobAfterPauseAction(
       };
     }
 
+    // Taxpayer-review pauses need an explicit, recorded confirmation. The UI
+    // sends the exact text the user ticked; a direct call without it is refused.
+    const needsAcknowledgement =
+      requiredAction === "portal_handoff_review" ||
+      requiredAction === "portal_employer_review";
+    const acknowledgementText =
+      typeof resumeData?.acknowledgementText === "string"
+        ? resumeData.acknowledgementText.slice(0, 1000)
+        : "";
+    if (
+      needsAcknowledgement &&
+      (resumeData?.acknowledged !== true || !acknowledgementText)
+    ) {
+      return {
+        success: false,
+        error: "Please tick the confirmation box before continuing.",
+      };
+    }
+
     const nextPhase = getNextFbrPilotPhase(
       requiredAction || pauseAction,
       currentPhase,
@@ -436,6 +463,15 @@ export async function resumeJobAfterPauseAction(
             action: requiredAction || pauseAction,
             confirmedAt: new Date().toISOString(),
             confirmedByUserId: user.id,
+            ...(needsAcknowledgement
+              ? {
+                  acknowledgementText,
+                  acknowledgedAt:
+                    typeof resumeData?.acknowledgedAt === "string"
+                      ? resumeData.acknowledgedAt
+                      : new Date().toISOString(),
+                }
+              : {}),
           },
         ],
       },
@@ -463,6 +499,7 @@ export async function resumeJobAfterPauseAction(
         eventDataJson: JSON.stringify({
           previousPause: job.pauseAction,
           nextPhase,
+          ...(needsAcknowledgement ? { acknowledgementText } : {}),
         }),
       },
     });

@@ -894,3 +894,15 @@ test("wealth: every row the packet can target is a checkbox label captured from 
     assert.ok(html.includes(label), `${code} label "${label}" not in the captured modal`);
   }
 });
+
+test("a reconciliation adjustment is explained as a notice, with no field to choose", () => {
+  const { describeUnmappedPortalSources } = require(path.join(projectRoot, "lib/tax/portal-field-map.ts"));
+  const blocked = describeUnmappedPortalSources({
+    unmappedCategories: [{ category: "RECONCILIATION_ADJUSTMENT_INFLOW", totalAmount: 50000 }],
+  });
+  assert.ok(blocked.refusal.startsWith("Your filing packet needs a manual IRIS entry for"));
+  assert.ok(blocked.refusal.includes("Other reconciliation amount (PKR 50,000)"));
+  assert.ok(blocked.refusal.includes("notice, not an error"));
+  assert.ok(blocked.refusal.includes("Unreconciled amount in IRIS"));
+  assert.ok(!blocked.refusal.includes("which FBR/IRIS field should receive"));
+});

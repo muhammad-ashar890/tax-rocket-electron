@@ -33,8 +33,11 @@ import {
 import { validatePakistaniIban } from "@/lib/tax/iban";
 import {
   ensureSalaryCertificateReviewFields,
+  extractSalaryCertificateEmployers,
   parseSalaryCertificateAmount,
+  planSalaryCertificateEmployerUpdate,
   salaryCertificateFieldValue,
+  checkSalaryCertificateTaxYear,
 } from "@/lib/tax/salary-certificate-fields";
 
 /** Adds the visible blank placeholders a document type must have for review. */
@@ -80,7 +83,7 @@ Use this exact shape:
 }
 For a bank statement, always return separate fields labelled exactly "Bank Name", "Account Label", "Account Number", "Currency", "IBAN", "Opening Balance", "Closing Balance", "Statement Period Start", and "Statement Period End". "IBAN" is the account's 24-character Pakistani IBAN (starts with PK) exactly as printed, often in the statement header; if no IBAN is printed return null, and never build one from the account number. Never combine the statement dates into one field: read the start and end dates from the statement header and return each as ISO YYYY-MM-DD. Extract every visible transaction row from the statement table. Do not include opening-balance or closing-balance marker rows as transactions; those balances belong in fields. Do not invent rows. Return transaction dates as ISO YYYY-MM-DD whenever possible. Keep descriptions and currency amounts exactly as shown in the document.
 For a CNIC, always return separate fields labelled exactly "CNIC Number", "Name", "Father Name", "Date of Birth" and "Expiry Date", plus "Address" when the card prints one. Return "Date of Birth" and "Expiry Date" as ISO YYYY-MM-DD. Read the date of birth from the "Date of Birth" line only: never use the issue date or the expiry date for it, and never guess a date of birth that is not printed on the card. For "Expiry Date" return the card's own validity/expiry line ("Valid Upto", "Expiry", "Date of Expiry"), or null when the card prints none — never infer one from the issue date.
-For a salary certificate, always return separate required fields labelled exactly "Gross Salary (Annual PKR)" and "Tax Deducted u/s 149 (Annual PKR)". Use annual amounts explicitly stated on the certificate. If a value is not stated or cannot be read, return null; never infer gross salary from net bank deposits and never assume missing tax withheld is zero. Also preserve other tax-relevant details as separate optional fields when printed, including employer name/NTN, employee name/ID, tax year or salary period, basic pay, allowances, bonuses, benefits/perquisites, exempt or taxable components, and net pay. Do not invent missing details, combine separate components, or annualize monthly amounts unless the certificate explicitly states the annual total.`;
+For a salary certificate, always return separate required fields labelled exactly "Gross Salary (Annual PKR)", "Tax Deducted u/s 149 (Annual PKR)", "Employer Name (as registered with FBR)" and "Tax Year". "Tax Year" is the four-digit tax year the certificate is for (for example 2026 for July 2025 to June 2026); when only the salary period is printed, the tax year is the year in which that period ends; return null when neither is printed. The employer name is the company's full legal name exactly as printed on the certificate letterhead or body (for example "ACME (PRIVATE) LIMITED"); return null when it is not printed. Return the employer NTN, when printed, as a separate optional field labelled "Employer NTN". Use annual amounts explicitly stated on the certificate. If a value is not stated or cannot be read, return null; never infer gross salary from net bank deposits and never assume missing tax withheld is zero. Also preserve other tax-relevant details as separate optional fields when printed, including employee name/ID, salary period, basic pay, allowances, bonuses, benefits/perquisites, exempt or taxable components, and net pay. Do not invent missing details, combine separate components, or annualize monthly amounts unless the certificate explicitly states the annual total.`;
 
 type DocumentSlotRule = {
   label: string;
@@ -521,8 +524,10 @@ export async function getDocumentExtractionAction(documentId: string) {
     const extracted = document.extractedData
       ? JSON.parse(document.extractedData)
       : null;
-    const reviewReadyExtraction =
-      ensureReviewFields(document.documentType, extracted);
+    const reviewReadyExtraction = ensureReviewFields(
+      document.documentType,
+      extracted,
+    );
 
     return {
       success: true,
@@ -1277,6 +1282,31 @@ export async function approveAndMapExtractedDocumentAction(documentId: string) {
             "Enter the annual gross salary from the certificate before approving the map.",
         };
       }
+      const certificateDraft = await prisma.filingDraft.findUnique({
+        where: { id: document.filingDraftId },
+        select: { taxYear: true },
+      });
+      if (!certificateDraft) {
+        return { success: false, error: "Filing draft not found" };
+      }
+      const taxYearCheck = checkSalaryCertificateTaxYear(
+        salaryFields,
+        certificateDraft.taxYear,
+      );
+      if (!taxYearCheck.ok) {
+        return { success: false, error: taxYearCheck.error };
+      }
+      if (
+        extractSalaryCertificateEmployers(
+          JSON.stringify({ fields: salaryFields }),
+        ).length === 0
+      ) {
+        return {
+          success: false,
+          error:
+            "Enter the employer name exactly as it is registered with FBR before approving the map.",
+        };
+      }
       if (taxWithheld === null || taxWithheld < 0) {
         return {
           success: false,
@@ -1693,6 +1723,64 @@ export async function extractDocumentWithGeminiAction(documentId: string) {
   }
 }
 
+/**
+ * Change the employer name(s) on a salary certificate that is ALREADY mapped,
+ * without re-uploading or re-extracting it. Only the two employer fields are
+ * rewritten; amounts and everything else stay as mapped. Employers are carried
+ * in the filing packet, so the latest packet is superseded and its approval is
+ * cleared: the taxpayer must generate and approve a new one.
+ */
+export async function saveSalaryCertificateEmployersAction(
+  documentId: string,
+  input: { employerName: string; otherEmployerNames?: string },
+) {
+  try {
+    const document = await getOwnedDocument(documentId);
+    if (document.documentType !== "salary_certificate") {
+      return { success: false, error: "This is not a salary certificate" };
+    }
+    if (document.extractionStatus !== "MAPPED") {
+      return {
+        success: false,
+        error: "Only a mapped salary certificate is edited this way",
+      };
+    }
+    const plan = planSalaryCertificateEmployerUpdate(
+      document.extractedData,
+      input,
+    );
+    if (!plan.ok) return { success: false, error: plan.error };
+
+    await prisma.$transaction(async (tx) => {
+      await tx.document.update({
+        where: { id: documentId },
+        data: { extractedData: plan.extractedData },
+      });
+      if (document.filingDraftId) {
+        await tx.filingPacket.updateMany({
+          where: {
+            filingDraftId: document.filingDraftId,
+            userId: document.userId,
+            status: { not: "SUPERSEDED" },
+          },
+          data: { status: "SUPERSEDED", approvalStatus: "SUPERSEDED" },
+        });
+        await tx.filingDraft.update({
+          where: { id: document.filingDraftId },
+          data: {
+            packetApprovalConfirmed: false,
+            packetApprovalAt: null,
+            packetApprovalByUserId: null,
+          },
+        });
+      }
+    });
+    return { success: true, employers: plan.employers };
+  } catch (error) {
+    console.error("Error saving salary certificate employers:", error);
+    return { success: false, error: "Failed to save the employer names" };
+  }
+}
 
 /**
  * Enter the IBAN on a bank statement that is ALREADY mapped (mapped before the
@@ -1724,7 +1812,11 @@ export async function saveBankStatementIbanAction(
 
     const extracted = document.extractedData
       ? (JSON.parse(document.extractedData) as {
-          fields?: Array<{ label: string; value: unknown; confidence?: number }>;
+          fields?: Array<{
+            label: string;
+            value: unknown;
+            confidence?: number;
+          }>;
         })
       : { fields: [] };
     const fields = (extracted.fields ?? []).filter(

@@ -46,7 +46,7 @@ const DESCRIPTION_SELECTOR = ".row-description-text";
  * a stale copy is a correctness risk, not a cosmetic one — main.js refuses to run
  * the real-portal flow when the three files disagree.
  */
-const BUILD_TAG = "fix28-wealth-driver-20261001";
+const BUILD_TAG = "fix34-tax-year-employer-20261002";
 
 /** Outcome reason codes. `filled` is the only success. */
 const FILL_STATUS = {
@@ -649,7 +649,9 @@ function findUnexpectedPrefill(snapshot, plannedCodes) {
     if (planned.has(String(row.code))) continue;
     const filledEditable = (row.cells || [])
       .map((cell, columnIndex) => ({ cell, columnIndex }))
-      .filter(({ cell }) => cell && cell.editable && isNonBlankAmount(cell.value));
+      .filter(
+        ({ cell }) => cell && cell.editable && isNonBlankAmount(cell.value),
+      );
     if (!filledEditable.length) continue;
     out.push({
       code: row.code,

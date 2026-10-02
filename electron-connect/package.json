@@ -27,6 +27,8 @@
       "iris-navigation.js",
       "iris-row-filler.js",
       "iris-wealth-driver.js",
+      "iris-employer-driver.js",
+      "job-report.js",
       "preload.js",
       "portal-agent.js",
       "renderer.html",

@@ -339,7 +339,10 @@ test("wiring: the upload card shows the IBAN as a required field and blocks Map 
     card,
     /const requiredIbanReady =\s+!isBankStatement \|\| hasRequiredBankStatementIban/,
   );
-  assert.match(card, /!requiredSalaryAmountsReady \|\|\s+!requiredIbanReady/);
+  assert.match(
+    card,
+    /!requiredSalaryAmountsReady \|\|\s+!requiredSalaryEmployerReady \|\|\s+!requiredSalaryTaxYearReady \|\|\s+!requiredIbanReady/,
+  );
   assert.match(card, /isBankStatementIbanLabel\(field\.label\) && \(/);
   assert.match(card, /handleSaveStatementIban\(slotKey\)/);
   // The separate IBAN panel is gone; there is no second place to type it.

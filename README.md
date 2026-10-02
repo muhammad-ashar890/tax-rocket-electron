@@ -15,6 +15,10 @@ The current supervised handoff is deliberately limited to the verified areas nee
 
 Optional, off by default: with `TAXROCKET_WEALTH_AUTOFILL=on` (and `TAXROCKET_REAL_AUTOFILL=live`) the agent also adds Wealth Statement rows through the IRIS modals — personal expenses (Reconciliation → `+ Expenses`), the tax-paid outflow `7098`, and bank accounts by IBAN (Personal Assets → `+ Assets`) — then types the packet amounts. In dry mode it only reports what it would add. The only buttons it presses are the `+` icons that open those dialogs, the tick-boxes inside them, and the dialog's own ADD/SAVE; it never presses the return's Save, Calculate or Submit, and never edits or deletes an existing row.
 
+Optional, off by default: with `TAXROCKET_EMPLOYER_AUTOFILL=on` the agent adds each employer named on the reviewed salary certificate in **Employment → Salary → Employer Details → `+ Add Employer Details`**. It adds by registered **name** only: it types the name, waits for IRIS's own list (`NAME | REGNO`), and picks an option only when exactly one registration has that exact name (case, punctuation, `&`/`AND`, `LTD`/`LIMITED`, `PVT`/`PRIVATE` are forgiven; nothing else). IRIS fills the registration number; the agent never types one. No exact match, or several registrations with the same name, cancels the dialog and **pauses the job immediately (`portal_employer_review`) before any salary or wealth figure is entered**; the taxpayer adds the employer in IRIS and presses "I have added the employer in FBR — Continue". The resumed run trusts that confirmation, skips the employer step, and enters the figures (the agent does not re-check the employer; the completion card says it was added by the taxpayer). An employer already listed is left alone, so a re-run adds nothing. It presses only `+ Add Employer Details`, one list option, and the dialog's Add or Cancel; never the card's edit or delete icons.
+
+After a clean live fill in an assisted-filing job the agent shows Personal Assets (property is at the top), the Payment tab and Computations without changing anything, then pauses (`portal_handoff_review`) until the taxpayer confirms the review.
+
 The agent does **not** automatically open or fill:
 
 - Property
@@ -166,7 +170,7 @@ Even in live mode, the agent:
 - writes only into verified Salary and Salary-withholding cells;
 - never writes into derived/disabled cells;
 - never guesses a row or column;
-- never opens Property, Payments, or Computations automatically (Wealth only when `TAXROCKET_WEALTH_AUTOFILL=on`);
+- never fills Property, Payments, or Computations (it only shows them, read-only, in the taxpayer review step); Wealth only when `TAXROCKET_WEALTH_AUTOFILL=on`, employers only when `TAXROCKET_EMPLOYER_AUTOFILL=on`;
 - never clicks Calculate, Save, Submit, payment, or other filing controls.
 
 ## Windows desktop agent
@@ -428,3 +432,17 @@ git push origin main
 ```
 
 Do not commit `.env`, credentials, real taxpayer documents, or real FBR screenshots. Do not use `git push --force` on the shared repository.
+
+### Taxpayer review confirmations
+
+The two taxpayer pauses (`portal_employer_review`, `portal_handoff_review`) show a written confirmation with a checkbox. Continue stays disabled until it is ticked, and the server refuses a resume without it. The exact text and the time are stored in `livePilotState.confirmations` and in the `JOB_RESUMED_BY_USER` audit event.
+
+### Employer names after mapping, job log history, income-source page
+
+- A mapped salary certificate is read-only except the two employer fields: change them and press **Save employer** (no re-upload or re-extraction). Amounts stay as mapped; the latest packet is superseded and its approval cleared, so generate and approve the packet again.
+- `TaxRocketAgentLogs/job-<id>.json` keeps the last 8 earlier runs of the same job in `previousRuns` (status, pause message, trimmed log), so one file shows why a pause happened. `latest-job.json` is an identical copy of the newest file; `latest-portal-inspection.json` is only the captured page structure.
+- On the IRIS "Summary of Economic Transactions" page the agent now waits (bounded, 6 s) for the page's controls when the URL says it is that page, instead of reading the shell alone and carrying on without answering it.
+
+### Job report
+
+Every `job-<id>.json` starts with a plain-language `report` (also kept per earlier run in `previousRuns`): the TaxRocket Continue presses and the exact text the taxpayer ticked, whether the agent stopped on the income-source page and why, employers (added by the agent, already listed, or added by the taxpayer), every field with its planned value, what IRIS held, and who put the value there (typed by the agent, already there, or refused because IRIS holds another figure), the review step, and the actions the agent never takes (Calculate, Save, Submit, Prepare PSID, payment). The step list carries a timestamp per step. Built by `electron-connect/job-report.js`.

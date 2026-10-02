@@ -63,6 +63,8 @@ type JobView = {
     salary: string | null;
     wealthStatement: string | null;
     wealthRows: number;
+    employers: string | null;
+    propertyPaymentsComputations: string | null;
   } | null;
 };
 
@@ -92,6 +94,8 @@ const PAUSE_LABELS: Record<string, string> = {
   portal_section_navigation: "Return preparation needs attention",
   portal_section_capture: "Preparing the current return section",
   portal_autofill_review: "Review fields that could not be placed safely",
+  portal_handoff_review: "Review the rest of your return in the FBR window",
+  portal_employer_review: "Add your employer in the FBR window",
   portal_identity_changed: "Taxpayer target changed — recheck required",
   portal_job_check_unavailable: "Check your TaxRocket connection",
   portal_fields_verified: "Return opened — Salary details verified",
@@ -152,6 +156,15 @@ function flowStepForPhase(phase: Phase): FlowStep {
   return "resume";
 }
 
+// Pauses where the taxpayer must tick a written confirmation before Continue.
+// The exact wording is stored with the confirmation (audit trail).
+const ACKNOWLEDGEMENT_TEXT: Record<string, string> = {
+  portal_handoff_review:
+    "I confirm that I have personally reviewed Personal Assets / Liabilities (including every property), the Payment tab and Computations in the FBR window, that the information there is complete and correct, and that I am responsible for it.",
+  portal_employer_review:
+    "I confirm that I have added my employer(s) in the FBR window and that the employer details are correct.",
+};
+
 function isFinalSubmitPause(pauseAction: string | null) {
   const action = (pauseAction || "").toLowerCase();
   return (
@@ -186,6 +199,9 @@ export default function FbrConnectClient({
   const [startOver, setStartOver] = useState(false);
   const [installedAck, setInstalledAck] = useState(false);
   const [submitGateOpen, setSubmitGateOpen] = useState(true);
+  // Keyed by job AND pause kind: ticking the box at the employer pause must not
+  // pre-tick it at the later review pause of the same job.
+  const [ackedKey, setAckedKey] = useState<string | null>(null);
 
   useEffect(() => {
     setConnection(initialConnection);
@@ -303,11 +319,22 @@ export default function FbrConnectClient({
     }
   }
 
-  async function handleResumeJob(jobId: string, finalSubmitConfirmed = false) {
+  async function handleResumeJob(
+    jobId: string,
+    finalSubmitConfirmed = false,
+    acknowledgementText?: string,
+  ) {
     setActionLoading(jobId);
     const result = await resumeJobAfterPauseAction(jobId, {
       resumedAt: new Date().toISOString(),
       confirmedBy: "user",
+      ...(acknowledgementText
+        ? {
+            acknowledged: true,
+            acknowledgementText,
+            acknowledgedAt: new Date().toISOString(),
+          }
+        : {}),
       ...(finalSubmitConfirmed ? { finalSubmitConfirmed: true } : {}),
     });
     setActionLoading(null);
@@ -512,10 +539,10 @@ export default function FbrConnectClient({
                   Your filing is ready for supervised entry.
                 </span>{" "}
                 TaxRocket will enter only the approved Salary and Salary
-                withholding information that can be verified. Wealth Statement rows are
-                entered only if the agent&apos;s Wealth switch is on. Property,
-                Payments, and Computations remain outside this test. Nothing is
-                saved or submitted.
+                withholding information that can be verified. Wealth Statement
+                rows are entered only if the agent&apos;s Wealth switch is on.
+                Property, Payments, and Computations remain outside this test.
+                Nothing is saved or submitted.
               </div>
             )}
             <div className="flex flex-wrap items-center gap-2">
@@ -611,7 +638,8 @@ export default function FbrConnectClient({
                   )}
                   {taxPayable != null && (
                     <p>
-                      Tax payable: PKR {Math.round(taxPayable).toLocaleString()}
+                      Tax payable (estimate; the amount to pay is the one IRIS
+                      shows): PKR {Math.round(taxPayable).toLocaleString()}
                     </p>
                   )}
                   {refundDue != null && (
@@ -718,10 +746,39 @@ export default function FbrConnectClient({
                     ? "Follow the instruction in the FBR window. When you finish, press Continue here."
                     : "Finish that step in the FBR window, then press Continue here."}
               </p>
+              {ACKNOWLEDGEMENT_TEXT[activeJob.pauseAction || ""] && (
+                <label className="flex cursor-pointer items-start gap-2 rounded-md border border-amber-200 bg-amber-50/60 p-3 text-xs">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 h-4 w-4 shrink-0"
+                    checked={ackedKey === `${activeJob.id}:${activeJob.pauseAction}`}
+                    onChange={(e) =>
+                      setAckedKey(
+                        e.target.checked
+                          ? `${activeJob.id}:${activeJob.pauseAction}`
+                          : null,
+                      )
+                    }
+                  />
+                  <span>
+                    {ACKNOWLEDGEMENT_TEXT[activeJob.pauseAction || ""]}
+                  </span>
+                </label>
+              )}
               <Button
                 size="sm"
-                disabled={actionLoading === activeJob.id}
-                onClick={() => handleResumeJob(activeJob.id)}
+                disabled={
+                  actionLoading === activeJob.id ||
+                  (Boolean(ACKNOWLEDGEMENT_TEXT[activeJob.pauseAction || ""]) &&
+                    ackedKey !== `${activeJob.id}:${activeJob.pauseAction}`)
+                }
+                onClick={() =>
+                  handleResumeJob(
+                    activeJob.id,
+                    false,
+                    ACKNOWLEDGEMENT_TEXT[activeJob.pauseAction || ""],
+                  )
+                }
                 className="gap-2"
               >
                 {actionLoading === activeJob.id ? (
@@ -729,7 +786,13 @@ export default function FbrConnectClient({
                 ) : (
                   <ExternalLink className="h-3.5 w-3.5" />
                 )}
-                {inspectionPause ? "Continue filing" : "Continue"}
+                {activeJob.pauseAction === "portal_handoff_review"
+                  ? "I have reviewed it in FBR — Continue"
+                  : activeJob.pauseAction === "portal_employer_review"
+                    ? "I have added the employer in FBR — Continue"
+                    : inspectionPause
+                      ? "Continue filing"
+                      : "Continue"}
               </Button>
               <Button
                 size="sm"
@@ -804,14 +867,44 @@ export default function FbrConnectClient({
                   calculate and make sure the unreconciled amount is 0
                 </li>
               )}
-              <li>
-                ⚠️ <strong>Property, Payments, Computations</strong> — NOT
-                filled by the agent
-              </li>
-              <li>
-                ⚠️ <strong>Employer details</strong> — check in FBR whether your
-                return needs them
-              </li>
+              {completedAgentJob?.handoffScope?.propertyPaymentsComputations ===
+              "reviewed_by_taxpayer" ? (
+                <li>
+                  ✅ <strong>Property, Payments, Computations</strong> — shown
+                  to you by the agent and confirmed as reviewed by you (the
+                  agent fills none of them)
+                </li>
+              ) : (
+                <li>
+                  ⚠️ <strong>Property, Payments, Computations</strong> — NOT
+                  filled by the agent and not yet confirmed as reviewed
+                </li>
+              )}
+              {completedAgentJob?.handoffScope?.employers ===
+              "confirmed_by_taxpayer" ? (
+                <li>
+                  ✅ <strong>Employer details</strong> — added by you in FBR
+                  (you confirmed it; the agent did not check it)
+                </li>
+              ) : completedAgentJob?.handoffScope?.employers === "listed" ? (
+                <li>
+                  ✅ <strong>Employer details</strong> — added by the agent by
+                  registered name (IRIS filled the registration number)
+                </li>
+              ) : completedAgentJob?.handoffScope?.employers ===
+                "needs_review" ? (
+                <li>
+                  ⚠️ <strong>Employer details</strong> — an employer could not
+                  be added safely. Check Employment → Salary → Employer Details
+                  in FBR
+                </li>
+              ) : (
+                <li>
+                  ⚠️ <strong>Employer details</strong> — not added by this run.
+                  If your return needs them, add them in FBR (Employment →
+                  Salary → + Add Employer Details)
+                </li>
+              )}
               <li>
                 ⛔ The agent never saves, calculates, pays or submits. The
                 return is not ready to submit until the items above are done.

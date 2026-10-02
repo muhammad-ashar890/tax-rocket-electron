@@ -5,6 +5,7 @@ import {
   normalizeIdentityName,
 } from "@/lib/tax/cnic-profile";
 
+import { salaryCertificateEmployerSignature } from "@/lib/tax/salary-certificate-fields";
 import { uploadFilingDocumentAction } from "@/app/actions/documents";
 import {
   approveAndMapExtractedDocumentAction,
@@ -12,6 +13,7 @@ import {
   getDocumentExtractionAction,
   getFilingDocumentsAction,
   saveBankStatementIbanAction,
+  saveSalaryCertificateEmployersAction,
   updateDocumentExtractionAction,
 } from "@/app/actions/extraction";
 import { getFilingSummaryAction } from "@/app/actions/filing-summary";
@@ -53,6 +55,12 @@ export function useFilingDocuments({
   const [extractedByDocumentId, setExtractedByDocumentId] = useState<
     Record<string, ExtractedPayload>
   >({});
+  // The employer fields as last saved, per document id. Employer names stay
+  // editable after mapping; this tells whether the form still differs from
+  // what is saved (the Save employer button and the Continue gate use it).
+  const [savedEmployerSignatures, setSavedEmployerSignatures] = useState<
+    Record<string, string>
+  >({});
   const [extractingDocumentId, setExtractingDocumentId] = useState<
     string | null
   >(null);
@@ -92,6 +100,19 @@ export function useFilingDocuments({
   // Restore saved review/mapping payloads on refresh, not just the status badge.
   // The extractedData remains on the owned Document row; this only hydrates the
   // client review panel and never starts another extraction request.
+  // The first time a mapped salary certificate's fields are available they ARE
+  // the saved values, so that is the baseline later edits are compared with.
+  useEffect(() => {
+    const salary = documentRecords.salary_certificate;
+    if (!salary || salary.extractionStatus !== "MAPPED") return;
+    const payload = extractedByDocumentId[salary.id];
+    if (!payload?.fields || salary.id in savedEmployerSignatures) return;
+    setSavedEmployerSignatures((previous) => ({
+      ...previous,
+      [salary.id]: salaryCertificateEmployerSignature(payload.fields),
+    }));
+  }, [documentRecords, extractedByDocumentId, savedEmployerSignatures]);
+
   useEffect(() => {
     for (const record of Object.values(documentRecords)) {
       if (
@@ -568,7 +589,76 @@ export function useFilingDocuments({
     onBankAccountsChanged?.();
   }
 
+  /**
+   * Change the employer name(s) on a salary certificate that is already
+   * mapped. No re-upload or re-extraction; the latest packet is superseded
+   * on the server, so the summary is refreshed afterwards.
+   */
+  async function handleSaveSalaryEmployers(documentType: string) {
+    const record = documentRecords[documentType];
+    if (!record) return;
+    const payload = extractedByDocumentId[record.id];
+    const kindOf = (label: string) => {
+      const normalized = label.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+      if (!/(^|_)employers?(_|$)/.test(normalized)) return null;
+      if (
+        /(^|_)(ntn|ftn|cnic|nic|id|no|number|address|reg|registration|phone|email)(_|$)/.test(
+          normalized,
+        )
+      )
+        return null;
+      return /(^|_)(other|additional|more)(_|$)/.test(normalized)
+        ? "other"
+        : "main";
+    };
+    const valueOf = (kind: "main" | "other") =>
+      String(
+        payload?.fields?.find((field) => kindOf(field.label) === kind)?.value ??
+          "",
+      );
+
+    setSavingDocumentReviewId(record.id);
+    setDocumentUploadError(null);
+    const result = await saveSalaryCertificateEmployersAction(record.id, {
+      employerName: valueOf("main"),
+      otherEmployerNames: valueOf("other"),
+    });
+    setSavingDocumentReviewId(null);
+    if (!result.success) {
+      setDocumentUploadError(
+        result.error ?? "Failed to save the employer names",
+      );
+      return;
+    }
+    setSavedEmployerSignatures((previous) => ({
+      ...previous,
+      [record.id]: salaryCertificateEmployerSignature(payload?.fields),
+    }));
+    setProfileSyncNote(
+      "Employer saved. Generate and approve the filing packet again so the new name reaches FBR.",
+    );
+    if (draftId) {
+      const refreshedSummary = await getFilingSummaryAction(draftId);
+      if (refreshedSummary.success) {
+        setFilingSummary(refreshedSummary.summary as FilingSummary);
+      }
+    }
+  }
+
+  /** True when the employer fields differ from what was last saved. */
+  function isSalaryEmployerDirty(documentType: string) {
+    const record = documentRecords[documentType];
+    if (!record || record.extractionStatus !== "MAPPED") return false;
+    const baseline = savedEmployerSignatures[record.id];
+    const payload = extractedByDocumentId[record.id];
+    if (baseline === undefined || !payload?.fields) return false;
+    return salaryCertificateEmployerSignature(payload.fields) !== baseline;
+  }
+  const hasUnsavedSalaryEmployers = isSalaryEmployerDirty("salary_certificate");
+
   return {
+    isSalaryEmployerDirty,
+    hasUnsavedSalaryEmployers,
     uploadedDocuments,
     documentRecords,
     extractedByDocumentId,
@@ -596,5 +686,6 @@ export function useFilingDocuments({
     handleSaveDocumentReview,
     handleMapDocument,
     handleSaveStatementIban,
+    handleSaveSalaryEmployers,
   };
 }

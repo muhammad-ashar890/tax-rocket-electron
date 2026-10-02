@@ -7,7 +7,7 @@
 // TY2026+ return setup steps that do not require legal/financial judgement.
 // Create/Save/Submit/payment controls and all financial inputs remain off
 // limits until the engine/mapping audit is resolved.
-const BUILD_TAG = "fix28-wealth-driver-20261001";
+const BUILD_TAG = "fix34-tax-year-employer-20261002";
 const DEFAULT_HOSTS = ["iris.fbr.gov.pk"];
 const SECTION_TOUR = Object.freeze([
   { id: "salary", group: "Employment", tab: "Salary" },
@@ -4217,11 +4217,38 @@ async function inspectNavigation(
         )
       )
         return { inspection: snapshot, requiredAction: "portal_popup" };
-      if (!isAuthenticated(snapshot))
-        return {
-          inspection: snapshot,
-          requiredAction: "portal_readiness_unverified",
-        };
+      if (!isAuthenticated(snapshot)) {
+        // Right after a setup click (period Continue) IRIS swaps the routed
+        // page and the shell can briefly read as unauthenticated. Give it a
+        // bounded window before asking the taxpayer to press Continue.
+        for (
+          let wait = 0;
+          wait < 16 && !isAuthenticated(snapshot) && !requiresLogin(snapshot);
+          wait++
+        ) {
+          await delay(500);
+          snapshot = await read();
+          if (
+            snapshot.frames.some(
+              (frame) => frame.hasBlockingOverlay && !frame.setupDialogOnly,
+            )
+          )
+            break;
+        }
+        if (requiresLogin(snapshot))
+          return { inspection: snapshot, requiredAction: "session_reconnect" };
+        if (
+          snapshot.frames.some(
+            (frame) => frame.hasBlockingOverlay && !frame.setupDialogOnly,
+          )
+        )
+          return { inspection: snapshot, requiredAction: "portal_popup" };
+        if (!isAuthenticated(snapshot))
+          return {
+            inspection: snapshot,
+            requiredAction: "portal_readiness_unverified",
+          };
+      }
       if (snapshot.frames.some((frame) => frame.document?.present))
         return verifyDocument(snapshot);
       if (
@@ -4419,6 +4446,30 @@ async function inspectNavigation(
     return { inspection, requiredAction: "portal_popup" };
   if (!isAuthenticated(inspection))
     return { inspection, requiredAction: "portal_readiness_unverified" };
+
+  // The IRIS shell (header, menus) renders before the routed page. On the
+  // income-source page the shell alone already counts as "authenticated", so
+  // reading right now can miss a gate that is only a moment from rendering and
+  // the run would carry on without answering it. When the URL says this IS the
+  // gate page, wait (bounded) for the gate itself to render.
+  const onGatePath = (snapshot) =>
+    snapshot.frames.some((frame) =>
+      /summary-economic-transactions/i.test(String(frame.url || "")),
+    );
+  const hasGate = (snapshot) =>
+    snapshot.frames.some((frame) => frame.economicTransactionsGate?.present);
+  if (onGatePath(inspection) && !hasGate(inspection)) {
+    for (let i = 0; i < 12 && !hasGate(inspection); i++) {
+      await delay(500);
+      inspection = await read();
+    }
+    onStep(
+      "economic_gate_wait",
+      hasGate(inspection)
+        ? "The income-source page finished rendering; handling it now."
+        : "The URL is the income-source page but its controls never rendered within the wait.",
+    );
+  }
 
   const gateOutcome = await handleEconomicTransactionsGate(inspection);
   if (gateOutcome) {

@@ -109,9 +109,32 @@ const MARKERS = [
     "dashed-CNIC comparison",
   ],
   [
+    "electron-connect/job-report.js",
+    ["buildJobReport", "NEVER DONE BY THE AGENT"],
+    "the plain-language job report",
+  ],
+  [
+    "electron-connect/iris-employer-driver.js",
+    ["runEmployerDriver", "fix34-tax-year-employer-20261002"],
+    "the employer driver (exact registered name only)",
+  ],
+  [
+    "lib/tax/salary-certificate-fields.ts",
+    [
+      "extractSalaryCertificateEmployers",
+      "hasRequiredSalaryCertificateEmployer",
+    ],
+    "the employer name is a required review field on the salary certificate",
+  ],
+  [
+    "app/actions/packet.ts",
+    ["extractMappedSalaryEmployers("],
+    "the packet carries the reviewed employer names to the agent",
+  ],
+  [
     "electron-connect/main.js",
     [
-      "fix28-wealth-driver-20261001",
+      "fix34-tax-year-employer-20261002",
       "live_return_autofill",
       "Live entry entered and verified",
     ],
