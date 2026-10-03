@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import type { PrismaClient } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { netCashMovement } from "@/lib/tax/cash-in-hand";
 import { validateFilingCompleteness } from "@/lib/tax/filing-completeness";
 import {
   netMoney,
@@ -41,6 +42,11 @@ export type AuthoritativeReconciliationPreview = {
   totalIncome: number;
   totalExpenses: number;
   totalAssets: number;
+  /**
+   * Net cash the taxpayer moved out of (+) or into (-) the bank. It is carried
+   * by Cash in hand (IRIS 7012), so it counts on the asset side of Mizan.
+   */
+  netCashMovement: number;
   totalLiabilities: number;
   otherAdjustments: number;
   gap: number;
@@ -194,6 +200,7 @@ export async function calculateAuthoritativeReconciliation(
   const totalIncome = sumEntries("INCOME");
   const totalExpenses = sumEntries("EXPENSE");
   const totalAssets = sumEntries("ASSET");
+  const cashMovement = netCashMovement(transactions);
   const totalLiabilities = sumEntries("LIABILITY");
   const otherAdjustments = netMoney(
     ledgerEntries
@@ -223,6 +230,7 @@ export async function calculateAuthoritativeReconciliation(
     totalIncome,
     totalExpenses,
     totalAssets,
+    cashMovement,
     totalLiabilities,
     otherAdjustments,
   };
@@ -245,6 +253,7 @@ export async function calculateAuthoritativeReconciliation(
     { value: totalLiabilities },
     { value: totalExpenses, subtract: true },
     { value: totalAssets, subtract: true },
+    { value: cashMovement, subtract: true },
     { value: otherAdjustments },
   ]);
   const gap = netMoney([
@@ -326,6 +335,7 @@ export async function calculateAuthoritativeReconciliation(
       totalIncome,
       totalExpenses,
       totalAssets,
+      netCashMovement: cashMovement,
       totalLiabilities,
       otherAdjustments,
       gap,

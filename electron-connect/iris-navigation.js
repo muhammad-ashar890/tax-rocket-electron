@@ -7,7 +7,7 @@
 // TY2026+ return setup steps that do not require legal/financial judgement.
 // Create/Save/Submit/payment controls and all financial inputs remain off
 // limits until the engine/mapping audit is resolved.
-const BUILD_TAG = "fix34-tax-year-employer-20261002";
+const BUILD_TAG = "fix39-gift-keywords-20261003";
 const DEFAULT_HOSTS = ["iris.fbr.gov.pk"];
 const SECTION_TOUR = Object.freeze([
   { id: "salary", group: "Employment", tab: "Salary" },

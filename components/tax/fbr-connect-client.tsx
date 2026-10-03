@@ -751,7 +751,9 @@ export default function FbrConnectClient({
                   <input
                     type="checkbox"
                     className="mt-0.5 h-4 w-4 shrink-0"
-                    checked={ackedKey === `${activeJob.id}:${activeJob.pauseAction}`}
+                    checked={
+                      ackedKey === `${activeJob.id}:${activeJob.pauseAction}`
+                    }
                     onChange={(e) =>
                       setAckedKey(
                         e.target.checked
@@ -817,113 +819,222 @@ export default function FbrConnectClient({
         )}
 
       {phase === "done" && (
-        <Card className="border-amber-300 bg-amber-50/60">
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-sm text-amber-900">
-              <CheckCircle className="h-4 w-4" /> Salary step complete — return
-              NOT ready to submit
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3 text-sm">
-            <p className="text-muted-foreground">
-              The desktop agent finished its task
-              {completedAgentJob
-                ? ` at ${formatWhen(
-                    completedAgentJob.completedAt ||
-                      completedAgentJob.createdAt,
-                  )}`
-                : ""}
-              . This does <strong>not</strong> mean the return was filed. Values
-              may be in the open FBR draft, but the return was not saved or
-              submitted. Review the FBR window before taking any further action.
-            </p>
-            <ul className="space-y-1 rounded-md border border-amber-200 bg-white/70 p-3 text-xs">
-              <li>
-                ✅ <strong>Salary</strong> income and salary withholding (u/s
-                149) — entered and read back in the FBR draft
-              </li>
-              {completedAgentJob?.handoffScope?.wealthStatement ===
-              "entered_not_calculated" ? (
-                <li>
-                  ✅ <strong>Wealth Statement</strong> —{" "}
-                  {completedAgentJob.handoffScope.wealthRows} row(s) entered by
-                  the agent (personal expenses, tax paid, bank accounts). The
-                  agent never presses Calculate: press Calculate in FBR, then
-                  open Reconciliation of Net Assets and make sure the
-                  unreconciled amount is 0
-                </li>
-              ) : completedAgentJob?.handoffScope?.wealthStatement ===
-                "needs_review" ? (
-                <li>
-                  ⚠️ <strong>Wealth Statement</strong> — some rows could not be
-                  entered safely. Review the Reconciliation and Personal Assets
-                  pages in FBR and the agent log before continuing
-                </li>
-              ) : (
-                <li>
-                  ⚠️ <strong>Wealth Statement &amp; Reconciliation</strong> —
-                  NOT entered by this run (the agent&apos;s Wealth switch was
-                  off, or this was a dry run). Complete it in FBR, then
-                  calculate and make sure the unreconciled amount is 0
-                </li>
-              )}
-              {completedAgentJob?.handoffScope?.propertyPaymentsComputations ===
-              "reviewed_by_taxpayer" ? (
-                <li>
-                  ✅ <strong>Property, Payments, Computations</strong> — shown
-                  to you by the agent and confirmed as reviewed by you (the
-                  agent fills none of them)
-                </li>
-              ) : (
-                <li>
-                  ⚠️ <strong>Property, Payments, Computations</strong> — NOT
-                  filled by the agent and not yet confirmed as reviewed
-                </li>
-              )}
-              {completedAgentJob?.handoffScope?.employers ===
-              "confirmed_by_taxpayer" ? (
-                <li>
-                  ✅ <strong>Employer details</strong> — added by you in FBR
-                  (you confirmed it; the agent did not check it)
-                </li>
-              ) : completedAgentJob?.handoffScope?.employers === "listed" ? (
-                <li>
-                  ✅ <strong>Employer details</strong> — added by the agent by
-                  registered name (IRIS filled the registration number)
-                </li>
-              ) : completedAgentJob?.handoffScope?.employers ===
-                "needs_review" ? (
-                <li>
-                  ⚠️ <strong>Employer details</strong> — an employer could not
-                  be added safely. Check Employment → Salary → Employer Details
-                  in FBR
-                </li>
-              ) : (
-                <li>
-                  ⚠️ <strong>Employer details</strong> — not added by this run.
-                  If your return needs them, add them in FBR (Employment →
-                  Salary → + Add Employer Details)
-                </li>
-              )}
-              <li>
-                ⛔ The agent never saves, calculates, pays or submits. The
-                return is not ready to submit until the items above are done.
-              </li>
-            </ul>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                setStartOver(true);
-                setError(null);
-              }}
-            >
-              Start another FBR handoff
-            </Button>
-          </CardContent>
-        </Card>
+        <HandoffCompleteCard
+          scope={completedAgentJob?.handoffScope ?? null}
+          finishedAt={
+            completedAgentJob
+              ? formatWhen(
+                  completedAgentJob.completedAt || completedAgentJob.createdAt,
+                )
+              : null
+          }
+          onStartOver={() => {
+            setStartOver(true);
+            setError(null);
+          }}
+        />
       )}
     </div>
+  );
+}
+
+type HandoffScope = NonNullable<JobView["handoffScope"]>;
+
+type HandoffRowState = "done" | "attention";
+
+function HandoffRow({
+  title,
+  detail,
+  state,
+}: Readonly<{ title: string; detail: string; state: HandoffRowState }>) {
+  return (
+    <li className="flex items-start justify-between gap-4 px-4 py-3">
+      <div className="min-w-0">
+        <p className="text-sm font-medium text-foreground">{title}</p>
+        <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+          {detail}
+        </p>
+      </div>
+      <span
+        className={`mt-0.5 shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-medium ${
+          state === "done"
+            ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+            : "border-amber-300 bg-amber-50 text-amber-800"
+        }`}
+      >
+        {state === "done" ? "Completed" : "Needs your attention"}
+      </span>
+    </li>
+  );
+}
+
+/**
+ * What the desktop agent did and what the taxpayer does next. The agent never
+ * saves, calculates, pays or submits: the final review and the submission are
+ * the taxpayer's, in the FBR window.
+ */
+function HandoffCompleteCard({
+  scope,
+  finishedAt,
+  onStartOver,
+}: Readonly<{
+  scope: HandoffScope | null;
+  finishedAt: string | null;
+  onStartOver: () => void;
+}>) {
+  const rows: { title: string; detail: string; state: HandoffRowState }[] = [];
+
+  rows.push(
+    scope?.salary === "filled"
+      ? {
+          title: "Salary income and withholding",
+          detail:
+            "Salary income and tax deducted under section 149 were entered and read back from the FBR draft.",
+          state: "done",
+        }
+      : {
+          title: "Salary income and withholding",
+          detail:
+            "Some salary amounts could not be confirmed in the FBR draft. Open Employment in FBR and check Salary and Tax Deductions.",
+          state: "attention",
+        },
+  );
+
+  rows.push(
+    scope?.employers === "confirmed_by_taxpayer"
+      ? {
+          title: "Employer details",
+          detail:
+            "Added by you in FBR. You confirmed this; the agent did not check it.",
+          state: "done",
+        }
+      : scope?.employers === "listed"
+        ? {
+            title: "Employer details",
+            detail:
+              "Added by the agent by registered name; FBR filled in the registration number.",
+            state: "done",
+          }
+        : scope?.employers === "needs_review"
+          ? {
+              title: "Employer details",
+              detail:
+                "An employer could not be added safely. Check Employment, Salary, Employer Details in FBR.",
+              state: "attention",
+            }
+          : {
+              title: "Employer details",
+              detail:
+                "No employer was added by this run. If FBR asks for employer details, add them under Employment, Salary, Add Employer Details.",
+              state: "attention",
+            },
+  );
+
+  rows.push(
+    scope?.wealthStatement === "entered_not_calculated"
+      ? {
+          title: "Wealth Statement",
+          detail: `${scope.wealthRows} row(s) entered: personal expenses, tax paid and bank accounts. Open Reconciliation of Net Assets in FBR and make sure the unreconciled amount is 0.`,
+          state: "done",
+        }
+      : scope?.wealthStatement === "needs_review"
+        ? {
+            title: "Wealth Statement",
+            detail:
+              "Some rows could not be entered safely. Review Personal Assets and Reconciliation in FBR.",
+            state: "attention",
+          }
+        : {
+            title: "Wealth Statement",
+            detail:
+              "Not entered by this run. Complete it in FBR and make sure the unreconciled amount is 0.",
+            state: "attention",
+          },
+  );
+
+  rows.push(
+    scope?.propertyPaymentsComputations === "reviewed_by_taxpayer"
+      ? {
+          title: "Property, Payments and Computations",
+          detail:
+            "Shown to you by the agent and confirmed by you as reviewed. The agent fills none of them.",
+          state: "done",
+        }
+      : {
+          title: "Property, Payments and Computations",
+          detail:
+            "Not filled by the agent and not yet confirmed as reviewed. Review them in FBR.",
+          state: "attention",
+        },
+  );
+
+  const allDone = rows.every((row) => row.state === "done");
+
+  return (
+    <Card className="overflow-hidden">
+      <CardHeader className="border-b bg-muted/30 pb-4">
+        <CardTitle className="flex items-center gap-2 text-base">
+          <CheckCircle
+            className={`h-5 w-5 ${allDone ? "text-emerald-600" : "text-amber-600"}`}
+            aria-hidden="true"
+          />
+          {allDone
+            ? "Return prepared in FBR. Review and submit it yourself."
+            : "Return partly prepared. Finish the items below, then submit it yourself."}
+        </CardTitle>
+        <p className="text-sm leading-relaxed text-muted-foreground">
+          The desktop agent finished entering your approved data
+          {finishedAt ? ` at ${finishedAt}` : ""}. TaxRocket does not save,
+          calculate, pay or submit for you. The final review and the submission
+          are done by you in the FBR window.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-5 p-0">
+        <div>
+          <p className="px-4 pt-4 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            What was done
+          </p>
+          <ul className="mt-2 divide-y border-y">
+            {rows.map((row) => (
+              <HandoffRow key={row.title} {...row} />
+            ))}
+          </ul>
+        </div>
+
+        <div className="px-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Before you submit in FBR
+          </p>
+          <ol className="mt-2 list-decimal space-y-1.5 pl-5 text-sm text-muted-foreground">
+            <li>
+              Check every section you filled, and make sure the Reconciliation
+              of Net Assets shows an unreconciled amount of 0.
+            </li>
+            <li>
+              Open Computations and confirm the tax figures. Any tax due is paid
+              through FBR.
+            </li>
+            <li>
+              When you are satisfied, submit the return yourself in the FBR
+              window.
+            </li>
+          </ol>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t bg-muted/20 px-4 py-3">
+          <p className="text-xs text-muted-foreground">
+            Keep the FBR window open until you have submitted.
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={onStartOver}
+          >
+            Start another FBR handoff
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

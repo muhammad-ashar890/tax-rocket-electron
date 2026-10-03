@@ -102,7 +102,11 @@ function describeEmployers(autofill) {
   for (const entry of employers.results || []) {
     const who =
       entry.status === "added"
-        ? "ADDED BY THE AGENT (exact registered name)"
+        ? `ADDED BY THE AGENT${
+            entry.registeredName
+              ? ` as \"${entry.registeredName}\"${entry.regNo ? ` (registration ${entry.regNo})` : ""}`
+              : ""
+          }`
         : entry.status === "already_listed"
           ? "ALREADY LISTED in IRIS (agent did nothing)"
           : `NOT ADDED by the agent (${entry.status})`;
@@ -122,11 +126,18 @@ function describeFields(autofill) {
   if (!results.length) return ["  No field was attempted in this run."];
   return results.map((r) => {
     const planned = money(r.plannedValue ?? r.value);
-    const had = r.existingValue;
+    const isCash = r.cashDelta !== undefined && r.cashDelta !== null;
+    const had =
+      isCash && r.baselineValue !== undefined
+        ? r.baselineValue
+        : r.existingValue;
     const hadText =
       had === null || had === undefined || had === ""
         ? "IRIS cell was empty"
         : `IRIS cell had ${money(had)}`;
+    const cashText = isCash
+      ? ` · cash movement ${Number(r.cashDelta) >= 0 ? "+" : "-"}${money(Math.abs(Number(r.cashDelta)))} added to IRIS's own figure`
+      : "";
     let who;
     if (r.status === "filled") who = "TYPED BY THE AGENT";
     else if (r.status === "already_correct")
@@ -137,7 +148,7 @@ function describeFields(autofill) {
         "NOT TYPED — IRIS holds a different figure and it is never overwritten";
     else who = `NOT TYPED (${r.status})`;
     const label = r.rowDescription || r.label || "";
-    return `  [${r.sectionId || "?"}] ${r.irisCode} ${label} · ${r.requestedColumn || ""} · planned ${planned} · ${hadText} → ${who}`;
+    return `  [${r.sectionId || "?"}] ${r.irisCode} ${label} · ${r.requestedColumn || ""} · planned ${planned} · ${hadText}${cashText} → ${who}`;
   });
 }
 

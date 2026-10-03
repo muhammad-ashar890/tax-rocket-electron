@@ -402,3 +402,36 @@ assert.equal(
 }
 
 console.log("Salary-certificate field and gross-source checks passed.");
+
+// The "other employers" editor: one row per name, stored as one string.
+{
+  const { splitOtherEmployerRows, joinOtherEmployerRows } = require(
+    path.join(root, "lib/tax/salary-certificate-fields.ts"),
+  );
+  assert.deepEqual(
+    splitOtherEmployerRows(null),
+    [""],
+    "an empty value still shows one row",
+  );
+  assert.deepEqual(splitOtherEmployerRows("A; B"), ["A", "B"]);
+  assert.deepEqual(splitOtherEmployerRows("technexia, systems limited"), [
+    "technexia",
+    "systems limited",
+  ]);
+  assert.equal(
+    joinOtherEmployerRows(["A", "", " B  C "]),
+    "A; B C",
+    "blank rows are dropped, spacing is tidied",
+  );
+  assert.equal(joinOtherEmployerRows([""]), "");
+  const doc = fs.readFileSync(
+    path.join(root, "components/tax/filing/wizard-documents-step.tsx"),
+    "utf8",
+  );
+  assert.match(doc, /OtherEmployerNamesField/);
+  const field = fs.readFileSync(
+    path.join(root, "components/tax/filing/other-employer-names-field.tsx"),
+    "utf8",
+  );
+  assert.match(field, /Add employer/);
+}

@@ -906,3 +906,77 @@ test("a reconciliation adjustment is explained as a notice, with no field to cho
   assert.ok(blocked.refusal.includes("Unreconciled amount in IRIS"));
   assert.ok(!blocked.refusal.includes("which FBR/IRIS field should receive"));
 });
+
+// ───────────────────────────────────────────────────────────────
+// Reconciliation auto-adjustment carried by the bank closing balance
+// ───────────────────────────────────────────────────────────────
+
+const adjustmentFixture = ({ category, amount, banks }) =>
+  buildPortalFieldMap({
+    taxYear: 2026,
+    filerType: "INDIVIDUAL",
+    taxpayerListStatus: null,
+    ledgerEntries: [
+      { entryType: "OTHER", category, description: "Mizan auto-adjustment", amount },
+    ],
+    bankAccounts: banks,
+  });
+const bank = (iban, closing) => ({ iban, bankName: "HBL", accountLabel: "Salary", closingBalance: closing });
+
+test("reconciliation: an inflow adjustment lowers the declared bank closing balance and is no longer a manual gap", () => {
+  const map = adjustmentFixture({
+    category: "RECONCILIATION_ADJUSTMENT_INFLOW",
+    amount: 50000,
+    banks: [bank("PK35HABB0018067900476803", 750000)],
+  });
+  const row = map.wealthFields.find((f) => f.irisCode === "7030");
+  assert.equal(row.ourAmount, 700000);
+  assert.equal(row.statementClosingBalance, 750000);
+  assert.equal(row.rowDescriptionIncludes, "PK35HABB0018067900476803");
+  assert.deepEqual(map.mappingGaps.unmappedCategories, []);
+  assert.deepEqual(map.mappingGaps.reconciliationAdjustment, {
+    signedAmount: 50000,
+    iban: "PK35HABB0018067900476803",
+    statementClosing: 750000,
+    declaredClosing: 700000,
+  });
+});
+
+test("reconciliation: an outflow adjustment raises the declared balance", () => {
+  const map = adjustmentFixture({
+    category: "RECONCILIATION_ADJUSTMENT_OUTFLOW",
+    amount: 30000,
+    banks: [bank("PK35HABB0018067900476803", 750000)],
+  });
+  assert.equal(map.wealthFields.find((f) => f.irisCode === "7030").ourAmount, 780000);
+  assert.equal(map.mappingGaps.reconciliationAdjustment.signedAmount, -30000);
+});
+
+test("reconciliation: with several accounts only the one holding the most money carries it", () => {
+  const map = adjustmentFixture({
+    category: "RECONCILIATION_ADJUSTMENT_INFLOW",
+    amount: 50000,
+    banks: [bank("PK00AAAA0000000000000001", 100000), bank("PK00BBBB0000000000000002", 750000)],
+  });
+  const amounts = Object.fromEntries(
+    map.wealthFields.filter((f) => f.irisCode === "7030").map((f) => [f.rowDescriptionIncludes, f.ourAmount]),
+  );
+  assert.deepEqual(amounts, { PK00AAAA0000000000000001: 100000, PK00BBBB0000000000000002: 700000 });
+});
+
+test("reconciliation: an adjustment that would empty the account stays a manual notice", () => {
+  const map = adjustmentFixture({
+    category: "RECONCILIATION_ADJUSTMENT_INFLOW",
+    amount: 800000,
+    banks: [bank("PK35HABB0018067900476803", 750000)],
+  });
+  assert.equal(map.wealthFields.find((f) => f.irisCode === "7030").ourAmount, 750000);
+  assert.equal(map.mappingGaps.reconciliationAdjustment, undefined);
+  assert.equal(map.mappingGaps.unmappedCategories.length, 1);
+});
+
+test("reconciliation: with no bank account in the packet the adjustment stays a manual notice", () => {
+  const map = adjustmentFixture({ category: "RECONCILIATION_ADJUSTMENT_INFLOW", amount: 50000, banks: [] });
+  assert.equal(map.mappingGaps.unmappedCategories.length, 1);
+  assert.equal(map.mappingGaps.reconciliationAdjustment, undefined);
+});

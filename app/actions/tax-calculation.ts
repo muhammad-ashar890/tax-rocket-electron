@@ -31,6 +31,7 @@ import {
   normalizeLedgerCategory,
   resolveTaxWithheld,
 } from "@/lib/tax/withholding-sources";
+import { isGiftCategory } from "@/lib/tax/gift-income";
 import { resolveSalaryTaxableIncome } from "@/lib/tax/salary-certificate-fields";
 import { createNotification } from "@/app/actions/notifications";
 import { sumMoney, toMoneyAmount } from "@/lib/money";
@@ -115,9 +116,14 @@ export async function calculateTaxAction(
     // These feed the tax engine, so they are summed in Decimal: `+` on a
     // Decimal column concatenates, and converting first reintroduces the
     // floating-point residue the migration exists to remove.
+    // A gift received is a Wealth Statement inflow, not income: it is in the
+    // ledger so Mizan balances, and it never reaches a tax figure.
     const totalIncome = sumMoney(
       entries
-        .filter((entry) => entry.entryType === "INCOME")
+        .filter(
+          (entry) =>
+            entry.entryType === "INCOME" && !isGiftCategory(entry.category),
+        )
         .map((entry) => entry.amount),
     );
     const totalExpenses = sumMoney(
@@ -231,9 +237,7 @@ export async function calculateTaxAction(
         selectedSubcategories.get(selection.source) ?? new Set<string>();
       sourceSelections.add(selection.subcategory);
       selectedSubcategories.set(selection.source, sourceSelections);
-      const details = parsePersistedSelectionUserDetails(
-        selection.detailsJson,
-      );
+      const details = parsePersistedSelectionUserDetails(selection.detailsJson);
       if (details) {
         selectionDetails.set(
           `${selection.source}\u0000${selection.subcategory}`,
@@ -551,8 +555,7 @@ export async function calculateTaxAction(
       // isBelow70 is false for 70+ and unknown alike (turns-70 counts as
       // below-70 under the confirmed first-day rule), so the exemption
       // needs its own confirmed signal: 70 for the whole year.
-      pensionerAge70OrAbove:
-        pensionerAge.bracket === "SEVENTY_OR_ABOVE",
+      pensionerAge70OrAbove: pensionerAge.bracket === "SEVENTY_OR_ABOVE",
       pensionTaxAsSalary,
       rentalRecipientKind,
     });
@@ -561,10 +564,10 @@ export async function calculateTaxAction(
       activityDetailProblems.length > 0
         ? `This filing is missing figures for ${activityDetailProblems.join(" · ")}. Open the category step, enter the missing figures, save, and recalculate.`
         : flatRoutesNeedingSplit.length > 0
-        ? `This filing selects more than one category under ${flatRoutesNeedingSplit.join(", ")}, and each category is charged at its own rate. The ledger records a single amount per source, so there is no evidence for how the income divides between those categories. Record the income as separate ledger entries per category, or select a single category, and recalculate.`
-        : unroutedSources.length > 0
-          ? `This filing selects ${unroutedSources.join(", ")}, for which no TY2026 route is implemented yet. Confirmed rules are required before those sources can be included in an estimate.`
-          : null;
+          ? `This filing selects more than one category under ${flatRoutesNeedingSplit.join(", ")}, and each category is charged at its own rate. The ledger records a single amount per source, so there is no evidence for how the income divides between those categories. Record the income as separate ledger entries per category, or select a single category, and recalculate.`
+          : unroutedSources.length > 0
+            ? `This filing selects ${unroutedSources.join(", ")}, for which no TY2026 route is implemented yet. Confirmed rules are required before those sources can be included in an estimate.`
+            : null;
 
     const result: TaxCalculationResult = blockedNote
       ? {

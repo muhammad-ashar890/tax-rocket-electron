@@ -175,6 +175,13 @@ export type PortalMappingGaps = {
   }[];
   /** IRIS codes deliberately skipped because the row is computed, not entered. */
   skippedComputedCodes: { code: string; description: string; amount: number }[];
+  /** The auto-adjustment was applied to the bank balance entered in IRIS (7030). */
+  reconciliationAdjustment?: {
+    signedAmount: number;
+    iban: string;
+    statementClosing: number;
+    declaredClosing: number;
+  };
   /**
    * Codes with no captured proof that IRIS renders an ENTERABLE row for them
    * (as opposed to `skippedComputedCodes`, which are known to be computed).

@@ -13,6 +13,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { StepHeading } from "@/components/tax/wizard-ui";
+import { OtherEmployerNamesField } from "@/components/tax/filing/other-employer-names-field";
 import { formatCnicInput, normalizeIdentityName } from "@/lib/tax/cnic-profile";
 import { getTaxYearDateInputBounds } from "@/lib/tax/tax-year-period";
 import { isDocumentExtractionLeaseStale } from "@/lib/tax/document-extraction-state";
@@ -605,6 +606,27 @@ export function WizardDocumentsStep({
                             ? normalizeIdentityName(field.value)
                             : String(field.value ?? "");
 
+                        if (
+                          isSalaryCertificate &&
+                          getSalaryCertificateFieldKind(field.label) ===
+                            "other_employers"
+                        ) {
+                          return (
+                            <OtherEmployerNamesField
+                              key={`${field.label}-${fieldIndex}`}
+                              value={String(field.value ?? "")}
+                              readOnly={isMapped && !employersEditableAfterMap}
+                              onChange={(next) =>
+                                handleExtractedFieldChange(
+                                  slotKey,
+                                  fieldIndex,
+                                  next,
+                                )
+                              }
+                            />
+                          );
+                        }
+
                         return (
                           <label
                             key={`${field.label}-${fieldIndex}`}
@@ -748,9 +770,8 @@ export function WizardDocumentsStep({
                         Enter the employer name exactly as it is registered with
                         FBR. The agent adds it on IRIS by name, and the name
                         must match IRIS&apos;s list. If you had more than one
-                        employer this year, add the others under &quot;Other
-                        Employer Names&quot; separated by semicolons or
-                        commas.
+                        employer this year, add each one under &quot;Other
+                        employers&quot; with the Add employer button.
                       </p>
                     )}
 

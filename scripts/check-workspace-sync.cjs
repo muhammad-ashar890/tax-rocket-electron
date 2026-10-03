@@ -78,8 +78,8 @@ const MARKERS = [
     "components/tax/fbr-connect-client.tsx",
     [
       "Start filing",
-      "Salary step complete — return",
-      "does <strong>not</strong> mean the return was filed",
+      "Review and submit it yourself",
+      "submit the return yourself in the FBR",
     ],
     "the flow distinguishes a finished agent task from a filed return",
   ],
@@ -115,7 +115,7 @@ const MARKERS = [
   ],
   [
     "electron-connect/iris-employer-driver.js",
-    ["runEmployerDriver", "fix34-tax-year-employer-20261002"],
+    ["runEmployerDriver", "fix39-gift-keywords-20261003"],
     "the employer driver (exact registered name only)",
   ],
   [
@@ -134,7 +134,7 @@ const MARKERS = [
   [
     "electron-connect/main.js",
     [
-      "fix34-tax-year-employer-20261002",
+      "fix39-gift-keywords-20261003",
       "live_return_autofill",
       "Live entry entered and verified",
     ],
@@ -149,6 +149,96 @@ const MARKERS = [
     "electron-connect/iris-row-filler.js",
     ["readback_mismatch"],
     "every write is re-read before it counts",
+  ],
+  [
+    "electron-connect/iris-row-filler.js",
+    ["replaceOnlyIfExisting"],
+    "Cash in hand: a cell may be replaced only when it holds the proven baseline",
+  ],
+  [
+    "electron-connect/iris-wealth-driver.js",
+    ["planCashTarget", "add_to_iris_value"],
+    "Cash in hand (7012): baseline plus movement, never a bare overwrite",
+  ],
+  [
+    "electron-connect/cash-baseline-store.js",
+    ["createCashBaselineStore"],
+    "the saved Cash in hand baseline that stops a re-run adding the movement twice",
+  ],
+  [
+    "lib/tax/cash-in-hand.ts",
+    ["export function netCashMovement"],
+    "net cash movement shared by Mizan and the packet",
+  ],
+  [
+    "lib/tax/gift-income.ts",
+    ["export function isGiftCategory"],
+    "a gift is a Wealth Statement inflow, not income",
+  ],
+  [
+    "lib/tax/bank-classification-rules.ts",
+    ["GIFT_KEYWORDS", "export function classifyTransaction"],
+    "Bank Intelligence rules (whole-word keywords, gift suggestion)",
+  ],
+  [
+    "lib/tax/bank-transfer-matching.ts",
+    ["bankDescriptionContainsPhrase", "findTransferLookalikePairs"],
+    "whole-word keyword matching",
+  ],
+  [
+    "lib/tax/reconciliation-calculation.ts",
+    ["netCashMovement(transactions)"],
+    "Mizan counts cash moved out of the bank as Cash in hand",
+  ],
+  [
+    "app/actions/tax-calculation.ts",
+    ["isGiftCategory(entry.category)"],
+    "a gift never reaches a tax figure",
+  ],
+  [
+    "app/actions/bank-classification.ts",
+    ['from "@/lib/tax/bank-classification-rules"'],
+    "the action uses the shared rules file",
+  ],
+  [
+    "components/tax/filing/wizard-bank-intelligence-step.tsx",
+    ['"GIFT",', "bankAccounts.length > 1"],
+    "Gift in the category dropdown; transfer button only with two accounts",
+  ],
+  [
+    "lib/tax/portal-field-map.ts",
+    ["valueMode: VALUE_MODE_ADD_TO_IRIS", "isGiftCategory"],
+    "the 7012 movement field and the gift exclusion",
+  ],
+  [
+    "lib/tax/filing-completeness.ts",
+    ["findTransferLookalikePairs(transactions)"],
+    "the Continue gate refuses an own-account transfer booked as income or an expense",
+  ],
+  [
+    "test-fixtures/iris/employer/salary-employer-panel.html",
+    ["salary-employer-add-btn"],
+    "fixture read by the employer driver tests (a missing folder fails 24 tests with ENOENT)",
+  ],
+  [
+    "test-fixtures/iris/employer/modal-add-employer.html",
+    ["mat-dialog-container"],
+    "fixture read by the employer driver tests",
+  ],
+  [
+    "scripts/lib/fake-iris-employer.cjs",
+    ["class FakeIrisEmployer"],
+    "the fake IRIS employer page the driver tests run against",
+  ],
+  [
+    "scripts/lib/fake-iris-wealth.cjs",
+    ["class FakeIris {"],
+    "the fake IRIS Wealth Statement page the driver tests run against",
+  ],
+  [
+    "test-fixtures/iris/wealth/modal-bank.html",
+    ["mat-dialog-container"],
+    "fixture read by the wealth driver tests",
   ],
 ];
 

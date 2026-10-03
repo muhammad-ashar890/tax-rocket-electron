@@ -123,6 +123,22 @@ function PortalMappingGapNotice({
   const computed = gaps.skippedComputedCodes || [];
   const unproven = gaps.captureUnverified || [];
   const mismatches = gaps.pensionSplitMismatch || [];
+  const money = (value: number) => `PKR ${Math.round(value).toLocaleString()}`;
+  const adjustment = gaps.reconciliationAdjustment;
+  const adjustmentNote = adjustment ? (
+    <div className="rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm">
+      <p className="font-semibold text-foreground">
+        Bank balance adjusted by the reconciliation
+      </p>
+      <p className="mt-1 text-xs text-muted-foreground">
+        The auto-adjustment of {money(Math.abs(adjustment.signedAmount))} is
+        carried by the closing balance of your bank account in the Wealth
+        Statement. The statement shows {money(adjustment.statementClosing)}; the
+        desktop agent will enter {money(adjustment.declaredClosing)} for it in
+        IRIS. Check this against your bank statement before you approve.
+      </p>
+    </div>
+  ) : null;
   if (
     !unmapped.length &&
     !computed.length &&
@@ -130,117 +146,122 @@ function PortalMappingGapNotice({
     !unproven.length
   ) {
     return (
-      <p className="text-xs text-muted-foreground">
-        No additional manual entries are currently needed for this packet.
-      </p>
-    );
-  }
-  const money = (value: number) => `PKR ${Math.round(value).toLocaleString()}`;
-  return (
-    <div className="overflow-hidden rounded-xl border border-amber-500/40 bg-amber-50/40 dark:bg-amber-500/5">
-      <div className="border-b border-amber-500/30 px-4 py-3">
-        <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-200">
-          Manual entry still required
-        </h3>
-        <p className="mt-0.5 text-xs text-muted-foreground">
-          The desktop agent will fill the supported items. You will handle the
-          amounts listed below yourself in IRIS.
+      <div className="space-y-3">
+        {adjustmentNote}
+        <p className="text-xs text-muted-foreground">
+          No additional manual entries are currently needed for this packet.
         </p>
       </div>
-      {unmapped.length > 0 && (
-        <div className="px-4 py-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Items you will enter in IRIS
+    );
+  }
+  return (
+    <div className="space-y-3">
+      {adjustmentNote}
+      <div className="overflow-hidden rounded-xl border border-amber-500/40 bg-amber-50/40 dark:bg-amber-500/5">
+        <div className="border-b border-amber-500/30 px-4 py-3">
+          <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-200">
+            Manual entry still required
+          </h3>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            The desktop agent will fill the supported items. You will handle the
+            amounts listed below yourself in IRIS.
           </p>
-          <ul className="mt-2 space-y-1">
-            {unmapped.map((gap) => (
-              <li
-                key={gap.category}
-                className="flex flex-wrap items-baseline justify-between gap-2 text-sm"
-              >
-                <span>
-                  {manualEntryLabel(gap.category)}
-                  <span className="ml-2 text-xs text-muted-foreground">
-                    {manualEntryHint(gap.category)}
+        </div>
+        {unmapped.length > 0 && (
+          <div className="px-4 py-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Items you will enter in IRIS
+            </p>
+            <ul className="mt-2 space-y-1">
+              {unmapped.map((gap) => (
+                <li
+                  key={gap.category}
+                  className="flex flex-wrap items-baseline justify-between gap-2 text-sm"
+                >
+                  <span>
+                    {manualEntryLabel(gap.category)}
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {manualEntryHint(gap.category)}
+                    </span>
                   </span>
-                </span>
-                <span className="font-medium tabular-nums">
-                  {money(gap.totalAmount)}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {computed.length > 0 && (
-        <div className="border-t border-amber-500/20 px-4 py-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Amounts IRIS calculates automatically
-          </p>
-          <ul className="mt-2 space-y-1">
-            {computed.map((row) => (
-              <li
-                key={row.code}
-                className="flex flex-wrap items-baseline justify-between gap-2 text-sm"
-              >
-                <span>{row.description}</span>
-                <span className="tabular-nums text-muted-foreground">
-                  {money(row.amount)}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {unproven.length > 0 && (
-        <div className="border-t border-amber-500/20 px-4 py-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Items requiring your review
-          </p>
-          <ul className="mt-2 space-y-1">
-            {unproven.map((row) => (
-              <li
-                key={`${row.code}-${row.category}`}
-                className="flex flex-wrap items-baseline justify-between gap-2 text-sm"
-              >
-                <span>{row.description}</span>
-                <span className="tabular-nums text-muted-foreground">
-                  {money(row.amount)}
-                </span>
-              </li>
-            ))}
-          </ul>
-          <p className="mt-2 text-xs text-muted-foreground">
-            The agent could not safely confirm an editable IRIS field for these
-            items, so it will not guess. Review and handle them directly in
-            IRIS.
-          </p>
-        </div>
-      )}
-      {mismatches.length > 0 && (
-        <div className="border-t border-amber-500/20 px-4 py-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Pension split does not match the ledger
-          </p>
-          <ul className="mt-2 space-y-1">
-            {mismatches.map((mismatch) => (
-              <li
-                key={mismatch.entryId}
-                className="flex flex-wrap items-baseline justify-between gap-2 text-sm"
-              >
-                <span className="text-muted-foreground">
-                  The pension amount and its tax split do not match. Review the
-                  pension figures before continuing.
-                </span>
-                <span className="font-medium tabular-nums">
-                  {money(mismatch.ledgerAmount)} vs{" "}
-                  {money(mismatch.engineSplitTotal)}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+                  <span className="font-medium tabular-nums">
+                    {money(gap.totalAmount)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {computed.length > 0 && (
+          <div className="border-t border-amber-500/20 px-4 py-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Amounts IRIS calculates automatically
+            </p>
+            <ul className="mt-2 space-y-1">
+              {computed.map((row) => (
+                <li
+                  key={row.code}
+                  className="flex flex-wrap items-baseline justify-between gap-2 text-sm"
+                >
+                  <span>{row.description}</span>
+                  <span className="tabular-nums text-muted-foreground">
+                    {money(row.amount)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {unproven.length > 0 && (
+          <div className="border-t border-amber-500/20 px-4 py-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Items requiring your review
+            </p>
+            <ul className="mt-2 space-y-1">
+              {unproven.map((row) => (
+                <li
+                  key={`${row.code}-${row.category}`}
+                  className="flex flex-wrap items-baseline justify-between gap-2 text-sm"
+                >
+                  <span>{row.description}</span>
+                  <span className="tabular-nums text-muted-foreground">
+                    {money(row.amount)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-2 text-xs text-muted-foreground">
+              The agent could not safely confirm an editable IRIS field for
+              these items, so it will not guess. Review and handle them directly
+              in IRIS.
+            </p>
+          </div>
+        )}
+        {mismatches.length > 0 && (
+          <div className="border-t border-amber-500/20 px-4 py-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Pension split does not match the ledger
+            </p>
+            <ul className="mt-2 space-y-1">
+              {mismatches.map((mismatch) => (
+                <li
+                  key={mismatch.entryId}
+                  className="flex flex-wrap items-baseline justify-between gap-2 text-sm"
+                >
+                  <span className="text-muted-foreground">
+                    The pension amount and its tax split do not match. Review
+                    the pension figures before continuing.
+                  </span>
+                  <span className="font-medium tabular-nums">
+                    {money(mismatch.ledgerAmount)} vs{" "}
+                    {money(mismatch.engineSplitTotal)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -399,6 +420,7 @@ export function WizardPacketStep({
         <WorkflowKpiCard
           label="Tax payable"
           value={money(filingSummary?.taxPayable)}
+          sub="Estimate only. The amount to pay is the one IRIS shows."
           accent="amanah"
         />
         <WorkflowKpiCard

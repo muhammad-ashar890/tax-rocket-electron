@@ -173,6 +173,7 @@ export function WizardBankIntelligenceStep({
       "PROPERTY_RENT",
       "DIVIDEND",
       "SERVICES",
+      "GIFT",
       "OTHER_INCOME",
     ],
     EXPENSE: [
@@ -1165,7 +1166,10 @@ export function WizardBankIntelligenceStep({
                                 <XCircle className="h-3.5 w-3.5" />
                               </button>
                             )}
+                          {/* An internal transfer needs a second owned account: with one
+                              account there is nothing to match, so no button. */}
                           {row.id &&
+                            bankAccounts.length > 1 &&
                             row.classificationStatus !== "TRANSFER" && (
                               <button
                                 type="button"
@@ -1184,8 +1188,8 @@ export function WizardBankIntelligenceStep({
                             row.classificationStatus !== "CASH_MOVEMENT" && (
                               <button
                                 type="button"
-                                title="Mark as a cash movement"
-                                aria-label="Mark as a cash movement"
+                                title="Cash movement: my own cash taken out of or put into the bank (recorded in Cash in hand)"
+                                aria-label="Mark as a cash movement: my own cash taken out of or put into the bank"
                                 onClick={() =>
                                   handleReview(row.id!, "CASH_MOVEMENT")
                                 }

@@ -642,7 +642,9 @@ export function FilingWizard({
     employerCount: employerCount as "single" | "multiple" | "unsure",
     hasServicesIncome: hasServicesIncome as "yes" | "no" | "unsure",
     hasForeignIncomeOrAssets: hasForeignIncomeOrAssets as
-      "yes" | "no" | "unsure",
+      | "yes"
+      | "no"
+      | "unsure",
     hasAopCompanyLink: hasAopCompanyLink as "yes" | "no" | "unsure",
     highProfitOnDebt: highProfitOnDebt as "yes" | "no" | "unsure",
     filingIntent: filingIntent as "original" | "revised" | "unsure",

@@ -40,17 +40,33 @@ export function bankDescriptionMatchesKeyword(
   const normalizedKeyword = normalizeBankDescription(keyword);
   if (!normalizedKeyword) return false;
 
-  if (normalizedKeyword.length <= 2) {
-    return normalized.split(" ").includes(normalizedKeyword);
-  }
+  // Whole words only. A plain substring test matched "rent" inside "Parents"
+  // and "Current", "tax" inside "Taxi", "total" inside "Subtotal". A trailing
+  // plural ("rents", "taxes") still counts as the same word.
+  const haystack = ` ${normalized} `;
+  return [
+    ` ${normalizedKeyword} `,
+    ` ${normalizedKeyword}s `,
+    ` ${normalizedKeyword}es `,
+  ].some((needle) => haystack.includes(needle));
+}
 
-  return normalized.includes(normalizedKeyword);
+/**
+ * Plain phrase search, used for transfer wording only. Bank narrations glue
+ * channel codes to numbers ("IBFT12345"), so a whole-word test would miss them.
+ */
+export function bankDescriptionContainsPhrase(
+  normalized: string,
+  phrase: string,
+) {
+  const normalizedPhrase = normalizeBankDescription(phrase);
+  return Boolean(normalizedPhrase) && normalized.includes(normalizedPhrase);
 }
 
 export function hasInternalTransferLanguage(description: string) {
   const normalized = normalizeBankDescription(description);
   return TRANSFER_KEYWORDS.some((keyword) =>
-    bankDescriptionMatchesKeyword(normalized, keyword),
+    bankDescriptionContainsPhrase(normalized, keyword),
   );
 }
 
@@ -71,11 +87,7 @@ export function findLikelyInternalTransferPairs<T extends TransferCandidate>(
   const debit = toMoneyAmount(transaction.debit);
   const credit = toMoneyAmount(transaction.credit);
   const amount =
-    debit > 0 && credit <= 0
-      ? debit
-      : credit > 0 && debit <= 0
-        ? credit
-        : 0;
+    debit > 0 && credit <= 0 ? debit : credit > 0 && debit <= 0 ? credit : 0;
   if (amount <= 0) return [];
 
   return candidates.filter((candidate) => {
@@ -95,10 +107,7 @@ export function findLikelyInternalTransferPairs<T extends TransferCandidate>(
         credit <= 0 &&
         candidateCredit > 0 &&
         candidateDebit <= 0) ||
-      (credit > 0 &&
-        debit <= 0 &&
-        candidateDebit > 0 &&
-        candidateCredit <= 0);
+      (credit > 0 && debit <= 0 && candidateDebit > 0 && candidateCredit <= 0);
     if (!hasOppositeSide) return false;
 
     const candidateAmount =
@@ -118,4 +127,61 @@ export function findLikelyInternalTransferPairs<T extends TransferCandidate>(
         hasInternalTransferLanguage(candidate.description))
     );
   });
+}
+
+/**
+ * A row whose narration reads like an own-account transfer and whose opposite
+ * side sits in another owned account, but which is being booked as income or
+ * an expense. Wording on BOTH sides is required, so an ordinary salary credit
+ * that merely says "IBFT" next to an unrelated debit of the same amount is not
+ * caught by this rule.
+ */
+export function isTransferLookalike(
+  transaction: TransferCandidate,
+  counterparts: TransferCandidate[],
+) {
+  return (
+    hasInternalTransferLanguage(transaction.description) &&
+    counterparts.some((counterpart) =>
+      hasInternalTransferLanguage(counterpart.description),
+    )
+  );
+}
+
+/**
+ * Pairs of rows that look like one internal transfer but were not both given
+ * the Internal Transfer decision, where at least one side was approved into
+ * the ledger as income, an expense, an asset or a liability. Booked that way
+ * the money is counted as earned or spent, and because the two sides cancel in
+ * the reconciliation gap nothing else would flag it.
+ */
+export function findTransferLookalikePairs<
+  T extends TransferCandidate & { classificationStatus: string },
+>(transactions: T[]) {
+  const withWording = transactions.filter(
+    (transaction) =>
+      transaction.classificationStatus !== "TRANSFER" &&
+      hasInternalTransferLanguage(transaction.description),
+  );
+  const seen = new Set<string>();
+  const pairs: { first: T; second: T }[] = [];
+
+  for (const transaction of withWording) {
+    for (const counterpart of findLikelyInternalTransferPairs(
+      transaction,
+      withWording,
+    )) {
+      if (
+        transaction.classificationStatus !== "APPROVED" &&
+        counterpart.classificationStatus !== "APPROVED"
+      ) {
+        continue;
+      }
+      const key = [transaction.id, counterpart.id].sort().join("|");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      pairs.push({ first: transaction, second: counterpart });
+    }
+  }
+  return pairs;
 }

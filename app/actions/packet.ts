@@ -436,6 +436,11 @@ export async function generateFilingPacketAction(
       employers: extractMappedSalaryEmployers(
         salaryCertificate?.extractedData ?? null,
       ),
+      // Net cash moved out of the bank; becomes a 7012 Cash in hand movement.
+      netCashMovement:
+        "preview" in reconciliation && reconciliation.preview
+          ? reconciliation.preview.netCashMovement
+          : null,
       // Wealth Statement bank rows (7030): IBAN + closing balance per account.
       bankAccounts:
         "preview" in reconciliation && reconciliation.preview

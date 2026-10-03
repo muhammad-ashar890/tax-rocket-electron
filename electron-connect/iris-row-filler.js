@@ -46,7 +46,7 @@ const DESCRIPTION_SELECTOR = ".row-description-text";
  * a stale copy is a correctness risk, not a cosmetic one — main.js refuses to run
  * the real-portal flow when the three files disagree.
  */
-const BUILD_TAG = "fix34-tax-year-employer-20261002";
+const BUILD_TAG = "fix39-gift-keywords-20261003";
 
 /** Outcome reason codes. `filled` is the only success. */
 const FILL_STATUS = {
@@ -539,12 +539,23 @@ function buildInPageFillScript(fields, options) {
           });
           continue;
         }
-        results.push({
-          ...base, status: S.OVERWRITE_NEEDS_CONFIRMATION, columnIndex: index,
-          matchedBy, rowDescription: descOf(row), existingValue: input.value,
-          plannedValue: amount.value, dryRun: Boolean(CFG.dryRun),
-        });
-        continue;
+        // The caller can name ONE figure it has proven to be its own baseline
+        // (for example the value IRIS held before this agent first wrote the
+        // row, or the figure this agent wrote earlier). Only a cell holding
+        // exactly that figure may be replaced; anything else is still treated
+        // as somebody's data.
+        const replaceable =
+          field.replaceOnlyIfExisting !== undefined &&
+          field.replaceOnlyIfExisting !== null &&
+          String(field.replaceOnlyIfExisting) === existingDigits;
+        if (!replaceable) {
+          results.push({
+            ...base, status: S.OVERWRITE_NEEDS_CONFIRMATION, columnIndex: index,
+            matchedBy, rowDescription: descOf(row), existingValue: input.value,
+            plannedValue: amount.value, dryRun: Boolean(CFG.dryRun),
+          });
+          continue;
+        }
       }
 
       if (CFG.dryRun) {
@@ -702,6 +713,11 @@ function prepareField(field) {
     amountExact: amount.ok ? amount.exact : false,
     roundedFrom: amount.ok && !amount.exact ? String(field.value) : undefined,
     rowDescriptionIncludes: field.rowDescriptionIncludes || undefined,
+    replaceOnlyIfExisting:
+      field.replaceOnlyIfExisting === undefined ||
+      field.replaceOnlyIfExisting === null
+        ? undefined
+        : String(field.replaceOnlyIfExisting),
     headerPatterns: Array.from(new Set(headerPatterns)),
     fallbackIndex: intent != null ? FOUR_COLUMN_FALLBACK[intent] : undefined,
   };

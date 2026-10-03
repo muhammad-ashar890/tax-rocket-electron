@@ -8,103 +8,20 @@ import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { consumeRateLimit } from "@/lib/rate-limit";
 import {
-  bankDescriptionMatchesKeyword as matchesKeyword,
   findLikelyInternalTransferPairs,
-  hasInternalTransferLanguage as hasTransferLanguage,
-  normalizeBankDescription as normalizeDescription,
+  hasInternalTransferLanguage,
+  isTransferLookalike,
   type TransferCandidate,
 } from "@/lib/tax/bank-transfer-matching";
+import { classifyTransaction } from "@/lib/tax/bank-classification-rules";
 import { validateFilingCompleteness } from "@/lib/tax/filing-completeness";
 import { validateTaxYearStatement } from "@/lib/tax/tax-year-period";
-import { toMoneyAmount, toMoneyNumber, type MoneyInput, toMoneyNumberOrNull } from "@/lib/money";
-
-const CLASSIFICATION_RULES = [
-  {
-    keywords: ["tax", "withholding", "fbr", "fed", "federal excise"],
-    entryType: "EXPENSE",
-    category: "TAX_PAYMENT",
-    confidence: 0.9,
-  },
-  {
-    keywords: [
-      "bank profit",
-      "profit credited",
-      "profit payment",
-      "profit on savings deposit",
-      "profit on deposit",
-      "savings profit",
-      "savings account profit",
-      "interest credited",
-      "interest income",
-      "deposit profit",
-      "profit on debt",
-      "markup",
-    ],
-    entryType: "INCOME",
-    category: "BANK_PROFIT",
-    confidence: 0.88,
-  },
-  {
-    keywords: [
-      "bank charge",
-      "bank charges",
-      "bank fee",
-      "bank fees",
-      "service charge",
-      "annual fee",
-      "account maintenance",
-      "maintenance fee",
-    ],
-    entryType: "EXPENSE",
-    category: "BANK_CHARGES",
-    confidence: 0.92,
-  },
-  {
-    keywords: ["rent received", "rental income", "rent credited"],
-    entryType: "INCOME",
-    category: "PROPERTY_RENT",
-    confidence: 0.92,
-  },
-  {
-    keywords: [
-      "rent",
-      "k-electric",
-      "k electric",
-      "electricity",
-      "gas bill",
-      "utility",
-      " ke ",
-    ],
-    entryType: "EXPENSE",
-    category: "UTILITIES_OR_RENT",
-    confidence: 0.9,
-  },
-  {
-    keywords: ["fuel", "petrol", "pso", "psos", "shell", "total"],
-    entryType: "EXPENSE",
-    category: "TRANSPORT",
-    confidence: 0.88,
-  },
-  {
-    keywords: ["salary", "payroll", "wages", "compensation"],
-    entryType: "INCOME",
-    category: "SALARY",
-    confidence: 0.95,
-  },
-  {
-    keywords: [
-      "grocery",
-      "groceries",
-      "mart",
-      "superstore",
-      "restaurant",
-      "food",
-    ],
-    entryType: "EXPENSE",
-    category: "PERSONAL_EXPENSE",
-    confidence: 0.8,
-  },
-] as const;
+import {
+  toMoneyAmount,
+  toMoneyNumber,
+  type MoneyInput,
+  toMoneyNumberOrNull,
+} from "@/lib/money";
 
 async function getOwnedDraft(draftId: string) {
   const session = await getServerSession(authOptions);
@@ -184,68 +101,6 @@ async function invalidateDerivedFilingState(draft: {
   });
 }
 
-function classifyDescription(description: string) {
-  const normalized = normalizeDescription(description);
-
-  // Cash deposits/withdrawals are movements, not automatically income or
-  // expenses. Surface them for an explicit cash decision before merchant or
-  // payroll keywords can override that safer interpretation.
-  if (
-    normalized.includes("cash withdrawal") ||
-    normalized.includes("cash deposit") ||
-    normalized.includes("atm withdrawal") ||
-    normalized.includes("atm cash") ||
-    normalized.includes("visa atm") ||
-    normalized.includes("counter cash")
-  ) {
-    return {
-      status: "POTENTIAL_CASH_MOVEMENT",
-      entryType: null,
-      category: "CASH_MOVEMENT",
-      confidence: 0.85,
-    };
-  }
-
-  // Transfer language must win over words such as "salary" in an account
-  // label. "Transfer from HBL Salary Account" is a reviewable transfer, not
-  // earned salary merely because the source account contains that word.
-  if (hasTransferLanguage(description)) {
-    return {
-      status: "POTENTIAL_TRANSFER",
-      entryType: null,
-      category: "INTERNAL_TRANSFER",
-      confidence: 0.8,
-    };
-  }
-
-  const rule = CLASSIFICATION_RULES.find((candidate) =>
-    candidate.keywords.some((keyword) => matchesKeyword(normalized, keyword)),
-  );
-
-  if (!rule) {
-    return {
-      status: "UNREVIEWED",
-      entryType: null,
-      category: null,
-      confidence: 0,
-    };
-  }
-
-  return {
-    status: "SUGGESTED",
-    entryType: rule.entryType,
-    category: rule.category,
-    confidence: rule.confidence,
-  };
-}
-
-function hasLikelyInternalTransferPair(
-  transaction: TransferCandidate,
-  candidates: TransferCandidate[],
-) {
-  return findLikelyInternalTransferPairs(transaction, candidates).length > 0;
-}
-
 type TransferDecisionCandidate = TransferCandidate & {
   classificationStatus: string;
   suggestedEntryType: string | null;
@@ -282,97 +137,8 @@ async function getTransferCounterparts(
   );
 }
 
-function reviewedStatusForUndo(transaction: {
-  suggestedEntryType: string | null;
-  suggestedCategory: string | null;
-}) {
-  return transaction.suggestedEntryType && transaction.suggestedCategory
-    ? "SUGGESTED"
-    : "UNREVIEWED";
-}
-
-function classifyTransaction(
-  transaction: TransferCandidate,
-  transferCandidates: TransferCandidate[],
-) {
-  const normalized = normalizeDescription(transaction.description);
-
-  if (hasLikelyInternalTransferPair(transaction, transferCandidates)) {
-    return {
-      status: "POTENTIAL_TRANSFER",
-      entryType: null,
-      category: "INTERNAL_TRANSFER",
-      confidence: 0.98,
-    };
-  }
-
-  const descriptionSuggestion = classifyDescription(transaction.description);
-
-  if (descriptionSuggestion.status !== "UNREVIEWED") {
-    return descriptionSuggestion;
-  }
-
-  // Both sides are converted before being compared. `Decimal(0)` is truthy,
-  // so the previous `!(transaction.debit ?? 0)` form evaluated to false on a
-  // zero Decimal and left every transaction unclassified in both directions.
-  const debitAmount = toMoneyAmount(transaction.debit);
-  const creditAmount = toMoneyAmount(transaction.credit);
-
-  const hasCredit = creditAmount > 0 && debitAmount === 0;
-  const hasDebit = debitAmount > 0 && creditAmount === 0;
-
-  if (
-    hasCredit &&
-    [
-      "loan",
-      "financing",
-      "credit facility",
-      "loan proceeds",
-      "loan disbursement",
-    ].some((keyword) => matchesKeyword(normalized, keyword))
-  ) {
-    return {
-      status: "POTENTIAL_LIABILITY",
-      entryType: "LIABILITY",
-      category: "LOAN_PROCEEDS",
-      confidence: 0.7,
-    };
-  }
-
-  if (
-    hasDebit &&
-    [
-      "car purchase",
-      "vehicle purchase",
-      "property purchase",
-      "land purchase",
-      "equipment purchase",
-      "laptop purchase",
-      "machinery purchase",
-    ].some((keyword) => matchesKeyword(normalized, keyword))
-  ) {
-    return {
-      status: "POTENTIAL_ASSET",
-      entryType: "ASSET",
-      category: "ASSET_PURCHASE",
-      confidence: 0.7,
-    };
-  }
-
-  // A generic incoming credit is not automatically taxable income. Surface it
-  // as a potential-income decision so the user can choose income, internal
-  // transfer, or exclusion explicitly.
-  if (hasCredit) {
-    return {
-      status: "POTENTIAL_INCOME",
-      entryType: "INCOME",
-      category: "POTENTIAL_INCOME",
-      confidence: 0.55,
-    };
-  }
-
-  return descriptionSuggestion;
-}
+const TRANSFER_LOOKALIKE_ERROR =
+  "This reads like a transfer between your own accounts, so it cannot be booked as income or an expense. Mark it as an Internal transfer on both sides instead.";
 
 type GeminiClassification = {
   transactionId: string;
@@ -952,10 +718,31 @@ export async function autoReviewSafeBankTransactionsAction(
         suggestedEntryType: { not: null },
         suggestedCategory: { not: null },
       },
-      select: { id: true, suggestedEntryType: true, suggestedCategory: true },
+      select: {
+        id: true,
+        bankAccountId: true,
+        transactionDate: true,
+        description: true,
+        debit: true,
+        credit: true,
+        suggestedEntryType: true,
+        suggestedCategory: true,
+      },
     });
 
+    // A row that reads like an own-account transfer is never "safe": it waits
+    // for an explicit Internal transfer decision.
+    const heldBackAsTransfers = new Set<string>();
+    for (const transaction of safeTransactions) {
+      if (!hasInternalTransferLanguage(transaction.description)) continue;
+      const counterparts = await getTransferCounterparts(draft, transaction);
+      if (isTransferLookalike(transaction, counterparts)) {
+        heldBackAsTransfers.add(transaction.id);
+      }
+    }
+
     const autoApproveIds = safeTransactions
+      .filter((transaction) => !heldBackAsTransfers.has(transaction.id))
       .filter(
         (transaction) =>
           (transaction.suggestedEntryType === "EXPENSE" &&
@@ -1042,6 +829,25 @@ export async function undoBankTransactionClassificationAction(
     const affectedTransactions = [transaction, ...pairedTransferCounterparts];
     const affectedIds = affectedTransactions.map((item) => item.id);
 
+    // Undo returns each row to what the rules say about it today. Keeping the
+    // old suggestion would hand back the taxpayer's own earlier manual choice
+    // (for example Income / Property rent on a transfer) as if it were advice.
+    const transferCandidates = await prisma.bankTransaction.findMany({
+      where: {
+        filingDraftId: draft.id,
+        userId: draft.userId,
+        bankAccountId: { not: null },
+      },
+      select: {
+        id: true,
+        bankAccountId: true,
+        transactionDate: true,
+        description: true,
+        debit: true,
+        credit: true,
+      },
+    });
+
     await prisma.$transaction(async (tx) => {
       await tx.ledgerEntry.deleteMany({
         where: {
@@ -1051,10 +857,13 @@ export async function undoBankTransactionClassificationAction(
         },
       });
       for (const affected of affectedTransactions) {
+        const fresh = classifyTransaction(affected, transferCandidates);
         await tx.bankTransaction.update({
           where: { id: affected.id },
           data: {
-            classificationStatus: reviewedStatusForUndo(affected),
+            classificationStatus: fresh.status,
+            suggestedEntryType: fresh.entryType,
+            suggestedCategory: fresh.category,
           },
         });
       }
@@ -1120,6 +929,15 @@ export async function manuallyClassifyBankTransactionAction(
       });
       await invalidateDerivedFilingState(draft);
       return { success: true };
+    }
+
+    if (
+      isTransferLookalike(
+        transaction,
+        await getTransferCounterparts(draft, transaction),
+      )
+    ) {
+      return { success: false, error: TRANSFER_LOOKALIKE_ERROR };
     }
 
     const amount = toMoneyAmount(
@@ -1323,6 +1141,10 @@ export async function reviewBankTransactionClassificationAction(
         success: false,
         error: "This transaction has no suggestion to approve",
       };
+    }
+
+    if (isTransferLookalike(transaction, transferCounterparts)) {
+      return { success: false, error: TRANSFER_LOOKALIKE_ERROR };
     }
 
     const amount = toMoneyAmount(

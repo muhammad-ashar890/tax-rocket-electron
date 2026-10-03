@@ -388,6 +388,23 @@ export function extractSalaryCertificateEmployers(
 }
 
 /**
+ * The rows of the "other employers" editor: one input per name. Always at
+ * least one row so there is something to type into.
+ */
+export function splitOtherEmployerRows(value: unknown): string[] {
+  const rows = normalizeEmployerNames(value, { commaSeparates: true });
+  return rows.length ? rows : [""];
+}
+
+/** The stored value of the "other employers" field for those rows. */
+export function joinOtherEmployerRows(rows: string[]): string {
+  return rows
+    .map((row) => row.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("; ");
+}
+
+/**
  * A comparable fingerprint of the employer fields: two field lists with the
  * same names (ignoring spacing and the separator typed) give the same string.
  * Used to tell whether the employer was edited after it was last saved.

@@ -1,7 +1,10 @@
 import type { PrismaClient } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
-import { findLikelyInternalTransferPairs } from "@/lib/tax/bank-transfer-matching";
+import {
+  findLikelyInternalTransferPairs,
+  findTransferLookalikePairs,
+} from "@/lib/tax/bank-transfer-matching";
 import { getRequiredTaxDocumentTypesForCurrentFlow } from "@/lib/tax/document-requirements";
 import { validatePakistaniIban } from "@/lib/tax/iban";
 import type { TaxIncomeSource } from "@/lib/tax/filing-drafts";
@@ -314,6 +317,22 @@ export async function validateFilingCompleteness(
         "Both sides of an internal transfer must have the Internal Transfer decision",
       );
     }
+  }
+
+  // An own-account transfer booked as income or an expense is counted as earned
+  // or spent. The two sides cancel in the reconciliation gap, so nothing later
+  // would notice; stop it here and say which rows.
+  const accountLabelById = new Map(
+    accounts.map((account) => [account.id, accountName(account)]),
+  );
+  for (const { first, second } of findTransferLookalikePairs(transactions)) {
+    const describe = (row: (typeof transactions)[number]) =>
+      `"${row.description}" (${
+        accountLabelById.get(row.bankAccountId ?? "") ?? "unknown account"
+      })`;
+    blockers.push(
+      `These look like one internal transfer but were booked as income or an expense: ${describe(first)} and ${describe(second)}. Undo both and mark each side as Internal transfer.`,
+    );
   }
 
   const uniqueBlockers = uniqueMessages(blockers);

@@ -161,6 +161,32 @@ test("employer results name each employer and who handled it", () => {
   );
   assert.match(out, /A → ADDED BY THE AGENT/);
   assert.match(out, /B → ALREADY LISTED/);
+  // A name IRIS completed itself is reported with the registered name it used.
+  const resolved = buildJobReport({
+    savedAt: "2026-10-03T00:00:00Z",
+    finalStatus: "paused",
+    result: {
+      autofill: {
+        employers: {
+          enabled: true,
+          prepared: ["technexia"],
+          results: [
+            {
+              name: "technexia",
+              status: "added",
+              regNo: "7163439",
+              registeredName: "TECHNEXIA (SMC-PVT.) LIMITED",
+            },
+          ],
+        },
+      },
+    },
+    executionLog: [],
+  }).join("\n");
+  assert.match(
+    resolved,
+    /technexia → ADDED BY THE AGENT as "TECHNEXIA \(SMC-PVT\.\) LIMITED" \(registration 7163439\)/,
+  );
   assert.match(
     out,
     /C → NOT ADDED by the agent \(employer_no_exact_match\) · IRIS offered: C PVT \| 1 \/ C LTD \| 2/,
@@ -173,4 +199,31 @@ test("the report never throws on an empty or odd outcome", () => {
     buildJobReport({ result: null, executionLog: null, confirmations: "x" })
       .length > 0,
   );
+});
+
+test("report: a Cash in hand row shows IRIS's own figure and the movement added to it", () => {
+  const text = buildJobReport({
+    finalStatus: "completed",
+    result: {
+      autofill: {
+        results: [
+          {
+            irisCode: "7012",
+            label: "Cash (Non-Business)",
+            requestedColumn: "Amount",
+            sectionId: "wealth",
+            status: "filled",
+            value: "1350000",
+            baselineValue: 1300000,
+            cashDelta: 50000,
+          },
+        ],
+      },
+    },
+  });
+  const joined = text.join("\n");
+  assert.match(joined, /7012/);
+  assert.match(joined, /IRIS cell had 1,300,000/);
+  assert.match(joined, /cash movement \+50,000 added to IRIS's own figure/);
+  assert.match(joined, /planned 1,350,000/);
 });

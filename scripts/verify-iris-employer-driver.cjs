@@ -277,6 +277,76 @@ test("live: one employer failing does not stop the next one", async () => {
   assert.deepEqual(statuses(outcome), [S.AMBIGUOUS, S.ADDED]);
 });
 
+test("live: a lower-case name is searched in upper case, as IRIS lists registered names in upper case", async () => {
+  const fake = new FakeIrisEmployer({ registry: REGISTRY });
+  const outcome = await run(fake, ["systems limited"]);
+  assert.deepEqual(statuses(outcome), [S.ADDED]);
+  assert.deepEqual(fake.cardTexts(), ["SYSTEMS LIMITED | 1000001"]);
+});
+
+test("live: IRIS fills a single match itself and lists nothing - the typed name is the start of that company", async () => {
+  const registry = [
+    ...REGISTRY,
+    { name: "TECHNEXIA (SMC-PVT.) LIMITED", regNo: "7163439" },
+  ];
+  const fake = new FakeIrisEmployer({ registry, autoResolveSingle: true });
+  const outcome = await run(fake, ["technexia", "systems limited"]);
+  assert.deepEqual(statuses(outcome), [S.ADDED, S.ADDED]);
+  assert.deepEqual(fake.cardTexts(), [
+    "TECHNEXIA (SMC-PVT.) LIMITED | 7163439",
+    "SYSTEMS LIMITED | 1000001",
+  ]);
+  assert.ok(outcome.setup.some((s) => s.step === "self_resolved"));
+  assert.equal(clickLabels(fake).filter((l) => FORBIDDEN.test(l)).length, 0);
+});
+
+test("live: a self-filled company whose name does not start with the typed name is never added", async () => {
+  const registry = [{ name: "ACME SYSTEMS LIMITED", regNo: "9000001" }];
+  const fake = new FakeIrisEmployer({ registry, autoResolveSingle: true });
+  const outcome = await run(fake, ["systems limited"]);
+  assert.deepEqual(statuses(outcome), [S.NO_EXACT_MATCH]);
+  assert.deepEqual(outcome.results[0].candidates, [
+    "ACME SYSTEMS LIMITED | 9000001",
+  ]);
+  assert.equal(fake.cards().length, 0);
+  assert.equal(fake.modal(), null, "the dialog was cancelled");
+});
+
+test("live: a self-filling IRIS still widens to the first two words when the full name matches nothing", async () => {
+  const fake = new FakeIrisEmployer({
+    registry: REGISTRY,
+    autoResolveSingle: true,
+  });
+  const outcome = await run(fake, ["HASEEB KHAN (PVT.) LIMITED"]);
+  assert.deepEqual(statuses(outcome), [S.ADDED]);
+  assert.deepEqual(fake.cardTexts(), ["HASEEB KHAN (PVT.) LIMITED | 7367741"]);
+});
+
+test("chooseResolvedEmployer: exact or leading-words match only", () => {
+  const f = driver.chooseResolvedEmployer;
+  assert.equal(
+    f({ name: "SYSTEMS LIMITED", regNo: "1" }, "systems limited").kind,
+    "match",
+  );
+  assert.equal(
+    f({ name: "TECHNEXIA (SMC-PVT.) LIMITED", regNo: "2" }, "technexia").kind,
+    "match",
+  );
+  assert.equal(
+    f({ name: "ACME SYSTEMS LIMITED", regNo: "3" }, "systems limited").kind,
+    "mismatch",
+  );
+  assert.equal(
+    f({ name: "TECHNEXIAL LTD", regNo: "4" }, "technexia").kind,
+    "mismatch",
+  );
+  assert.equal(
+    f({ name: "SYSTEMS LIMITED", regNo: "" }, "systems limited").kind,
+    "none",
+  );
+  assert.equal(f({ name: "", regNo: "5" }, "x").kind, "none");
+});
+
 test("live: cards with unfamiliar markup are still recognised from the list body", async () => {
   const fake = new FakeIrisEmployer({
     registry: REGISTRY,

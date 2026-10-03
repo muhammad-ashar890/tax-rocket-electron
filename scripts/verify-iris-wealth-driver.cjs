@@ -67,11 +67,12 @@ const FIELDS = {
   scb: wf("7030", 750000, { rowDescriptionIncludes: SCB }),
 };
 
-function harness({ mode = "live", fields, iris, navigate } = {}) {
+function harness({ mode = "live", fields, iris, navigate, cashStore } = {}) {
   const fake = iris || new FakeIris({ knownIbans: KNOWN });
   const steps = [];
   const options = {
     mode,
+    cashStore,
     navigate:
       navigate ||
       (async (sectionId) => {
@@ -372,4 +373,159 @@ test("row filler: with the hint, a hand-made 7098 row is not selected, ours is",
   const out = await filler.fillIrisRows(h.fake, [{ ...FIELDS.outflow }], { dryRun: false, sectionVerified: true });
   assert.equal(out.results[0].status, filler.FILL_STATUS.ALREADY_CORRECT);
   assert.equal(mine.querySelector(".data-middle-child-wapper input").value, "", "their row stays empty");
+});
+
+// ── Cash in hand (7012): a movement added to IRIS's own figure ─────────────
+const CASH = (delta) =>
+  wf("7012", delta, { valueMode: "add_to_iris_value" });
+function memoryStore(initial = null) {
+  const store = {
+    record: initial,
+    saves: 0,
+    load: () => store.record,
+    save: (record) => {
+      store.record = { ...record };
+      store.saves += 1;
+    },
+  };
+  return store;
+}
+function cashCell(h) {
+  h.fake.show("wealth_assets");
+  return h.fake.row("7012").querySelector(".data-middle-child-wapper input");
+}
+function prefillCash(h, value) {
+  const input = cashCell(h);
+  input.value = value;
+  return input;
+}
+
+test("cash planning: only a 7012 field marked add_to_iris_value is driven; a bare 7012 stays held", () => {
+  const plan = driver.planWealthWork([CASH(50000), wf("7012", 9)]);
+  assert.deepEqual(plan.cash.map((f) => f.value), ["50000"]);
+  assert.deepEqual(plan.unsupported.map((f) => f.irisCode), ["7012"]);
+});
+
+test("cash target: baseline plus movement; own earlier write is recognised; a foreign edit is refused", () => {
+  const plan = (current, record, delta = 50000) =>
+    driver.planCashTarget({ delta, current, record });
+  assert.deepEqual(plan("1,300,000", null), {
+    action: "write", baseline: 1300000, target: 1350000, replaceOnlyIfExisting: "1300000",
+  });
+  assert.equal(plan("", null).target, 50000);
+  assert.equal(plan("", null).replaceOnlyIfExisting, undefined);
+  const record = { existing: 1300000, written: 1350000 };
+  assert.equal(plan("1350000", record).target, 1350000, "own write: same target, not 1,400,000");
+  assert.equal(plan("1300000", record).target, 1350000, "write never landed: same baseline");
+  assert.equal(plan("1350000", record, 80000).target, 1380000, "a changed movement is re-based");
+  assert.equal(plan("999", record).action, "conflict");
+  assert.equal(plan("3", null, -5).action, "negative");
+  assert.equal(plan("12abc", null).action, "unreadable");
+});
+
+test("live cash: adds the movement to the figure IRIS holds and remembers the baseline", async () => {
+  const store = memoryStore();
+  const h = harness({ cashStore: store });
+  const input = prefillCash(h, "1,300,000");
+  const out = await h.run([CASH(50000)]);
+  assert.equal(out.results.length, 1);
+  assert.equal(out.results[0].status, filler.FILL_STATUS.FILLED, JSON.stringify(out.results[0]));
+  assert.equal(input.value, "1350000");
+  assert.equal(out.results[0].baselineValue, 1300000);
+  assert.deepEqual({ existing: store.record.existing, written: store.record.written, delta: store.record.delta },
+    { existing: 1300000, written: 1350000, delta: 50000 });
+});
+
+test("live cash: a re-run does not add the movement twice", async () => {
+  const store = memoryStore();
+  const h = harness({ cashStore: store });
+  const input = prefillCash(h, "1300000");
+  await h.run([CASH(50000)]);
+  const again = await h.run([CASH(50000)]);
+  assert.equal(again.results[0].status, filler.FILL_STATUS.ALREADY_CORRECT, JSON.stringify(again.results[0]));
+  assert.equal(input.value, "1350000");
+  assert.equal(store.record.existing, 1300000);
+});
+
+test("live cash: a changed movement is re-based on the original IRIS figure", async () => {
+  const store = memoryStore();
+  const h = harness({ cashStore: store });
+  const input = prefillCash(h, "1300000");
+  await h.run([CASH(50000)]);
+  const again = await h.run([CASH(80000)]);
+  assert.equal(again.results[0].status, filler.FILL_STATUS.FILLED, JSON.stringify(again.results[0]));
+  assert.equal(input.value, "1380000");
+  assert.equal(store.record.written, 1380000);
+});
+
+test("live cash: a figure the taxpayer edited after our write is never overwritten", async () => {
+  const store = memoryStore();
+  const h = harness({ cashStore: store });
+  const input = prefillCash(h, "1300000");
+  await h.run([CASH(50000)]);
+  input.value = "999";
+  const again = await h.run([CASH(50000)]);
+  assert.equal(again.results[0].status, filler.FILL_STATUS.OVERWRITE_NEEDS_CONFIRMATION);
+  assert.equal(input.value, "999");
+  assert.equal(store.record.written, 1350000, "the baseline is not rewritten on a conflict");
+});
+
+test("live cash: without a saved baseline the figure on screen is the baseline", async () => {
+  const h = harness({ cashStore: memoryStore() });
+  const input = prefillCash(h, "200000");
+  const out = await h.run([CASH(-50000)]);
+  assert.equal(out.results[0].status, filler.FILL_STATUS.FILLED);
+  assert.equal(input.value, "150000", "net deposits lower the figure");
+});
+
+test("live cash: a movement that would make cash negative is refused and nothing is typed", async () => {
+  const store = memoryStore();
+  const h = harness({ cashStore: store });
+  const input = prefillCash(h, "20000");
+  const out = await h.run([CASH(-50000)]);
+  assert.equal(out.results[0].status, driver.WEALTH_STATUS.CASH_NEGATIVE);
+  assert.equal(input.value, "20000");
+  assert.equal(store.saves, 0);
+});
+
+test("dry cash: reports the planned figure, types nothing, saves nothing", async () => {
+  const store = memoryStore();
+  const h = harness({ mode: "dry", cashStore: store });
+  const input = prefillCash(h, "1300000");
+  const out = await h.run([CASH(50000)]);
+  assert.equal(out.results[0].plannedValue, "1350000");
+  assert.equal(input.value, "1300000");
+  assert.equal(store.saves, 0);
+});
+
+test("cash: the 7012 row is missing -> reported by the row filler, nothing created", async () => {
+  const h = harness({ cashStore: memoryStore() });
+  h.fake.show("wealth_assets");
+  h.fake.row("7012").remove();
+  const out = await h.run([CASH(50000)]);
+  assert.notEqual(out.results[0].status, filler.FILL_STATUS.FILLED);
+});
+
+test("cash: the packet emits a 7012 movement field, and nothing when the movement is zero", () => {
+  const base = { taxYear: 2026, filerType: "INDIVIDUAL", taxpayerListStatus: "ACTIVE", ledgerEntries: [] };
+  const withCash = buildPortalFieldMap({ ...base, netCashMovement: 50000 });
+  const field = withCash.wealthFields.find((f) => f.irisCode === "7012");
+  assert.equal(field.ourAmount, 50000);
+  assert.equal(field.valueMode, "add_to_iris_value");
+  const flat = flattenPortalFieldMap(withCash).find((f) => f.irisCode === "7012");
+  assert.equal(flat.valueMode, "add_to_iris_value");
+  assert.equal(flat.value, "50000");
+  const deposit = buildPortalFieldMap({ ...base, netCashMovement: -12000 });
+  assert.equal(deposit.wealthFields.find((f) => f.irisCode === "7012").ourAmount, -12000);
+  for (const none of [0, null, undefined])
+    assert.ok(!buildPortalFieldMap({ ...base, netCashMovement: none }).wealthFields.some((f) => f.irisCode === "7012"));
+});
+
+test("live cash: an unreadable saved baseline stops the step instead of guessing", async () => {
+  const broken = { load: () => { throw new Error("corrupt"); }, save: () => { throw new Error("no"); } };
+  const h = harness({ cashStore: broken });
+  const input = prefillCash(h, "1350000");
+  const out = await h.run([CASH(50000)]);
+  assert.equal(out.results[0].status, driver.WEALTH_STATUS.CASH_UNREADABLE);
+  assert.equal(input.value, "1350000");
 });

@@ -37,7 +37,7 @@
  *   - Dry mode never clicks inside the page; it only reads and reports.
  */
 
-const BUILD_TAG = "fix34-tax-year-employer-20261002";
+const BUILD_TAG = "fix39-gift-keywords-20261003";
 
 const EMPLOYER_STATUS = Object.freeze({
   ALREADY_LISTED: "already_listed",
@@ -349,6 +349,34 @@ function chooseEmployerOption(optionTexts, employerName) {
   };
 }
 
+/**
+ * IRIS does not always list options. When the typed text matches ONE company,
+ * the real dialog fills the full registered name and the (greyed) registration
+ * number by itself and shows no list (seen live 2026-10-03: "SYSTEMS LIMITED"
+ * and "TECHNEXIA" both ended in a filled dialog with an empty option list).
+ * This reads that state. Pure.
+ *   none      the dialog holds no resolved registration
+ *   match     the resolved registered name IS the typed name, or the typed name
+ *             is its leading whole words ("technexia" -> "TECHNEXIA (SMC-PVT.)
+ *             LIMITED"). IRIS itself found exactly one company, which is what
+ *             makes this safe; it is never the first of several.
+ *   mismatch  IRIS resolved to a company whose name does not start with the typed
+ *             name; reported as a candidate and never added
+ */
+function chooseResolvedEmployer(state, employerName) {
+  const name = String((state && state.name) || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const regNo = String((state && state.regNo) || "").replace(/\s+/g, "");
+  if (!name || !regNo) return { kind: "none" };
+  const wanted = employerNameKey(employerName);
+  const got = employerNameKey(name);
+  const option = { text: `${name} | ${regNo}`, name, regNo };
+  if (wanted && (got === wanted || got.startsWith(`${wanted} `)))
+    return { kind: "match", option, exact: got === wanted };
+  return { kind: "mismatch", candidate: option.text };
+}
+
 /** The searches to try, in order: the full name, then its first two words. */
 function employerQueries(name) {
   const words = String(name || "")
@@ -625,17 +653,50 @@ async function runEmployerDriver(windowInstance, employerNames, options = {}) {
     // exact-name rule applies to whatever IRIS lists, so widening never guesses.
     let choice = { kind: "none", candidates: [] };
     let typeFailure = null;
+    let lastSeen = null;
     for (const query of employerQueries(name)) {
-      const typed = await run({ op: "modal_type_name", value: query });
+      // IRIS lists registered names, which are upper case. A lower-case query
+      // (the taxpayer typed "systems limited") listed nothing in a real run, so
+      // the query is always typed in upper case. Matching stays case-blind.
+      // A registration number already in the dialog before typing would be
+      // stale, so a self-resolved dialog is only trusted when it started empty.
+      const before = await run({ op: "modal_state" });
+      const resolvable =
+        Boolean(before.open) && !String(before.regNo || "").trim();
+      const typed = await run({
+        op: "modal_type_name",
+        value: String(query).toUpperCase(),
+      });
       if (typed.status !== "set") {
         typeFailure = typed.status;
         break;
       }
       const listed = await waitFor(
         () => run({ op: "modal_state" }),
-        (state) => chooseEmployerOption(state.options, name).kind !== "none",
+        (state) =>
+          chooseEmployerOption(state.options, name).kind !== "none" ||
+          (resolvable && chooseResolvedEmployer(state, name).kind !== "none"),
       );
-      choice = chooseEmployerOption((listed.value || {}).options, name);
+      const seen = listed.value || {};
+      choice = chooseEmployerOption(seen.options, name);
+      if (choice.kind === "none" && resolvable) {
+        const resolved = chooseResolvedEmployer(seen, name);
+        if (resolved.kind === "match") {
+          choice = {
+            kind: "match",
+            option: resolved.option,
+            selfResolved: true,
+          };
+        } else if (resolved.kind === "mismatch") {
+          choice = { kind: "none", candidates: [resolved.candidate] };
+        }
+      }
+      lastSeen = {
+        name: seen.name,
+        regNo: seen.regNo,
+        addEnabled: seen.addEnabled,
+        options: Array.from(seen.options || []).length,
+      };
       if (choice.kind !== "none") break;
     }
     if (typeFailure) {
@@ -664,7 +725,11 @@ async function runEmployerDriver(windowInstance, employerNames, options = {}) {
                   ? choice.candidates.join("; ")
                   : "nothing"
               })`
-        }. Dialog cancelled, nothing added.`,
+        }. Dialog cancelled, nothing added.${
+          lastSeen
+            ? ` Dialog when it gave up: name "${lastSeen.name}", registration "${lastSeen.regNo}", Add enabled ${lastSeen.addEnabled}, ${lastSeen.options} option(s).`
+            : ""
+        }`,
       );
       await cancelModal();
       results.push({
@@ -697,10 +762,15 @@ async function runEmployerDriver(windowInstance, employerNames, options = {}) {
       continue;
     }
 
-    const clicked = await run({
-      op: "modal_pick_option",
-      optionText: picked.text,
-    });
+    if (choice.selfResolved) {
+      note(
+        "self_resolved",
+        `"${name}": IRIS resolved the typed name to exactly one company, "${picked.name}" (registration ${picked.regNo}), and filled the dialog itself without a list. Accepted because the typed name is the start of that registered name.`,
+      );
+    }
+    const clicked = choice.selfResolved
+      ? { status: "clicked" }
+      : await run({ op: "modal_pick_option", optionText: picked.text });
     if (clicked.status !== "clicked") {
       note(
         "pick_failed",
@@ -790,6 +860,7 @@ async function runEmployerDriver(windowInstance, employerNames, options = {}) {
         name,
         status: EMPLOYER_STATUS.ADDED,
         regNo: picked.regNo,
+        registeredName: picked.name,
       });
     } else {
       note(
@@ -823,6 +894,7 @@ module.exports = {
   employerQueries,
   parseEmployerOption,
   chooseEmployerOption,
+  chooseResolvedEmployer,
   cardMatchesEmployer,
   planEmployers,
   summariseEmployers,

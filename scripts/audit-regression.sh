@@ -30,6 +30,7 @@ FILES=(
   "app/actions/bank-statements.ts"
   "app/actions/bank-parser.ts"
   "lib/tax/bank-transfer-matching.ts"
+  "lib/tax/bank-classification-rules.ts"
   "lib/money.ts"
   "app/actions/filing-summary.ts"
   "app/actions/tax-calculation.ts"
@@ -147,7 +148,7 @@ check "5C1 non-numeric total guard disabled" \
 
 check "5C1 a total dropped from that guard" \
   "lib/tax/reconciliation-calculation.ts" \
-  '    totalAssets,
+  '    cashMovement,
     totalLiabilities,' \
   '    totalLiabilities,'
 
@@ -162,7 +163,7 @@ check "5C1 balance sent to the browser unconverted" \
   ''
 
 check "5C2 credit/debit direction falsy-tested again" \
-  "app/actions/bank-classification.ts" \
+  "lib/tax/bank-classification-rules.ts" \
   '  const hasCredit = creditAmount > 0 && debitAmount === 0;
   const hasDebit = debitAmount > 0 && creditAmount === 0;' \
   '  const hasCredit = (transaction.credit ?? 0) > 0 && !(transaction.debit ?? 0);
@@ -247,10 +248,11 @@ check "5C3A wealth movement combined in floating point" \
     { value: totalLiabilities },
     { value: totalExpenses, subtract: true },
     { value: totalAssets, subtract: true },
+    { value: cashMovement, subtract: true },
     { value: otherAdjustments },
   ]);' \
   '  const wealthMovement =
-    totalIncome + totalLiabilities - totalExpenses - totalAssets + otherAdjustments;'
+    totalIncome + totalLiabilities - totalExpenses - totalAssets - cashMovement + otherAdjustments;'
 
 check "5C3A adjustments netted in floating point" \
   "lib/tax/reconciliation-calculation.ts" \
@@ -270,11 +272,17 @@ check "5C3A tax income summed in floating point" \
   "app/actions/tax-calculation.ts" \
   '    const totalIncome = sumMoney(
       entries
-        .filter((entry) => entry.entryType === "INCOME")
+        .filter(
+          (entry) =>
+            entry.entryType === "INCOME" && !isGiftCategory(entry.category),
+        )
         .map((entry) => entry.amount),
     );' \
   '    const totalIncome = entries
-      .filter((entry) => entry.entryType === "INCOME")
+      .filter(
+        (entry) =>
+          entry.entryType === "INCOME" && !isGiftCategory(entry.category),
+      )
       .reduce((total, entry) => total + Number(entry.amount), 0);'
 
 check "5C3A filing summary totals summed with +" \
@@ -306,8 +314,8 @@ check "5D the reconciliation gap sent unconverted" \
 
 check "5D withheld tax compared as a raw Decimal" \
   "app/actions/tax-calculation.ts" \
-  '    let taxWithheld = toMoneyAmount(draft.taxWithheld);' \
-  '    let taxWithheld = (draft.taxWithheld ?? 0) as number;'
+  '      storedTaxWithheld: toMoneyAmount(draft.taxWithheld),' \
+  '      storedTaxWithheld: (draft.taxWithheld ?? 0) as number,'
 
 check "5F revision fingerprint hashes a raw Decimal balance" \
   "lib/tax/reconciliation-calculation.ts" \

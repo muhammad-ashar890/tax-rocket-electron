@@ -15,6 +15,8 @@ import {
   PORTAL_WRITEABLE_CODES,
 } from "./portal-row-evidence";
 import { SALARY_CERTIFICATE_TAX_ROW } from "./iris-employment-capture";
+import { CASH_IN_HAND_CODE, VALUE_MODE_ADD_TO_IRIS } from "./cash-in-hand";
+import { isGiftCategory } from "./gift-income";
 import {
   WEALTH_BANK_ACCOUNT_CODE,
   WEALTH_EXPENSE_ROWS,
@@ -56,6 +58,17 @@ export type PortalFieldMapEntry = {
    * field — see the aggregation note in buildPortalFieldMap.
    */
   sourceEntryCount?: number;
+  /**
+   * Bank rows only: the closing balance on the approved statement, when the
+   * amount to enter differs from it because the reconciliation auto-adjustment
+   * was applied to the declared balance.
+   */
+  statementClosingBalance?: number;
+  /**
+   * Cash in hand (7012) only: `ourAmount` is a MOVEMENT, not a balance. The
+   * agent adds it to the figure IRIS already holds on the row.
+   */
+  valueMode?: "add_to_iris_value";
 };
 
 /**
@@ -80,6 +93,18 @@ export type PortalMappingGaps = {
     totalAmount: number;
     reason: string;
   }[];
+  /**
+   * The reconciliation auto-adjustment was applied to the bank closing balance
+   * that is entered in IRIS (7030) instead of being left as an unmapped
+   * "Other" entry. `signedAmount` is the TaxRocket adjustment (inflow
+   * positive); the declared balance is the statement balance minus it.
+   */
+  reconciliationAdjustment?: {
+    signedAmount: number;
+    iban: string;
+    statementClosing: number;
+    declaredClosing: number;
+  };
   /** IRIS codes deliberately skipped because the row is computed, not entered. */
   skippedComputedCodes: { code: string; description: string; amount: number }[];
   /**
@@ -157,6 +182,8 @@ export type PortalAutofillField = {
   sourceGroup: "incomeFields" | "adjustableTaxFields" | "wealthFields";
   /** See PortalFieldMapEntry.rowDescriptionIncludes. */
   rowDescriptionIncludes?: string;
+  /** See PortalFieldMapEntry.valueMode. `value` is then the amount to ADD. */
+  valueMode?: "add_to_iris_value";
   ledgerEntryId?: string;
   taxCreditId?: string;
   incomeRecordId?: string;
@@ -283,6 +310,7 @@ const GAP_ONLY_INCOME_CATEGORIES: Record<string, string> = {
     "Business income is filed on the Business schedules (3xxx); which line carries the engine total is unconfirmed.",
   SERVICES:
     "Services income has no verified IRIS line-item code on the 114(1) income sheets.",
+  GIFT: "Gift received is not income. It is an inflow of the Wealth Statement (Reconciliation of Net Assets, Inflows, Gift, IRIS 7037). Add it there by hand with the donor's details; the agent does not enter it.",
   OTHER_INCOME:
     "'Other income' has no single IRIS line; 'Other Receipts' (5028) is not a substitute for an unknown source.",
   CAPITAL_GAIN:
@@ -329,6 +357,7 @@ function toPortalAutofillField(
     ...(entry.rowDescriptionIncludes
       ? { rowDescriptionIncludes: entry.rowDescriptionIncludes }
       : {}),
+    ...(entry.valueMode ? { valueMode: entry.valueMode } : {}),
     ledgerEntryId: entry.ledgerEntryId,
     taxCreditId: entry.taxCreditId,
     incomeRecordId: entry.incomeRecordId,
@@ -555,6 +584,11 @@ export function buildPortalFieldMap(params: {
   salaryCertificateGrossSalary?: number | null;
   /** Employer names from the reviewed salary certificate. */
   employers?: string[];
+  /**
+   * Net cash moved out of the bank (withdrawals minus deposits) from the
+   * confirmed CASH_MOVEMENT rows. Becomes a 7012 Cash in hand movement.
+   */
+  netCashMovement?: number | null;
   taxableIncome?: number;
   taxWithheld?: number;
   /**
@@ -587,6 +621,7 @@ export function buildPortalFieldMap(params: {
     taxWithheld = 0,
     bankAccounts = [],
     employers = [],
+    netCashMovement: cashMovement = null,
     pensionDetails,
   } = params;
 
@@ -706,7 +741,9 @@ export function buildPortalFieldMap(params: {
     const amount = toNumber(entry.amount);
     if (amount <= 0) continue;
 
-    const normalizedCat = normalizeCategory(entry.category);
+    const normalizedCat = isGiftCategory(entry.category)
+      ? "GIFT"
+      : normalizeCategory(entry.category);
     const mappings =
       CATEGORY_TO_IRIS_MAP[normalizedCat] ||
       CATEGORY_TO_IRIS_MAP[entry.category?.toUpperCase() || ""];
@@ -722,7 +759,12 @@ export function buildPortalFieldMap(params: {
     const replaceSalaryWithCertificate =
       hasCertificateGrossSalary && isSalaryLedgerIncome;
 
-    if (entry.entryType === "INCOME" && !replaceSalaryWithCertificate) {
+    // A gift received is a Wealth Statement inflow (IRIS 7037), never income.
+    if (
+      entry.entryType === "INCOME" &&
+      !replaceSalaryWithCertificate &&
+      !isGiftCategory(entry.category)
+    ) {
       totalIncome += amount;
     }
 
@@ -1059,15 +1101,72 @@ export function buildPortalFieldMap(params: {
 
   // Bank balances: one 7030 row per account, matched in IRIS by IBAN. 7012 is
   // "Cash in hand" and is never used for bank money.
-  for (const account of [...bankAccounts].sort((a, b) =>
+  //
+  // The reconciliation auto-adjustment (TaxRocket's balancing entry) is carried
+  // by the declared closing balance of ONE account, the one holding the most
+  // money: inflow adjustment N -> declared balance = statement balance - N, an
+  // outflow adjustment raises it. It is only applied when the result stays
+  // positive; otherwise the adjustment stays an unmapped, manual notice.
+  const adjustmentEntries = ledgerEntries.filter(
+    (entry) =>
+      entry.entryType === "OTHER" &&
+      /^RECONCILIATION_ADJUSTMENT_(IN|OUT)FLOW$/.test(
+        normalizeCategory(entry.category),
+      ),
+  );
+  const signedAdjustment = adjustmentEntries.reduce(
+    (sum, entry) =>
+      sum +
+      (normalizeCategory(entry.category).endsWith("_OUTFLOW") ? -1 : 1) *
+        toNumber(entry.amount),
+    0,
+  );
+  const sortedBankAccounts = [...bankAccounts].sort((a, b) =>
     a.iban.localeCompare(b.iban),
-  )) {
+  );
+  let adjustedAccount: (typeof bankAccounts)[number] | null = null;
+  if (signedAdjustment !== 0) {
+    for (const account of sortedBankAccounts) {
+      const closing = toNumber(account.closingBalance);
+      if (!account.iban || closing <= 0) continue;
+      if (
+        !adjustedAccount ||
+        closing > toNumber(adjustedAccount.closingBalance)
+      ) {
+        adjustedAccount = account;
+      }
+    }
+    if (
+      adjustedAccount &&
+      Math.round(toNumber(adjustedAccount.closingBalance) - signedAdjustment) <=
+        0
+    ) {
+      adjustedAccount = null;
+    }
+  }
+  let reconciliationAdjustment: PortalMappingGaps["reconciliationAdjustment"];
+  for (const account of sortedBankAccounts) {
     const closing = toNumber(account.closingBalance);
     if (!account.iban || closing <= 0) continue;
+    const adjusted = account === adjustedAccount;
+    const declared = adjusted ? closing - signedAdjustment : closing;
+    if (adjusted) {
+      reconciliationAdjustment = {
+        signedAmount: Math.round(signedAdjustment),
+        iban: account.iban,
+        statementClosing: Math.round(closing),
+        declaredClosing: Math.round(declared),
+      };
+    }
     wealthFields.push({
       ourCategory: "BANK_CLOSING_BALANCE",
-      ourDescription: `${account.bankName} — ${account.accountLabel} closing balance`,
-      ourAmount: Math.round(closing),
+      ourDescription: adjusted
+        ? `${account.bankName} — ${account.accountLabel} closing balance, adjusted by the reconciliation ${
+            signedAdjustment > 0 ? "decrease" : "increase"
+          } of PKR ${Math.abs(Math.round(signedAdjustment)).toLocaleString("en-US")} (statement balance PKR ${Math.round(closing).toLocaleString("en-US")})`
+        : `${account.bankName} — ${account.accountLabel} closing balance`,
+      ourAmount: Math.round(declared),
+      ...(adjusted ? { statementClosingBalance: Math.round(closing) } : {}),
       irisCode: WEALTH_BANK_ACCOUNT_CODE,
       irisDescription: `Bank Account(s) - ${account.iban}`,
       portalArea: "116 - Wealth Statement",
@@ -1078,6 +1177,41 @@ export function buildPortalFieldMap(params: {
       rowDescriptionIncludes: account.iban,
       sourceEntryCount: 1,
     });
+  }
+
+  // Cash in hand (7012). The taxpayer's own cash taken out of (or put into)
+  // the bank. IRIS owns the opening figure (prefilled from the previous year),
+  // so the packet carries only the movement and the agent adds it to what IRIS
+  // already shows. A negative movement (net deposits) lowers the figure.
+  const cashDelta =
+    cashMovement === null || cashMovement === undefined
+      ? 0
+      : Math.round(toNumber(cashMovement));
+  if (cashDelta !== 0) {
+    wealthFields.push({
+      ourCategory: "CASH_MOVEMENT",
+      ourDescription:
+        cashDelta > 0
+          ? `Cash taken out of the bank (net PKR ${cashDelta.toLocaleString("en-US")}), added to Cash in hand`
+          : `Cash put into the bank (net PKR ${Math.abs(cashDelta).toLocaleString("en-US")}), deducted from Cash in hand`,
+      ourAmount: cashDelta,
+      irisCode: CASH_IN_HAND_CODE,
+      irisDescription: "Cash (Non-Business)",
+      portalArea: "116 - Wealth Statement",
+      section: "Personal Assets / Liabilities",
+      column: "Amount",
+      isTaxField: false,
+      filerStatus: taxpayerListStatus || undefined,
+      sourceEntryCount: 1,
+      valueMode: VALUE_MODE_ADD_TO_IRIS,
+    });
+  }
+
+  if (reconciliationAdjustment) {
+    // The adjustment is entered (as part of the bank balance), so it is no
+    // longer an item that needs a manual IRIS entry.
+    unmapped.delete("RECONCILIATION_ADJUSTMENT_INFLOW");
+    unmapped.delete("RECONCILIATION_ADJUSTMENT_OUTFLOW");
   }
 
   const salaryTaxOutflow =
@@ -1125,6 +1259,7 @@ export function buildPortalFieldMap(params: {
       unmappedCategories: [...unmapped.values()].sort((a, b) =>
         a.category.localeCompare(b.category),
       ),
+      ...(reconciliationAdjustment ? { reconciliationAdjustment } : {}),
       skippedComputedCodes: [...skipped.values()].sort((a, b) =>
         a.code.localeCompare(b.code),
       ),

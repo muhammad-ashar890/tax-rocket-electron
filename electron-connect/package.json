@@ -27,6 +27,7 @@
       "iris-navigation.js",
       "iris-row-filler.js",
       "iris-wealth-driver.js",
+      "cash-baseline-store.js",
       "iris-employer-driver.js",
       "job-report.js",
       "preload.js",

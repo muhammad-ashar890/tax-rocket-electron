@@ -350,13 +350,13 @@ test("completed agent work is never labeled as a filed FBR return", () => {
   );
   assert.match(main, /paused: reviewRequired/);
   assert.match(navigation, /This inspection did not enter values/);
-  // Heading reworded in fix27: a Salary-only handoff must say the return is NOT
-  // ready to submit, which is stronger than "not filed".
-  assert.match(
-    client,
-    /Salary step complete — return[\s\S]{0,80}NOT ready to submit/,
-  );
-  assert.match(client, /does <strong>not<\/strong> mean the return was filed/);
+  // fix35: the completion card tells the taxpayer to review and submit it
+  // themselves; the agent never submits. No emoji in the card.
+  assert.match(client, /Review and submit it yourself/);
+  assert.match(client, /does not save,\s+calculate, pay or submit for you/);
+  assert.match(client, /submit the return yourself in the FBR/);
+  assert.doesNotMatch(client, /[\u2705\u26A0\u26D4\u{1F300}-\u{1FAFF}]/u);
+  assert.doesNotMatch(client, /NOT ready to submit/);
   assert.doesNotMatch(client, /FBR handoff complete — review required/);
 });
 
@@ -777,7 +777,7 @@ test("completion card reports what the agent actually did for the Wealth Stateme
   );
   assert.match(
     client,
-    /handoffScope\?\.wealthStatement ===\s+"entered_not_calculated"/,
+    /scope\?\.wealthStatement ===\s+"entered_not_calculated"/,
   );
   assert.match(client, /"needs_review"/);
   // Only the scope summary leaves the server, never the whole agent result.

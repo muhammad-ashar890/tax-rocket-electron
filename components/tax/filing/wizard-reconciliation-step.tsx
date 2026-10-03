@@ -27,6 +27,8 @@ export type ReconciliationPreview = {
   closingWealth: number;
   totalIncome: number;
   totalExpenses: number;
+  /** Net cash moved out of (+) or into (-) the bank; carried by Cash in hand. */
+  netCashMovement?: number;
   gap: number;
 };
 
@@ -66,8 +68,7 @@ export function WizardReconciliationStep({
     ? `PKR ${Math.abs(reconciliationPreview.gap).toLocaleString()}`
     : "calculated data";
   const gapIsResolved =
-    reconciliationPreview !== null &&
-    reconciliationPreview.gap === 0;
+    reconciliationPreview !== null && reconciliationPreview.gap === 0;
   const noAdjustmentRequired =
     reconciliationResolved?.method === "auto" &&
     reconciliationResolved.note?.startsWith(
@@ -144,6 +145,13 @@ export function WizardReconciliationStep({
                 </span>
               </div>
             </div>
+            {reconciliationPreview.netCashMovement ? (
+              <p className="mt-3 text-sm text-muted-foreground">
+                {reconciliationPreview.netCashMovement > 0
+                  ? `Cash you took out of the bank: PKR ${reconciliationPreview.netCashMovement.toLocaleString()}. It is counted as Cash in hand, so it does not create a gap. In IRIS it is added to your Cash in hand figure.`
+                  : `Cash you put into the bank: PKR ${Math.abs(reconciliationPreview.netCashMovement).toLocaleString()}. It is counted as Cash in hand, so it does not create a gap. In IRIS it is deducted from your Cash in hand figure.`}
+              </p>
+            ) : null}
           </div>
         )}
 
@@ -155,13 +163,13 @@ export function WizardReconciliationStep({
               {noAdjustmentRequired
                 ? "Reconciled — no adjustment required"
                 : reconciliationResolved.method === "auto"
-                  ? "Auto-adjustment recorded in Other"
+                  ? "Auto-adjustment recorded"
                   : "Manually acknowledged — gap remains"}
             </p>
             <p className="mt-1 text-sm text-muted-foreground">
               {reconciliationResolved.method === "auto"
                 ? (reconciliationResolved.note ??
-                  "A non-taxable Other adjustment was recorded and will remain visible in the ledger for review.")
+                  "A non-taxable adjustment was recorded in the ledger. In IRIS it is carried by your bank closing balance in the Wealth Statement.")
                 : reconciliationResolved.note}
             </p>
           </div>
@@ -224,8 +232,8 @@ export function WizardReconciliationStep({
                   <div>
                     <p className="font-semibold text-foreground">Auto-adjust</p>
                     <p className="mt-1 text-sm text-muted-foreground">
-                      Record the calculated gap as a non-taxable Other
-                      adjustment for review.
+                      Record the gap as a non-taxable adjustment and adjust your
+                      bank closing balance in IRIS by the same amount.
                     </p>
                   </div>
                 </button>
