@@ -729,7 +729,7 @@ test("real IRIS mode no longer dead-ends at navigation-only inspection", () => {
   const assisted = main.slice(
     main.indexOf("async function runLocalTaxAssistedFilingFlow("),
   );
-  assert.ok(assisted.slice(0, 1400).includes("runRealIrisAutofill"));
+  assert.ok(assisted.slice(0, 2200).includes("runRealIrisAutofill"));
 });
 
 test("real autofill stays opt-in and honours a dry-run mode", () => {
@@ -767,72 +767,32 @@ test("packet field map carries the IRIS code the filler addresses rows by", () =
 });
 
 test("completion card reports what the agent actually did for the Wealth Statement", () => {
-  const client = fs.readFileSync(
-    path.join(__dirname, "..", "components/tax/fbr-connect-client.tsx"),
-    "utf8",
-  );
-  const jobs = fs.readFileSync(
-    path.join(__dirname, "..", "app/actions/fbr-jobs.ts"),
-    "utf8",
-  );
-  assert.match(
-    client,
-    /scope\?\.wealthStatement ===\s+"entered_not_calculated"/,
-  );
+  const client = fs.readFileSync(path.join(__dirname, "..", "components/tax/fbr-connect-client.tsx"), "utf8");
+  const jobs = fs.readFileSync(path.join(__dirname, "..", "app/actions/fbr-jobs.ts"), "utf8");
+  assert.match(client, /scope\?\.wealthStatement ===\s+"entered_not_calculated"/);
   assert.match(client, /"needs_review"/);
   // Only the scope summary leaves the server, never the whole agent result.
-  assert.match(
-    jobs,
-    /const views = jobs\.map\(\(\{ resultJson, \.\.\.job \}\)/,
-  );
-  assert.ok(
-    !/resultJson: true[\s\S]{0,400}return \{ success: true, jobs \}/.test(jobs),
-  );
+  assert.match(jobs, /const views = jobs\.map\(\(\{ resultJson, \.\.\.job \}\)/);
+  assert.ok(!/resultJson: true[\s\S]{0,400}return \{ success: true, jobs \}/.test(jobs));
 });
 
 test("taxpayer review step: label, confirmation button and completion line are wired end to end", () => {
-  const client = fs.readFileSync(
-    path.join(__dirname, "..", "components/tax/fbr-connect-client.tsx"),
-    "utf8",
-  );
-  const jobs = fs.readFileSync(
-    path.join(__dirname, "..", "app/actions/fbr-jobs.ts"),
-    "utf8",
-  );
-  const main = fs.readFileSync(
-    path.join(__dirname, "..", "electron-connect/main.js"),
-    "utf8",
-  );
-  assert.match(
-    client,
-    /portal_handoff_review: "Review the rest of your return in the FBR window"/,
-  );
+  const client = fs.readFileSync(path.join(__dirname, "..", "components/tax/fbr-connect-client.tsx"), "utf8");
+  const jobs = fs.readFileSync(path.join(__dirname, "..", "app/actions/fbr-jobs.ts"), "utf8");
+  const main = fs.readFileSync(path.join(__dirname, "..", "electron-connect/main.js"), "utf8");
+  assert.match(client, /portal_handoff_review: "Review the rest of your return in the FBR window"/);
   assert.match(client, /I have reviewed it in FBR/);
-  assert.match(
-    client,
-    /propertyPaymentsComputations ===\s+"reviewed_by_taxpayer"/,
-  );
+  assert.match(client, /propertyPaymentsComputations ===\s+"reviewed_by_taxpayer"/);
   assert.match(jobs, /propertyPaymentsComputations:/);
   // The pause is not a final-submit gate: a generic Continue must be able to resume it.
-  assert.ok(
-    !/final_review|final_submit/.test(
-      main.match(/function getHandoffReviewAction\(\) \{[\s\S]*?\n\}/)[0],
-    ),
-  );
+  assert.ok(!/final_review|final_submit/.test(main.match(/function getHandoffReviewAction\(\) \{[\s\S]*?\n\}/)[0]));
   // The tour never presses Calculate, Save or Submit.
-  const tour = main.match(
-    /async function runHandoffReviewTour[\s\S]*?\n\}\n/,
-  )[0];
-  assert.ok(
-    !/calculate|submit|save|click/i.test(
-      tour.replace(/Calculate, Save or Submit/g, ""),
-    ),
-  );
+  const tour = main.match(/async function runHandoffReviewTour[\s\S]*?\n\}\n/)[0];
+  assert.ok(!/calculate|submit|save|click/i.test(tour.replace(/Calculate, Save or Submit/g, "")));
 });
 
 test("employers: reviewed certificate names travel packet -> device context -> agent, and the opt-in switch is wired", () => {
-  const read = (rel) =>
-    fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
+  const read = (rel) => fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
   const packet = read("app/actions/packet.ts");
   const context = read("app/api/local-agent/jobs/[jobId]/context/route.ts");
   const main = read("electron-connect/main.js");
@@ -845,10 +805,7 @@ test("employers: reviewed certificate names travel packet -> device context -> a
   assert.match(main, /TAXROCKET_EMPLOYER_AUTOFILL/);
   assert.match(live, /\$env:TAXROCKET_EMPLOYER_AUTOFILL = "on"/);
   // Mapping a certificate without an employer name is refused server-side too.
-  assert.match(
-    extraction,
-    /Enter the employer name exactly as it is registered with FBR/,
-  );
+  assert.match(extraction, /Enter the employer name exactly as it is registered with FBR/);
 });
 
 test("employers: the packet field map carries the names only when there are some", () => {
@@ -863,15 +820,8 @@ test("employers: the packet field map carries the names only when there are some
       salaryCertificateTaxWithheld: 210000,
       ...(employers ? { employers } : {}),
     });
-  assert.deepEqual(plain(map(["SYSTEMS LIMITED", "BETA CORP"]).employers), [
-    "SYSTEMS LIMITED",
-    "BETA CORP",
-  ]);
-  assert.equal(
-    "employers" in map([]),
-    false,
-    "no employers: the packet is unchanged",
-  );
+  assert.deepEqual(plain(map(["SYSTEMS LIMITED", "BETA CORP"]).employers), ["SYSTEMS LIMITED", "BETA CORP"]);
+  assert.equal("employers" in map([]), false, "no employers: the packet is unchanged");
   assert.equal("employers" in map(undefined), false);
 });
 
@@ -881,61 +831,44 @@ function moduleLoaderForPortalMap() {
 }
 
 test("employer review pause: label, button, resume confirmation and completion line are wired end to end", () => {
-  const read = (rel) =>
-    fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
+  const read = (rel) => fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
   const client = read("components/tax/fbr-connect-client.tsx");
   const main = read("electron-connect/main.js");
-  assert.match(
-    client,
-    /portal_employer_review: "Add your employer in the FBR window"/,
-  );
+  assert.match(client, /portal_employer_review: "Add your employer in the FBR window"/);
   assert.match(client, /I have added the employer in FBR/);
   assert.match(client, /"confirmed_by_taxpayer"/);
   assert.match(main, /return "portal_employer_review";/);
   // Not a final-submit gate: a plain Continue must be able to resume it.
-  assert.ok(
-    !/final_review|final_submit|classic_final/.test(
-      main.match(/function getEmployerReviewAction\(\) \{[\s\S]*?\n\}/)[0],
-    ),
-  );
+  assert.ok(!/final_review|final_submit|classic_final/.test(main.match(/function getEmployerReviewAction\(\) \{[\s\S]*?\n\}/)[0]));
 });
 
 test("review pauses need a ticked, recorded confirmation before Continue", () => {
-  const read = (rel) =>
-    fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
+  const read = (rel) => fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
   const client = read("components/tax/fbr-connect-client.tsx");
   const actions = read("app/actions/fbr-jobs.ts");
   assert.match(client, /ACKNOWLEDGEMENT_TEXT/);
   assert.match(client, /type="checkbox"/);
   // The tick is per job AND pause kind, so it cannot carry over to the next pause.
-  assert.match(
-    client,
-    /ackedKey !== `\$\{activeJob\.id\}:\$\{activeJob\.pauseAction\}`/,
-  );
-  assert.match(
-    client,
-    /portal_handoff_review:\s*"I confirm that I have personally reviewed/,
-  );
-  assert.match(
-    client,
-    /portal_employer_review:\s*"I confirm that I have added my employer/,
-  );
+  assert.match(client, /ackedKey !== `\$\{activeJob\.id\}:\$\{activeJob\.pauseAction\}`/);
+  assert.match(client, /portal_handoff_review:\s*"I confirm that I have personally reviewed/);
+  assert.match(client, /portal_employer_review:\s*"I confirm that I have added my employer/);
   assert.match(actions, /Please tick the confirmation box before continuing\./);
   assert.match(actions, /acknowledgementText/);
   assert.match(actions, /requiredAction === "portal_handoff_review"/);
   assert.match(actions, /requiredAction === "portal_employer_review"/);
+  // The missing-items pause: the taxpayer enters them, ticks, and the run goes on.
+  assert.match(client, /portal_autofill_review:\s*"I confirm that I have dealt with the items listed above/);
+  assert.match(client, /I have entered them in FBR/);
+  assert.match(actions, /requiredAction === "portal_autofill_review"/);
 });
 
 test("a mapped salary certificate keeps its employer names editable (own save, packet superseded)", () => {
-  const read = (rel) =>
-    fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
+  const read = (rel) => fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
   const actions = read("app/actions/extraction.ts");
   const step = read("components/tax/filing/wizard-documents-step.tsx");
   const wizard = read("components/tax/filing/filing-wizard.tsx");
   const hook = read("components/tax/filing/hooks/use-filing-documents.ts");
-  const fn = actions.match(
-    /export async function saveSalaryCertificateEmployersAction[\s\S]*?\n}\n/,
-  )[0];
+  const fn = actions.match(/export async function saveSalaryCertificateEmployersAction[\s\S]*?\n}\n/)[0];
   assert.match(fn, /extractionStatus !== "MAPPED"/);
   assert.match(fn, /planSalaryCertificateEmployerUpdate/);
   assert.match(fn, /filingPacket\.updateMany/);
@@ -943,9 +876,6 @@ test("a mapped salary certificate keeps its employer names editable (own save, p
   assert.match(fn, /packetApprovalConfirmed: false/);
   assert.match(step, /employersEditableAfterMap/);
   assert.match(step, /Save employer/);
-  assert.match(
-    wizard,
-    /handleSaveSalaryEmployers=\{handleSaveSalaryEmployers\}/,
-  );
+  assert.match(wizard, /handleSaveSalaryEmployers=\{handleSaveSalaryEmployers\}/);
   assert.match(hook, /saveSalaryCertificateEmployersAction/);
 });

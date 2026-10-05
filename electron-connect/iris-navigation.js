@@ -7,7 +7,7 @@
 // TY2026+ return setup steps that do not require legal/financial judgement.
 // Create/Save/Submit/payment controls and all financial inputs remain off
 // limits until the engine/mapping audit is resolved.
-const BUILD_TAG = "fix39-gift-keywords-20261003";
+const BUILD_TAG = "fix40-gift-7037-20261005";
 const DEFAULT_HOSTS = ["iris.fbr.gov.pk"];
 const SECTION_TOUR = Object.freeze([
   { id: "salary", group: "Employment", tab: "Salary" },
@@ -3626,18 +3626,29 @@ async function inspectNavigation(
     );
     onStep("readiness_evidence", JSON.stringify(states));
   };
+  // The return shell appears before IRIS fills in its title and tax year. On a
+  // slow FBR connection that gap can be many seconds, so "shell present" alone
+  // is not enough: wait (bounded) until the title is readable as well. If the
+  // title never appears, return the last snapshot and let verifyDocument pause.
   const waitForDocument = async () => {
-    for (let i = 0; i < 24; i++) {
+    let last = null;
+    for (let i = 0; i < 60; i++) {
       const result = await read();
+      last = result;
+      if (result.frames.some((f) => f.hasBlockingOverlay || f.loginVisible))
+        return result;
       if (
         result.frames.some(
-          (f) => f.document?.present || f.hasBlockingOverlay || f.loginVisible,
+          (f) =>
+            f.document?.present &&
+            f.document.titleDetected !== false &&
+            f.document.taxYear !== null,
         )
       )
         return result;
       await delay(500);
     }
-    return read();
+    return last || read();
   };
   // The economic-transactions screen can appear immediately after the guarded
   // TY2026 period Continue click. Keep it in one handler so the stage machine
@@ -4072,7 +4083,22 @@ async function inspectNavigation(
     };
   };
 
-  const verifyDocument = async (snapshot) => {
+  const verifyDocument = async (initialSnapshot) => {
+    let snapshot = initialSnapshot;
+    // The return shell can render long before its title and year (slow FBR).
+    // Re-read for a bounded time before calling the page "unverified".
+    for (let i = 0; i < 40; i++) {
+      const shell = snapshot.frames.find((f) => f.document?.present);
+      if (
+        !shell ||
+        (shell.document.titleDetected !== false &&
+          shell.document.taxYear !== null) ||
+        snapshot.frames.some((f) => f.hasBlockingOverlay || f.loginVisible)
+      )
+        break;
+      await delay(500);
+      snapshot = await read();
+    }
     const frame = snapshot.frames.find((f) => f.document?.present);
     if (!frame)
       return { inspection: snapshot, requiredAction: "portal_navigation" };
@@ -4419,14 +4445,14 @@ async function inspectNavigation(
     "welcome_popup_check",
     "No blocking dialog detected. No protected dialogs were dismissed.",
   );
-  // Give Angular a bounded render window. An unavailable/incomplete frame is
+  // Give Angular a bounded render window (about 20 s, because IRIS can be slow). An unavailable/incomplete frame is
   // not the same as a visible login prompt and must not be reported as logout.
   for (
     let i = 0;
-    i < 10 && !isAuthenticated(inspection) && !requiresLogin(inspection);
+    i < 40 && !isAuthenticated(inspection) && !requiresLogin(inspection);
     i++
   ) {
-    await delay(400);
+    await delay(500);
     inspection = await read();
     if (
       inspection.frames.some(

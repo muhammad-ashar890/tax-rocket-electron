@@ -278,6 +278,7 @@ export async function getBankTransactionsAction(draftId: string) {
         classificationStatus: transaction.classificationStatus,
         suggestedEntryType: transaction.suggestedEntryType,
         suggestedCategory: transaction.suggestedCategory,
+        giftDonorId: transaction.giftDonorId,
       })),
     };
   } catch (error) {

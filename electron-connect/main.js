@@ -57,7 +57,11 @@ const irisRowFiller = require("./iris-row-filler");
 const irisWealthDriver = require("./iris-wealth-driver");
 const cashBaselineStore = require("./cash-baseline-store");
 const irisEmployerDriver = require("./iris-employer-driver");
-const { buildJobReport } = require("./job-report");
+const {
+  buildJobReport,
+  buildAttentionMessage,
+  buildAttentionReport,
+} = require("./job-report");
 // Phase 1 — real-portal autofill.
 //
 // Until now every real-IRIS job short-circuited into a navigation-only
@@ -147,7 +151,7 @@ function resolveAutofillMode(jobContext) {
 }
 // Independent controller stamp: a new navigator must not make an OLD main
 // process appear fully updated (the mixed fix10/fix11 rollout hid this).
-const AGENT_BUILD_TAG = "fix39-gift-keywords-20261003";
+const AGENT_BUILD_TAG = "fix40-gift-7037-20261005";
 function getAgentBuildLabel() {
   return `${AGENT_BUILD_TAG} | navigator: ${irisNavigation.BUILD_TAG} | filler: ${irisRowFiller.BUILD_TAG}`;
 }
@@ -4094,6 +4098,25 @@ async function runRealIrisAutofill(jobContext, job, mode) {
 
   let results = [];
   const unexpectedPrefill = [];
+  // The agent stops at the FIRST figure it cannot enter (live runs). Figures the
+  // taxpayer already entered themselves after an earlier stop are skipped, so a
+  // resumed run carries on with the next figure instead of stopping again.
+  const takenOver = Array.isArray(jobContext?.acknowledgedAutofillItems)
+    ? jobContext.acknowledgedAutofillItems
+    : [];
+  const takenKeys = new Set(takenOver.map((item) => item.key));
+  const stopOnProblem = mode !== "dry";
+  let stopped = false;
+  const isEntered = (status) => irisRowFiller.SUCCESS_STATUSES.has(status);
+  const keepTaken = (fields) =>
+    fields.filter((field) => {
+      if (!takenKeys.has(autofillItemKey(field))) return true;
+      onStep(
+        "real_autofill_taken_over",
+        `${field.irisCode} "${field.label || ""}" was entered by the taxpayer in FBR (confirmed in TaxRocket). The agent skips it and does not check it.`,
+      );
+      return false;
+    });
 
   // Employer Details (Employment > Salary). Names only: IRIS fills the
   // registration number when the exact registered name is chosen. Done before
@@ -4221,7 +4244,9 @@ async function runRealIrisAutofill(jobContext, job, mode) {
       "No packet code was seen in the captured section tour, so no section could be targeted. Nothing was filled.",
     );
   }
-  for (const group of plan.groups) {
+  for (const fullGroup of plan.groups) {
+    if (stopped) break;
+    const group = fullGroup;
     // This approved fix is intentionally limited to salary withholding row
     // 64020004. If some other tax-deduction code appears in the same group, hold
     // instead of treating it as part of this one-row permission.
@@ -4244,6 +4269,7 @@ async function runRealIrisAutofill(jobContext, job, mode) {
           sectionStatus: "unsupported_tax_deduction_scope",
         })),
       );
+      if (stopOnProblem) stopped = true;
       continue;
     }
     const moved = await irisNavigation.navigateToSection(windowInstance, {
@@ -4268,6 +4294,7 @@ async function runRealIrisAutofill(jobContext, job, mode) {
           sectionStatus: moved.status,
         })),
       );
+      if (stopOnProblem) stopped = true;
       continue;
     }
     onStep(
@@ -4296,6 +4323,7 @@ async function runRealIrisAutofill(jobContext, job, mode) {
           sectionStatus: "section_mapping_unverified",
         })),
       );
+      if (stopOnProblem) stopped = true;
       continue;
     }
     // Read-only look at what is ALREADY in this grid before anything is typed.
@@ -4327,17 +4355,35 @@ async function runRealIrisAutofill(jobContext, job, mode) {
         `${group.sectionId}: pre-fill snapshot could not be read (${error?.message || error}). Fill continues; the overwrite guard still protects non-empty cells.`,
       );
     }
-    const outcome = await irisRowFiller.fillIrisRows(
-      windowInstance,
-      group.fields,
-      { dryRun: mode === "dry", sectionVerified },
-    );
-    results = results.concat(
-      outcome.results.map((entry) => ({
-        ...entry,
+    // One figure at a time: the first one that is not entered stops the run.
+    for (const field of group.fields) {
+      // A figure the taxpayer entered themselves is only read back, never typed.
+      const taken = takenKeys.has(autofillItemKey(field));
+      const outcome = await irisRowFiller.fillIrisRows(
+        windowInstance,
+        [field],
+        { dryRun: mode === "dry" || taken, sectionVerified },
+      );
+      const entries = outcome.results.map((entry) => ({
+        ...(taken ? checkTakenOverEntry(entry) : entry),
         sectionId: group.sectionId,
-      })),
-    );
+      }));
+      if (taken) {
+        onStep(
+          "real_autofill_taken_over_check",
+          `${field.irisCode} "${field.label || ""}": entered by the taxpayer; the agent read it back (read-only): ${entries.map((entry) => entry.status).join(", ")}.`,
+        );
+      }
+      results = results.concat(entries);
+      if (stopOnProblem && entries.some((entry) => !isEntered(entry.status))) {
+        stopped = true;
+        onStep(
+          "real_autofill_stopped",
+          `Stopped at ${field.irisCode} "${field.label || ""}": the agent could not enter it safely. The figures after it are not touched until the taxpayer has dealt with this one.`,
+        );
+        break;
+      }
+    }
   }
   // Salary-only view, kept for the handoff label before wealth rows are added.
   const salarySummary = irisRowFiller.summarise(results);
@@ -4348,18 +4394,35 @@ async function runRealIrisAutofill(jobContext, job, mode) {
   // fills them through the same verified row filler.
   let wealthOutcome = null;
   const wealthEnabled = wealthPrepared.length > 0 && getWealthAutofillEnabled();
-  if (wealthEnabled) {
+  // Cash in hand is "IRIS's own figure plus a movement", so a hand-typed value
+  // cannot be proven against the packet; it stays a confirmed-but-unchecked item.
+  const unverifiable = (field) => String(field.irisCode) === "7012";
+  const wealthTodo =
+    wealthEnabled && !stopped
+      ? wealthPrepared.filter(
+          (field) =>
+            !(takenKeys.has(autofillItemKey(field)) && unverifiable(field)),
+        )
+      : [];
+  if (wealthEnabled && !stopped && !wealthTodo.length) {
+    wealthOutcome = { results: [], setup: [] };
+  }
+  if (wealthTodo.length) {
     onStep(
       "real_autofill_wealth_start",
-      `Wealth Statement (${mode === "dry" ? "DRY — nothing clicked" : "LIVE"}): ${wealthPrepared.length} figure(s). ` +
+      `Wealth Statement (${mode === "dry" ? "DRY — nothing clicked" : "LIVE"}): ${wealthTodo.length} figure(s). ` +
         `The agent only adds rows and types amounts; it never saves, calculates or submits.`,
     );
     try {
-      wealthOutcome = await irisWealthDriver.runWealthDriver(
+      wealthOutcome = await irisWealthDriver.runWealthDriverStepwise(
         windowInstance,
-        wealthPrepared,
+        wealthTodo,
         {
           mode: mode === "dry" ? "dry" : "live",
+          stopOnProblem,
+          isSuccess: isEntered,
+          verifyOnly: (field) => takenKeys.has(autofillItemKey(field)),
+          checkEntry: checkTakenOverEntry,
           navigate: (sectionId) =>
             irisNavigation.navigateToSection(windowInstance, {
               sectionId,
@@ -4401,7 +4464,7 @@ async function runRealIrisAutofill(jobContext, job, mode) {
         `Wealth driver stopped: ${error instanceof Error ? error.message : String(error)}. Nothing further was clicked.`,
       );
       wealthOutcome = {
-        results: wealthPrepared.map((field) => ({
+        results: wealthTodo.map((field) => ({
           ...field,
           status: irisWealthDriver.WEALTH_STATUS.SETUP_FAILED,
           setupStatus: "driver_error",
@@ -4409,6 +4472,15 @@ async function runRealIrisAutofill(jobContext, job, mode) {
         setup: [],
       };
     }
+    if (wealthOutcome.stopped) {
+      stopped = true;
+      onStep(
+        "real_autofill_stopped",
+        "Stopped in the Wealth Statement: the agent could not enter a figure safely. The figures after it are not touched until the taxpayer has dealt with this one.",
+      );
+    }
+  }
+  if (wealthOutcome) {
     results = results.concat(
       wealthOutcome.results.map((entry) => ({
         ...entry,
@@ -4416,7 +4488,8 @@ async function runRealIrisAutofill(jobContext, job, mode) {
       })),
     );
   }
-  for (const field of plan.unlocated) {
+  for (const field of keepTaken(plan.unlocated)) {
+    if (stopped) break;
     onStep(
       "real_autofill_unlocated",
       `${field.irisCode} "${field.label || ""}" was not seen in any captured section, so no grid could be targeted.`,
@@ -4426,6 +4499,7 @@ async function runRealIrisAutofill(jobContext, job, mode) {
       status: irisRowFiller.FILL_STATUS.ROW_NOT_FOUND,
       sectionId: null,
     });
+    if (stopOnProblem) stopped = true;
   }
   const summary = irisRowFiller.summarise(results);
 
@@ -4450,8 +4524,14 @@ async function runRealIrisAutofill(jobContext, job, mode) {
     (r) =>
       r.status === irisRowFiller.FILL_STATUS.OVERWRITE_NEEDS_CONFIRMATION,
   );
+  // Pre-filled rows the taxpayer has already looked at (confirmed on an earlier
+  // pause) are not raised again.
+  const prefillKey = (row) => `prefill|${row.code}`;
+  const pendingPrefill = unexpectedPrefill.filter(
+    (row) => !takenKeys.has(prefillKey(row)),
+  );
   const autofillReviewRequired =
-    summary.skipped > 0 || unexpectedPrefill.length > 0;
+    summary.skipped > 0 || pendingPrefill.length > 0;
   const conflictText = overwriteConflicts.length
     ? ` IRIS already holds a different figure in ${overwriteConflicts
         .map(
@@ -4460,8 +4540,8 @@ async function runRealIrisAutofill(jobContext, job, mode) {
         )
         .join("; ")} — it was NOT overwritten. Decide which figure is right in the FBR window.`
     : "";
-  const prefillText = unexpectedPrefill.length
-    ? ` IRIS also holds figures the packet does not cover: ${unexpectedPrefill
+  const prefillText = pendingPrefill.length
+    ? ` IRIS also holds figures the packet does not cover: ${pendingPrefill
         .map(
           (row) =>
             `${row.code} ${row.cells.map((cell) => cell.value).join("/")}`,
@@ -4484,8 +4564,81 @@ async function runRealIrisAutofill(jobContext, job, mode) {
       onStep,
     });
   }
+  // What the taxpayer reads is plain language (one line per cause). The raw
+  // status codes stay in the execution log and the job report.
+  // `typeof` keeps this safe where the helper is not injected (unit sandboxes).
+  // Figures planned in total, those the taxpayer entered, and those the agent
+  // has not reached because it stopped at the first problem.
+  // A taken-over figure that did not check out is not "taken over" any more:
+  // it is the problem the taxpayer is told about again.
+  const resultKeys = new Set(results.map((r) => autofillItemKey(r)));
+  const failedTaken = new Set(
+    results
+      .filter((r) => r.status === "takeover_unconfirmed")
+      .map((r) => autofillItemKey(r)),
+  );
+  const takenOverNow = takenOver
+    .filter((item) => !failedTaken.has(item.key))
+    .map((item) => ({
+      ...item,
+      checked:
+        results.some(
+          (r) => autofillItemKey(r) === item.key && r.takenOverChecked,
+        ) || Boolean(item.checked),
+    }));
+  // Checked ones are already in `results` (counted there); the rest are extra.
+  const takenUncounted = takenOverNow.filter(
+    (item) => !resultKeys.has(item.key),
+  ).length;
+  const plannedTotal =
+    coded.length + (wealthEnabled ? wealthPrepared.length : 0);
+  const remainingCount = Math.max(
+    0,
+    plannedTotal - results.length - takenUncounted,
+  );
+  const reportOptions = {
+    unexpectedPrefill: pendingPrefill,
+    alreadyDone: takenUncounted,
+    remaining: stopped ? remainingCount : 0,
+  };
+  const attention =
+    typeof buildAttentionMessage === "function"
+      ? buildAttentionMessage(results, reportOptions)
+      : { text: "", itemCount: 0 };
+  // The same list as data, so TaxRocket can show it as a tidy list.
+  const attentionReport =
+    autofillReviewRequired && typeof buildAttentionReport === "function"
+      ? buildAttentionReport(results, reportOptions)
+      : null;
+  // What the taxpayer must deal with now. After Continue these become
+  // "taken over" and the next run skips them.
+  const wealthKeys = new Set(wealthPrepared.map((f) => autofillItemKey(f)));
+  const lineNames = new Map();
+  for (const item of attentionReport?.items || [])
+    for (const line of item.lines) lineNames.set(line.key, line.name);
+  const pendingItems = autofillReviewRequired
+    ? [
+        ...results
+          .filter((r) => !isEntered(r.status))
+          .map((r) => {
+            const key = autofillItemKey(r);
+            return {
+              key,
+              name: lineNames.get(key) || key,
+              kind: wealthKeys.has(key) ? "wealth" : "salary",
+            };
+          }),
+        ...pendingPrefill.map((row) => ({
+          key: prefillKey(row),
+          name: lineNames.get(prefillKey(row)) || `Row ${row.code}`,
+          kind: "prefill",
+        })),
+      ]
+    : [];
   const pauseMessage = autofillReviewRequired
-    ? `The FBR return opened, but ${summary.skipped} approved field(s) could not be placed safely (${fillMessage}).${conflictText}${prefillText} Review those fields in the FBR window. Nothing was saved, submitted, calculated, or paid.`
+    ? attention.itemCount > 0
+      ? `${attention.text}${conflictText}${prefillText} Nothing was saved, submitted, calculated, or paid.`
+      : `The FBR return opened, but ${summary.skipped} approved field(s) could not be placed safely (${fillMessage}).${conflictText}${prefillText} Review those fields in the FBR window. Nothing was saved, submitted, calculated, or paid.`
     : handoffReviewDue
       ? buildHandoffReviewMessage()
       : null;
@@ -4538,6 +4691,9 @@ async function runRealIrisAutofill(jobContext, job, mode) {
         plannedValue: r.plannedValue,
       })),
       reviewRequired: autofillReviewRequired,
+      attention: attentionReport,
+      pendingItems,
+      takenOver: takenOverNow,
       handoffReviewConfirmed: hasConfirmedHandoffReview(jobContext),
     },
   };
@@ -4592,6 +4748,27 @@ function hasConfirmedEmployerReview(jobContext) {
   );
 }
 
+/**
+ * The pause raised when some approved figures could not be entered. The
+ * taxpayer enters them in IRIS and presses Continue (with a ticked, recorded
+ * confirmation); the resumed run then goes on to the next stage instead of
+ * running the whole fill again and pausing on the same items.
+ */
+function getAutofillReviewAction() {
+  return "portal_autofill_review";
+}
+
+function hasConfirmedAutofillReview(jobContext) {
+  const confirmations = jobContext?.livePilotState?.confirmations;
+  return (
+    Array.isArray(confirmations) &&
+    confirmations.some(
+      (entry) =>
+        String(entry?.action || "").toLowerCase() === getAutofillReviewAction(),
+    )
+  );
+}
+
 function hasConfirmedHandoffReview(jobContext) {
   const confirmations = jobContext?.livePilotState?.confirmations;
   return (
@@ -4619,6 +4796,77 @@ function readSavedJobLog(job) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Identity of one planned figure. Must match `itemKey` in job-report.js (a test
+ * pins that), because the keys travel through the saved job log.
+ */
+function autofillItemKey(entry) {
+  return String(
+    entry?.key ||
+      `${String(entry?.irisCode || "")}|${String(entry?.rowDescriptionIncludes || "")}`,
+  );
+}
+
+/**
+ * A figure the taxpayer says they entered themselves is READ back (never typed
+ * over) and must match the approved figure in the right row. `entry` is the
+ * result of a read-only (dry) pass. A match keeps the status already_correct;
+ * anything else becomes takeover_unconfirmed with the reason, so the agent
+ * tells the taxpayer again instead of trusting the tick.
+ */
+function checkTakenOverEntry(entry) {
+  if (entry && entry.status === "already_correct")
+    return { ...entry, takenOverChecked: true };
+  const status = String(entry?.status || "");
+  const reason =
+    status === "filled" && entry.dryRun
+      ? "empty"
+      : status === "overwrite_needs_confirmation"
+        ? "value_differs"
+        : status === "row_not_found" || status === "wealth_row_missing_dry_run"
+          ? "row_missing"
+          : status === "ambiguous_row"
+            ? "ambiguous"
+            : "unreadable";
+  return {
+    ...entry,
+    status: "takeover_unconfirmed",
+    takeoverReason: reason,
+    seenValue: entry?.existingValue ?? null,
+    plannedValue: entry?.plannedValue ?? entry?.value,
+    dryRun: true,
+  };
+}
+
+/**
+ * The agent stops at the first figure it cannot enter. The taxpayer enters it
+ * in IRIS, ticks the confirmation and presses Continue. This reads the earlier
+ * pause from the saved job log and returns every figure the taxpayer has taken
+ * over so far (earlier ones plus the one that pause stopped at), so the resumed
+ * run skips them and carries on with the next figure. Returns [] unless the
+ * earlier run is proven to be a LIVE fill that paused for this review.
+ */
+function collectAcknowledgedAutofillItems(saved) {
+  if (!saved || saved.finalStatus !== "paused") return [];
+  if (saved.pauseAction !== getAutofillReviewAction()) return [];
+  const autofill = saved.result && saved.result.autofill;
+  if (!autofill || autofill.mode !== "live") return [];
+  const merged = new Map();
+  for (const list of [autofill.takenOver, autofill.pendingItems]) {
+    for (const item of Array.isArray(list) ? list : []) {
+      const key = String(item?.key || "");
+      if (!key || merged.has(key)) continue;
+      merged.set(key, {
+        key,
+        name: String(item?.name || key).slice(0, 200),
+        kind: item?.kind === "wealth" || item?.kind === "prefill" ? item.kind : "salary",
+        checked: Boolean(item?.checked),
+      });
+    }
+  }
+  return Array.from(merged.values());
 }
 
 /**
@@ -4672,6 +4920,7 @@ function buildConfirmedHandoffCompletion(saved, nowIso) {
           wealth: autofill.wealth,
           employers: autofill.employers,
           reviewConfirmed: true,
+          takenOver: autofill.takenOver,
         },
       ),
       autofill: confirmedAutofill,
@@ -4755,12 +5004,23 @@ function buildHandoffScopeSummary(
   const salary = extras.salarySummary || summary;
   const salaryTotal = Number(salary?.total) || 0;
   const salaryFilled = Number(salary?.filled) || 0;
+  // Items the taxpayer confirmed they entered in IRIS themselves: they are no
+  // longer "needs review", but they are never reported as agent-verified.
+  const takenOver = Array.isArray(extras.takenOver) ? extras.takenOver : [];
+  const salaryTaken = takenOver.filter((item) => item.kind === "salary").length;
+  const wealthTaken = takenOver.filter((item) => item.kind === "wealth").length;
+  const manualItems = takenOver.map((item) => item.name);
+  const manualUnchecked = takenOver
+    .filter((item) => !item.checked)
+    .map((item) => item.name);
   const salaryNeedsReview = extras.salarySummary
     ? Number(salary?.skipped) > 0
     : reviewRequired;
   const wealthRows = Array.isArray(wealthPrepared) ? wealthPrepared.length : 0;
   const wealth = extras.wealth || null;
-  const wealthEntered = Boolean(wealth && wealth.enabled && wealth.summary);
+  const wealthEntered = Boolean(
+    wealth && wealth.enabled && (wealth.summary || wealthTaken > 0),
+  );
   const wealthFilled = Number(wealth?.summary?.filled) || 0;
   const wealthTotal = Number(wealth?.summary?.total) || 0;
   const wealthDry = wealthEntered && wealth.mode === "dry";
@@ -4768,15 +5028,19 @@ function buildHandoffScopeSummary(
     ? "pending"
     : wealthDry
       ? "dry_run_only"
-      : wealthFilled === wealthTotal && wealthTotal > 0
-        ? "entered_not_calculated"
+      : wealthFilled === wealthTotal && (wealthTotal > 0 || wealthTaken > 0)
+        ? wealthTaken > 0
+          ? "confirmed_by_taxpayer"
+          : "entered_not_calculated"
         : "needs_review";
   const salaryText = `Salary ${
     salaryNeedsReview
       ? "\u26A0\uFE0F needs review"
-      : salaryTotal > 0 && salaryFilled === salaryTotal
-        ? "\u2705 filled"
-        : "\u26A0\uFE0F not entered"
+      : salaryTaken > 0
+        ? "\u2705 completed by the taxpayer in FBR"
+        : salaryTotal > 0 && salaryFilled === salaryTotal
+          ? "\u2705 filled"
+          : "\u26A0\uFE0F not entered"
   }`;
   const wealthText =
     wealthState === "pending"
@@ -4787,7 +5051,9 @@ function buildHandoffScopeSummary(
         ? `Wealth \u26A0\uFE0F dry run only (${wealthTotal} row(s) checked, nothing entered)`
         : wealthState === "entered_not_calculated"
           ? `Wealth \u2705 ${wealthFilled}/${wealthTotal} row(s) entered \u2014 press Calculate in FBR and confirm the reconciliation difference is 0`
-          : `Wealth \u26A0\uFE0F needs review (${wealthFilled}/${wealthTotal} row(s) entered)`;
+          : wealthState === "confirmed_by_taxpayer"
+            ? `Wealth \u2705 ${wealthFilled}/${wealthTotal} row(s) entered by the agent; the rest entered by the taxpayer in FBR \u2014 press Calculate in FBR and confirm the reconciliation difference is 0`
+            : `Wealth \u26A0\uFE0F needs review (${wealthFilled}/${wealthTotal} row(s) entered)`;
   const employers = extras.employers || null;
   const employerRows = Array.isArray(employers?.prepared)
     ? employers.prepared.length
@@ -4821,9 +5087,13 @@ function buildHandoffScopeSummary(
     employers: employerState,
     salary: salaryNeedsReview
       ? "needs_review"
-      : salaryTotal > 0 && salaryFilled === salaryTotal
-        ? "filled"
-        : "not_entered",
+      : salaryTaken > 0
+        ? "confirmed_by_taxpayer"
+        : salaryTotal > 0 && salaryFilled === salaryTotal
+          ? "filled"
+          : "not_entered",
+    manualItems,
+    manualUnchecked,
     wealthStatement: wealthState,
     propertyPaymentsComputations: extras.reviewConfirmed
       ? "reviewed_by_taxpayer"
@@ -4875,6 +5145,7 @@ function mergeNavigationAutofillOutcome(navigation, autofill, autofillMode) {
     navigationMode: navigation?.result?.mode || null,
     autofillMode,
     autofillSummary: summary,
+    attention: reviewRequired ? autofill?.result?.attention || null : null,
     handoffScope: buildHandoffScopeSummary(
       summary,
       reviewRequired,
@@ -4884,6 +5155,7 @@ function mergeNavigationAutofillOutcome(navigation, autofill, autofillMode) {
         wealth: autofill?.result?.wealth,
         employers: autofill?.result?.employers,
         reviewConfirmed: Boolean(autofill?.result?.handoffReviewConfirmed),
+        takenOver: autofill?.result?.takenOver,
       },
     ),
     autofill: autofill?.result || null,
@@ -5304,6 +5576,23 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
           "Review confirmed by the taxpayer. Finishing without touching the FBR window again.",
         );
         return completed;
+      }
+    }
+    // The taxpayer confirmed the "could not be entered" pause: they entered the
+    // item the agent stopped at. Carry their earlier takeovers forward so the
+    // fill skips those figures and goes on with the next one.
+    if (
+      autofillMode === "live" &&
+      !hasConfirmedHandoffReview(jobContext) &&
+      hasConfirmedAutofillReview(jobContext)
+    ) {
+      const taken = collectAcknowledgedAutofillItems(readSavedJobLog(job));
+      if (taken.length) {
+        jobContext = { ...jobContext, acknowledgedAutofillItems: taken };
+        pushStatus(
+          "progress",
+          `You confirmed ${taken.length} item(s) you entered yourself. The agent skips them and carries on with the next figure.`,
+        );
       }
     }
     const navigation = await runLocalIrisNavigationCheck(jobContext, job);

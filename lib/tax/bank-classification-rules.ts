@@ -1,4 +1,24 @@
 import { toMoneyAmount } from "@/lib/money";
+
+/**
+ * Category carried by an unexplained credit. It is a question, not an answer:
+ * it has no IRIS row and would be counted as taxable income, so a transaction
+ * can never be approved under it. The user must say what the credit is.
+ */
+export const PLACEHOLDER_INCOME_CATEGORY = "POTENTIAL_INCOME";
+
+export function isPlaceholderIncomeCategory(
+  category: string | null | undefined,
+) {
+  return (
+    String(category ?? "")
+      .trim()
+      .toUpperCase() === PLACEHOLDER_INCOME_CATEGORY
+  );
+}
+
+export const PLACEHOLDER_INCOME_ERROR =
+  "This credit has not been explained yet. Use the pencil icon and choose what it is (for example Salary, Gift, or Other income), or mark it Internal transfer, Cash movement, or Exclude.";
 import {
   bankDescriptionMatchesKeyword as matchesKeyword,
   findLikelyInternalTransferPairs,
@@ -251,11 +271,10 @@ export function classifyTransaction(
     return {
       status: "POTENTIAL_INCOME",
       entryType: "INCOME",
-      category: "POTENTIAL_INCOME",
+      category: PLACEHOLDER_INCOME_CATEGORY,
       confidence: 0.55,
     };
   }
 
   return descriptionSuggestion;
 }
-

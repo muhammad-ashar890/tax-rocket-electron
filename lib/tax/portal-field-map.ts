@@ -69,6 +69,14 @@ export type PortalFieldMapEntry = {
    * agent adds it to the figure IRIS already holds on the row.
    */
   valueMode?: "add_to_iris_value";
+  /**
+   * Gift received (7037) only: the donor's CNIC / NTN / passport number that
+   * the IRIS Gift dialog asks for, and the description typed into that dialog.
+   * IRIS words the created row "Gift - <id> - <name> - <description>", so the
+   * description (which holds the donor id and date) is also the row hint.
+   */
+  giftDonorId?: string;
+  giftDescription?: string;
 };
 
 /**
@@ -184,6 +192,9 @@ export type PortalAutofillField = {
   rowDescriptionIncludes?: string;
   /** See PortalFieldMapEntry.valueMode. `value` is then the amount to ADD. */
   valueMode?: "add_to_iris_value";
+  /** See PortalFieldMapEntry.giftDonorId / giftDescription (7037 only). */
+  giftDonorId?: string;
+  giftDescription?: string;
   ledgerEntryId?: string;
   taxCreditId?: string;
   incomeRecordId?: string;
@@ -292,6 +303,17 @@ const TOTAL_AMOUNT_COLUMN: PortalFieldMapEntry["column"] = "Total Amount";
  * worse, an unmapped tax section used to be pointed at `640000` "Adjustable Tax", the summary
  * row of the whole withholding schedule. Those rows are skipped and reported instead.
  */
+/** IRIS 7037, Reconciliation of Net Assets > Inflows > Gift. */
+const WEALTH_GIFT_CODE = "7037";
+
+/** YYYY-MM-DD of a booking date, or null when there is none. */
+function giftDateText(value: Date | string | null | undefined): string | null {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().slice(0, 10);
+}
+
 const COMPUTED_IRIS_CODES = new Set(
   Object.values(IRIS_CODES)
     .filter((def: any) => def.rowLevel === "Summary")
@@ -310,7 +332,8 @@ const GAP_ONLY_INCOME_CATEGORIES: Record<string, string> = {
     "Business income is filed on the Business schedules (3xxx); which line carries the engine total is unconfirmed.",
   SERVICES:
     "Services income has no verified IRIS line-item code on the 114(1) income sheets.",
-  GIFT: "Gift received is not income. It is an inflow of the Wealth Statement (Reconciliation of Net Assets, Inflows, Gift, IRIS 7037). Add it there by hand with the donor's details; the agent does not enter it.",
+  GIFT:
+    "Gift received is not income. It is an inflow of the Wealth Statement (Reconciliation of Net Assets, Inflows, Gift, IRIS 7037). The agent enters it only when the donor's CNIC / NTN / passport number is recorded; without it, add it by hand with the donor's details.",
   OTHER_INCOME:
     "'Other income' has no single IRIS line; 'Other Receipts' (5028) is not a substitute for an unknown source.",
   CAPITAL_GAIN:
@@ -358,6 +381,10 @@ function toPortalAutofillField(
       ? { rowDescriptionIncludes: entry.rowDescriptionIncludes }
       : {}),
     ...(entry.valueMode ? { valueMode: entry.valueMode } : {}),
+    ...(entry.giftDonorId ? { giftDonorId: entry.giftDonorId } : {}),
+    ...(entry.giftDescription
+      ? { giftDescription: entry.giftDescription }
+      : {}),
     ledgerEntryId: entry.ledgerEntryId,
     taxCreditId: entry.taxCreditId,
     incomeRecordId: entry.incomeRecordId,
@@ -445,6 +472,10 @@ type LedgerEntryInput = {
   category: string | null;
   description: string;
   amount: number | { toString(): string } | string;
+  /** Donor number of a gift, taken from the bank transaction it came from. */
+  giftDonorId?: string | null;
+  /** Booking date of the entry; used to word a gift's IRIS description. */
+  date?: Date | string | null;
 };
 
 type TaxCreditInput = {
@@ -545,7 +576,15 @@ export function describeUnmappedPortalSources(gaps: unknown): {
   const onlyReconciliation = blocked.every((gap) =>
     gap.category.startsWith("RECONCILIATION_ADJUSTMENT"),
   );
-  const instruction = onlyReconciliation
+  // A gift has a known home, so there is no field to "choose": say where it goes.
+  const onlyGift = blocked.every((gap) => gap.category === "GIFT");
+  const instruction = onlyGift
+    ? "A gift received is not income, so it is kept out of your tax figures. " +
+      "In IRIS it belongs in the Wealth Statement, under Reconciliation of Net " +
+      "Assets > Inflows > Gift (7037), with the donor's details. The desktop " +
+      "agent does not enter it. Before continuing, confirm that you will add " +
+      "it yourself in IRIS, or that it should not be entered anywhere."
+    : onlyReconciliation
     ? "This is a notice, not an error: the desktop agent does not enter this " +
       "item. The reconciliation amount is TaxRocket's own balancing entry. " +
       "IRIS has no field the agent may fill for it without declaring " +
@@ -729,6 +768,11 @@ export function buildPortalFieldMap(params: {
   };
 
   let totalIncome = 0;
+  // Gifts received that have a donor id: one 7037 row per donor and date.
+  const giftAgg = new Map<
+    string,
+    { donorId: string; date: string | null; amount: number; count: number }
+  >();
   const certificateGrossSalary =
     salaryCertificateGrossSalary === null ||
     salaryCertificateGrossSalary === undefined
@@ -744,6 +788,25 @@ export function buildPortalFieldMap(params: {
     const normalizedCat = isGiftCategory(entry.category)
       ? "GIFT"
       : normalizeCategory(entry.category);
+    if (
+      entry.entryType === "INCOME" &&
+      normalizedCat === "GIFT" &&
+      entry.giftDonorId
+    ) {
+      const donorId = String(entry.giftDonorId).trim();
+      const date = giftDateText(entry.date);
+      const key = `${donorId}|${date ?? ""}`;
+      const slot = giftAgg.get(key);
+      if (slot) {
+        slot.amount += amount;
+        slot.count += 1;
+      } else {
+        giftAgg.set(key, { donorId, date, amount, count: 1 });
+      }
+      // Entered through the Gift dialog (wealth block below), not as income and
+      // not as an unmapped gap.
+      continue;
+    }
     const mappings =
       CATEGORY_TO_IRIS_MAP[normalizedCat] ||
       CATEGORY_TO_IRIS_MAP[entry.category?.toUpperCase() || ""];
@@ -1204,6 +1267,32 @@ export function buildPortalFieldMap(params: {
       filerStatus: taxpayerListStatus || undefined,
       sourceEntryCount: 1,
       valueMode: VALUE_MODE_ADD_TO_IRIS,
+    });
+  }
+
+  // Gifts received (7037). IRIS wants the donor in a dialog first; the agent
+  // creates one child row per donor and date, then types the amount on it.
+  for (const gift of [...giftAgg.values()].sort((a, b) =>
+    `${a.date ?? ""}${a.donorId}`.localeCompare(`${b.date ?? ""}${b.donorId}`),
+  )) {
+    const description = gift.date
+      ? `Gift received on ${gift.date} from ${gift.donorId}`
+      : `Gift received during the tax year from ${gift.donorId}`;
+    wealthFields.push({
+      ourCategory: "GIFT_RECEIVED",
+      ourDescription: `Gift received from ${gift.donorId}${gift.date ? ` on ${gift.date}` : ""}`,
+      ourAmount: Math.round(gift.amount),
+      irisCode: WEALTH_GIFT_CODE,
+      irisDescription: `Gift - ${gift.donorId}`,
+      portalArea: "116 - Wealth Statement",
+      section: "Reconciliation of Net Assets",
+      column: "Amount",
+      isTaxField: false,
+      filerStatus: taxpayerListStatus || undefined,
+      rowDescriptionIncludes: description,
+      giftDonorId: gift.donorId,
+      giftDescription: description,
+      sourceEntryCount: gift.count,
     });
   }
 

@@ -37,7 +37,7 @@
  *   - Dry mode never clicks inside the page; it only reads and reports.
  */
 
-const BUILD_TAG = "fix39-gift-keywords-20261003";
+const BUILD_TAG = "fix40-gift-7037-20261005";
 
 const EMPLOYER_STATUS = Object.freeze({
   ALREADY_LISTED: "already_listed",
@@ -86,11 +86,7 @@ function employerPageOp(step) {
       .toLowerCase();
   const visible = (el) => {
     if (!el || !el.isConnected) return false;
-    for (
-      let node = el;
-      node && node.nodeType === 1;
-      node = node.parentElement
-    ) {
+    for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
       if (node.hidden) return false;
       const style = window.getComputedStyle(node);
       if (style.display === "none" || style.visibility === "hidden")
@@ -98,12 +94,13 @@ function employerPageOp(step) {
     }
     return true;
   };
-  const text = (el) => (el ? el.textContent.replace(/\s+/g, " ").trim() : "");
+  const text = (el) =>
+    el ? el.textContent.replace(/\s+/g, " ").trim() : "";
 
   const addButtons = () =>
-    Array.from(
-      document.querySelectorAll("button.salary-employer-add-btn"),
-    ).filter(visible);
+    Array.from(document.querySelectorAll("button.salary-employer-add-btn")).filter(
+      visible,
+    );
   // Cards are normally ".salary-employer-card". When IRIS marks them up
   // differently, the children of the list body that follows the section header
   // (".salary-employer-header" + ".panel-body" in the real capture) are the cards.
@@ -129,20 +126,16 @@ function employerPageOp(step) {
       .filter((dialog) => !dialog.querySelector("app-add-employer"))
       .map((dialog) => {
         const head = dialog.querySelector("[mat-dialog-title], h6");
-        return head
-          ? text(head)
-              .replace(/close\s*$/i, "")
-              .trim()
-          : "dialog";
+        return head ? text(head).replace(/close\s*$/i, "").trim() : "dialog";
       });
   const nameInput = (modal) =>
     modal.querySelector('input[formcontrolname="employerName"]');
   const regInput = (modal) =>
     modal.querySelector('input[formcontrolname="employerRegNo"]');
   const optionEls = () =>
-    Array.from(document.querySelectorAll('mat-option, [role="option"]')).filter(
-      visible,
-    );
+    Array.from(
+      document.querySelectorAll('mat-option, [role="option"]'),
+    ).filter(visible);
   const actionButtons = (modal) => {
     const dialog = modal.closest("mat-dialog-container") || modal;
     return Array.from(dialog.querySelectorAll("mat-dialog-actions button"));
@@ -186,9 +179,7 @@ function employerPageOp(step) {
       /add employer/.test(norm(button.textContent)),
     );
     if (buttons.length !== 1)
-      return {
-        status: buttons.length ? "ambiguous_button" : "button_not_found",
-      };
+      return { status: buttons.length ? "ambiguous_button" : "button_not_found" };
     if (buttons[0].disabled) return { status: "button_disabled" };
     buttons[0].click();
     return { status: "clicked" };
@@ -197,16 +188,11 @@ function employerPageOp(step) {
   if (op === "modal_state") {
     const found = modals();
     if (found.length !== 1)
-      return {
-        status: found.length ? "ambiguous_dialog" : "dialog_not_open",
-        open: false,
-      };
+      return { status: found.length ? "ambiguous_dialog" : "dialog_not_open", open: false };
     const modal = found[0];
     const name = nameInput(modal);
     const reg = regInput(modal);
-    const add = actionButtons(modal).find(
-      (button) => norm(button.textContent) === "add",
-    );
+    const add = actionButtons(modal).find((button) => norm(button.textContent) === "add");
     return {
       status: "ok",
       open: true,
@@ -234,9 +220,7 @@ function employerPageOp(step) {
       (option) => norm(text(option)) === norm(step.optionText),
     );
     if (matches.length !== 1)
-      return {
-        status: matches.length ? "ambiguous_option" : "option_not_found",
-      };
+      return { status: matches.length ? "ambiguous_option" : "option_not_found" };
     matches[0].click();
     return { status: "clicked" };
   }
@@ -249,9 +233,7 @@ function employerPageOp(step) {
       (button) => norm(button.textContent) === wanted,
     );
     if (matches.length !== 1)
-      return {
-        status: matches.length ? "ambiguous_button" : "button_not_found",
-      };
+      return { status: matches.length ? "ambiguous_button" : "button_not_found" };
     if (matches[0].disabled) return { status: "button_disabled" };
     matches[0].click();
     return { status: "clicked" };
@@ -267,20 +249,14 @@ function assertAllowedStep(step) {
       `employer driver: operation "${step && step.op}" is not allowed`,
     );
   if (step.op === "modal_click") {
-    const button = String(step.button || "")
-      .trim()
-      .toLowerCase();
+    const button = String(step.button || "").trim().toLowerCase();
     if (!MODAL_BUTTONS.includes(button))
-      throw new Error(
-        `employer driver: button "${step.button}" is not allowed`,
-      );
+      throw new Error(`employer driver: button "${step.button}" is not allowed`);
   }
   if (step.op === "modal_type_name") {
     const value = String(step.value == null ? "" : step.value).trim();
     if (!value || value.length > 200)
-      throw new Error(
-        "employer driver: the employer name is empty or too long",
-      );
+      throw new Error("employer driver: the employer name is empty or too long");
   }
   if (step.op === "modal_pick_option" && !String(step.optionText || "").trim())
     throw new Error("employer driver: no option text given");
@@ -364,9 +340,7 @@ function chooseEmployerOption(optionTexts, employerName) {
  *             name; reported as a candidate and never added
  */
 function chooseResolvedEmployer(state, employerName) {
-  const name = String((state && state.name) || "")
-    .replace(/\s+/g, " ")
-    .trim();
+  const name = String((state && state.name) || "").replace(/\s+/g, " ").trim();
   const regNo = String((state && state.regNo) || "").replace(/\s+/g, "");
   if (!name || !regNo) return { kind: "none" };
   const wanted = employerNameKey(employerName);
@@ -394,12 +368,7 @@ function cardMatchesEmployer(cardText, employerName, regNo) {
   const wanted = employerNameKey(employerName);
   if (wanted && key.includes(` ${wanted} `)) return true;
   const reg = String(regNo || "").replace(/\s+/g, "");
-  return (
-    Boolean(reg) &&
-    String(cardText || "")
-      .replace(/\s+/g, "")
-      .includes(reg)
-  );
+  return Boolean(reg) && String(cardText || "").replace(/\s+/g, "").includes(reg);
 }
 
 /** Unique, non-empty employer names in packet order. Pure. */
@@ -426,9 +395,8 @@ function summariseEmployers(results) {
     ok,
     needsReview: list.length - ok,
     added: list.filter((r) => r.status === EMPLOYER_STATUS.ADDED).length,
-    alreadyListed: list.filter(
-      (r) => r.status === EMPLOYER_STATUS.ALREADY_LISTED,
-    ).length,
+    alreadyListed: list.filter((r) => r.status === EMPLOYER_STATUS.ALREADY_LISTED)
+      .length,
   };
 }
 
@@ -448,9 +416,9 @@ function describeEmployerIssues(results) {
       );
     } else if (r.status === EMPLOYER_STATUS.AMBIGUOUS) {
       lines.push(
-        `Several IRIS registrations are named ${name} (${(
-          r.candidates || []
-        ).join("; ")})`,
+        `Several IRIS registrations are named ${name} (${(r.candidates || []).join(
+          "; ",
+        )})`,
       );
     } else if (r.setupStatus === NOT_ATTEMPTED) {
       lines.push(
@@ -533,10 +501,7 @@ async function runEmployerDriver(windowInstance, employerNames, options = {}) {
   try {
     moved = await navigate(SECTION_ID);
   } catch (error) {
-    moved = {
-      ok: false,
-      status: `navigation_error: ${error && error.message}`,
-    };
+    moved = { ok: false, status: `navigation_error: ${error && error.message}` };
   }
   if (!moved || !moved.ok) {
     note(
@@ -579,37 +544,24 @@ async function runEmployerDriver(windowInstance, employerNames, options = {}) {
     try {
       await run({ op: "modal_click", button: "cancel" });
     } catch (error) {
-      note(
-        "cancel_failed",
-        `The Add Employer dialog could not be closed (${error && error.message}).`,
-      );
+      note("cancel_failed", `The Add Employer dialog could not be closed (${error && error.message}).`);
     }
   };
 
   let stop = null; // once set, remaining employers are not attempted
   for (const name of names) {
     if (stop) {
-      results.push({
-        name,
-        status: EMPLOYER_STATUS.SETUP_FAILED,
-        setupStatus: stop,
-      });
+      results.push({ name, status: EMPLOYER_STATUS.SETUP_FAILED, setupStatus: stop });
       continue;
     }
     probe = await run({ op: "inspect" });
     if (probe.cards.some((card) => cardMatchesEmployer(card, name))) {
-      note(
-        "already_listed",
-        `"${name}" is already in the Employer Details list.`,
-      );
+      note("already_listed", `"${name}" is already in the Employer Details list.`);
       results.push({ name, status: EMPLOYER_STATUS.ALREADY_LISTED });
       continue;
     }
     if (!live) {
-      note(
-        "would_add",
-        `Dry run: "${name}" would be added by name. Nothing clicked.`,
-      );
+      note("would_add", `Dry run: "${name}" would be added by name. Nothing clicked.`);
       results.push({ name, status: EMPLOYER_STATUS.WOULD_ADD });
       continue;
     }
@@ -617,15 +569,8 @@ async function runEmployerDriver(windowInstance, employerNames, options = {}) {
 
     const opened = await run({ op: "open_add" });
     if (opened.status !== "clicked") {
-      note(
-        "open_failed",
-        `"${name}": the Add Employer dialog did not open (${opened.status}).`,
-      );
-      results.push({
-        name,
-        status: EMPLOYER_STATUS.SETUP_FAILED,
-        setupStatus: opened.status,
-      });
+      note("open_failed", `"${name}": the Add Employer dialog did not open (${opened.status}).`);
+      results.push({ name, status: EMPLOYER_STATUS.SETUP_FAILED, setupStatus: opened.status });
       stop = NOT_ATTEMPTED;
       continue;
     }
@@ -634,15 +579,8 @@ async function runEmployerDriver(windowInstance, employerNames, options = {}) {
       (state) => state.open,
     );
     if (!dialog.ok) {
-      note(
-        "dialog_timeout",
-        `"${name}": the Add Employer dialog never appeared.`,
-      );
-      results.push({
-        name,
-        status: EMPLOYER_STATUS.SETUP_FAILED,
-        setupStatus: "dialog_not_open",
-      });
+      note("dialog_timeout", `"${name}": the Add Employer dialog never appeared.`);
+      results.push({ name, status: EMPLOYER_STATUS.SETUP_FAILED, setupStatus: "dialog_not_open" });
       stop = NOT_ATTEMPTED;
       continue;
     }
@@ -661,8 +599,7 @@ async function runEmployerDriver(windowInstance, employerNames, options = {}) {
       // A registration number already in the dialog before typing would be
       // stale, so a self-resolved dialog is only trusted when it started empty.
       const before = await run({ op: "modal_state" });
-      const resolvable =
-        Boolean(before.open) && !String(before.regNo || "").trim();
+      const resolvable = Boolean(before.open) && !String(before.regNo || "").trim();
       const typed = await run({
         op: "modal_type_name",
         value: String(query).toUpperCase(),
@@ -682,11 +619,7 @@ async function runEmployerDriver(windowInstance, employerNames, options = {}) {
       if (choice.kind === "none" && resolvable) {
         const resolved = chooseResolvedEmployer(seen, name);
         if (resolved.kind === "match") {
-          choice = {
-            kind: "match",
-            option: resolved.option,
-            selfResolved: true,
-          };
+          choice = { kind: "match", option: resolved.option, selfResolved: true };
         } else if (resolved.kind === "mismatch") {
           choice = { kind: "none", candidates: [resolved.candidate] };
         }
@@ -700,16 +633,9 @@ async function runEmployerDriver(windowInstance, employerNames, options = {}) {
       if (choice.kind !== "none") break;
     }
     if (typeFailure) {
-      note(
-        "type_failed",
-        `"${name}": the name could not be typed (${typeFailure}).`,
-      );
+      note("type_failed", `"${name}": the name could not be typed (${typeFailure}).`);
       await cancelModal();
-      results.push({
-        name,
-        status: EMPLOYER_STATUS.SETUP_FAILED,
-        setupStatus: typeFailure,
-      });
+      results.push({ name, status: EMPLOYER_STATUS.SETUP_FAILED, setupStatus: typeFailure });
       stop = NOT_ATTEMPTED;
       continue;
     }
@@ -721,9 +647,7 @@ async function runEmployerDriver(windowInstance, employerNames, options = {}) {
           ambiguous
             ? `several registrations share this name (${choice.options.join("; ")})`
             : `no exact registered-name match (IRIS offered ${
-                choice.candidates.length
-                  ? choice.candidates.join("; ")
-                  : "nothing"
+                choice.candidates.length ? choice.candidates.join("; ") : "nothing"
               })`
         }. Dialog cancelled, nothing added.${
           lastSeen
@@ -734,9 +658,7 @@ async function runEmployerDriver(windowInstance, employerNames, options = {}) {
       await cancelModal();
       results.push({
         name,
-        status: ambiguous
-          ? EMPLOYER_STATUS.AMBIGUOUS
-          : EMPLOYER_STATUS.NO_EXACT_MATCH,
+        status: ambiguous ? EMPLOYER_STATUS.AMBIGUOUS : EMPLOYER_STATUS.NO_EXACT_MATCH,
         candidates: ambiguous ? choice.options : choice.candidates,
       });
       continue;
@@ -744,21 +666,10 @@ async function runEmployerDriver(windowInstance, employerNames, options = {}) {
 
     const picked = choice.option;
     // A card for this registration may already exist under a different spelling.
-    if (
-      probe.cards.some((card) =>
-        cardMatchesEmployer(card, picked.name, picked.regNo),
-      )
-    ) {
-      note(
-        "already_listed",
-        `"${name}" is already listed (registration ${picked.regNo}).`,
-      );
+    if (probe.cards.some((card) => cardMatchesEmployer(card, picked.name, picked.regNo))) {
+      note("already_listed", `"${name}" is already listed (registration ${picked.regNo}).`);
       await cancelModal();
-      results.push({
-        name,
-        status: EMPLOYER_STATUS.ALREADY_LISTED,
-        regNo: picked.regNo,
-      });
+      results.push({ name, status: EMPLOYER_STATUS.ALREADY_LISTED, regNo: picked.regNo });
       continue;
     }
 
@@ -772,16 +683,9 @@ async function runEmployerDriver(windowInstance, employerNames, options = {}) {
       ? { status: "clicked" }
       : await run({ op: "modal_pick_option", optionText: picked.text });
     if (clicked.status !== "clicked") {
-      note(
-        "pick_failed",
-        `"${name}": the list option could not be chosen (${clicked.status}).`,
-      );
+      note("pick_failed", `"${name}": the list option could not be chosen (${clicked.status}).`);
       await cancelModal();
-      results.push({
-        name,
-        status: EMPLOYER_STATUS.SETUP_FAILED,
-        setupStatus: clicked.status,
-      });
+      results.push({ name, status: EMPLOYER_STATUS.SETUP_FAILED, setupStatus: clicked.status });
       continue;
     }
     const chosen = await waitFor(
@@ -809,16 +713,9 @@ async function runEmployerDriver(windowInstance, employerNames, options = {}) {
 
     const added = await run({ op: "modal_click", button: "add" });
     if (added.status !== "clicked") {
-      note(
-        "add_failed",
-        `"${name}": Add could not be pressed (${added.status}).`,
-      );
+      note("add_failed", `"${name}": Add could not be pressed (${added.status}).`);
       await cancelModal();
-      results.push({
-        name,
-        status: EMPLOYER_STATUS.SETUP_FAILED,
-        setupStatus: added.status,
-      });
+      results.push({ name, status: EMPLOYER_STATUS.SETUP_FAILED, setupStatus: added.status });
       continue;
     }
     // Add was pressed. From here nothing is retried.
@@ -845,17 +742,13 @@ async function runEmployerDriver(windowInstance, employerNames, options = {}) {
         return lastState;
       },
       (state) =>
-        state.cards.some((card) =>
-          cardMatchesEmployer(card, picked.name, picked.regNo),
-        ) || state.cards.length > cardsBefore,
+        state.cards.some((card) => cardMatchesEmployer(card, picked.name, picked.regNo)) ||
+        state.cards.length > cardsBefore,
       // IRIS saves the employer on its server before the card is drawn.
       timeoutMs * 2,
     );
     if (shown.ok) {
-      note(
-        "added",
-        `"${name}" added (registration ${picked.regNo || "filled by IRIS"}).`,
-      );
+      note("added", `"${name}" added (registration ${picked.regNo || "filled by IRIS"}).`);
       results.push({
         name,
         status: EMPLOYER_STATUS.ADDED,

@@ -23,7 +23,9 @@ import {
   cancelJobAction,
   resumeJobAfterPauseAction,
   getTrustedDevicesAction,
+  type JobAttention,
 } from "@/app/actions/fbr-jobs";
+import { FbrAttentionPanel } from "@/components/tax/fbr-attention-panel";
 
 type Props = Readonly<{
   draftId?: string;
@@ -56,6 +58,8 @@ type JobView = {
   pauseAction: string | null;
   pauseMessage: string | null;
   errorMessage: string | null;
+  /** What the agent could not enter, as a list (review pause only). */
+  attention?: JobAttention | null;
   createdAt: string | Date;
   startedAt: string | Date | null;
   completedAt: string | Date | null;
@@ -65,6 +69,9 @@ type JobView = {
     wealthRows: number;
     employers: string | null;
     propertyPaymentsComputations: string | null;
+    manualItems?: string[];
+    /** Items the taxpayer entered that the agent could not read back. */
+    manualUnchecked?: string[];
   } | null;
 };
 
@@ -163,6 +170,8 @@ const ACKNOWLEDGEMENT_TEXT: Record<string, string> = {
     "I confirm that I have personally reviewed Personal Assets / Liabilities (including every property), the Payment tab and Computations in the FBR window, that the information there is complete and correct, and that I am responsible for it.",
   portal_employer_review:
     "I confirm that I have added my employer(s) in the FBR window and that the employer details are correct.",
+  portal_autofill_review:
+    "I confirm that I have dealt with the items listed above in the FBR window myself (entered them). I understand that the agent only reads them back where it can, and that I am responsible for them.",
 };
 
 function isFinalSubmitPause(pauseAction: string | null) {
@@ -654,7 +663,7 @@ export default function FbrConnectClient({
                 figures above.
               </p>
               {activeJob.pauseMessage && (
-                <p className="text-muted-foreground">
+                <p className="whitespace-pre-line text-muted-foreground">
                   {activeJob.pauseMessage}
                 </p>
               )}
@@ -727,25 +736,41 @@ export default function FbrConnectClient({
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
-              <p>
-                {PAUSE_LABELS[activeJob.pauseAction || ""] ??
-                  "Action needed in the FBR window"}
-              </p>
-              {activeJob.pauseMessage && (
-                <p className="text-muted-foreground">
-                  {activeJob.pauseMessage}
-                </p>
+              {activeJob.pauseAction === "portal_autofill_review" &&
+              activeJob.attention ? (
+                <>
+                  <FbrAttentionPanel attention={activeJob.attention} />
+                  <p className="text-xs text-muted-foreground">
+                    Enter the item above in the FBR window yourself, tick the
+                    box and press Continue. The agent reads it back (it never
+                    types over it). If it is in the right place with the right
+                    amount it carries on from the next figure; if not, it tells
+                    you again.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p>
+                    {PAUSE_LABELS[activeJob.pauseAction || ""] ??
+                      "Action needed in the FBR window"}
+                  </p>
+                  {activeJob.pauseMessage && (
+                    <p className="whitespace-pre-line text-muted-foreground">
+                      {activeJob.pauseMessage}
+                    </p>
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    Waiting for your action in the FBR window.
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {reconciliationPause
+                      ? "Resolve the outstanding amount in TaxRocket, then press Continue here."
+                      : inspectionPause
+                        ? "Follow the instruction in the FBR window. When you finish, press Continue here."
+                        : "Finish that step in the FBR window, then press Continue here."}
+                  </p>
+                </>
               )}
-              <p className="text-xs text-muted-foreground">
-                Waiting for your action in the FBR window.
-              </p>
-              <p className="text-xs text-muted-foreground">
-                {reconciliationPause
-                  ? "Resolve the outstanding amount in TaxRocket, then press Continue here."
-                  : inspectionPause
-                    ? "Follow the instruction in the FBR window. When you finish, press Continue here."
-                    : "Finish that step in the FBR window, then press Continue here."}
-              </p>
               {ACKNOWLEDGEMENT_TEXT[activeJob.pauseAction || ""] && (
                 <label className="flex cursor-pointer items-start gap-2 rounded-md border border-amber-200 bg-amber-50/60 p-3 text-xs">
                   <input
@@ -792,9 +817,11 @@ export default function FbrConnectClient({
                   ? "I have reviewed it in FBR — Continue"
                   : activeJob.pauseAction === "portal_employer_review"
                     ? "I have added the employer in FBR — Continue"
-                    : inspectionPause
-                      ? "Continue filing"
-                      : "Continue"}
+                    : activeJob.pauseAction === "portal_autofill_review"
+                      ? "I have entered them in FBR — Continue"
+                      : inspectionPause
+                        ? "Continue filing"
+                        : "Continue"}
               </Button>
               <Button
                 size="sm"
@@ -884,20 +911,33 @@ function HandoffCompleteCard({
 }>) {
   const rows: { title: string; detail: string; state: HandoffRowState }[] = [];
 
+  const manualList = (scope?.manualItems ?? []).join("; ");
+  const manualAllChecked = (scope?.manualUnchecked ?? []).length === 0;
+  const manualSentence = manualAllChecked
+    ? "You entered these in FBR yourself and the agent read them back: they match the approved figures."
+    : "You entered these in FBR yourself; the agent could not check some of them.";
   rows.push(
-    scope?.salary === "filled"
+    scope?.salary === "confirmed_by_taxpayer"
       ? {
           title: "Salary income and withholding",
-          detail:
-            "Salary income and tax deducted under section 149 were entered and read back from the FBR draft.",
+          detail: manualAllChecked
+            ? "Entered by you in FBR. The agent read it back and it matches the approved figure."
+            : "Entered by you in FBR. You confirmed this; the agent could not check it.",
           state: "done",
         }
-      : {
-          title: "Salary income and withholding",
-          detail:
-            "Some salary amounts could not be confirmed in the FBR draft. Open Employment in FBR and check Salary and Tax Deductions.",
-          state: "attention",
-        },
+      : scope?.salary === "filled"
+        ? {
+            title: "Salary income and withholding",
+            detail:
+              "Salary income and tax deducted under section 149 were entered and read back from the FBR draft.",
+            state: "done",
+          }
+        : {
+            title: "Salary income and withholding",
+            detail:
+              "Some salary amounts could not be confirmed in the FBR draft. Open Employment in FBR and check Salary and Tax Deductions.",
+            state: "attention",
+          },
   );
 
   rows.push(
@@ -931,25 +971,31 @@ function HandoffCompleteCard({
   );
 
   rows.push(
-    scope?.wealthStatement === "entered_not_calculated"
+    scope?.wealthStatement === "confirmed_by_taxpayer"
       ? {
           title: "Wealth Statement",
-          detail: `${scope.wealthRows} row(s) entered: personal expenses, tax paid and bank accounts. Open Reconciliation of Net Assets in FBR and make sure the unreconciled amount is 0.`,
+          detail: `Some rows were entered by the agent. ${manualSentence}${manualList ? ` (${manualList})` : ""} Open Reconciliation of Net Assets in FBR and make sure the unreconciled amount is 0.`,
           state: "done",
         }
-      : scope?.wealthStatement === "needs_review"
+      : scope?.wealthStatement === "entered_not_calculated"
         ? {
             title: "Wealth Statement",
-            detail:
-              "Some rows could not be entered safely. Review Personal Assets and Reconciliation in FBR.",
-            state: "attention",
+            detail: `${scope.wealthRows} row(s) entered: personal expenses, tax paid and bank accounts. Open Reconciliation of Net Assets in FBR and make sure the unreconciled amount is 0.`,
+            state: "done",
           }
-        : {
-            title: "Wealth Statement",
-            detail:
-              "Not entered by this run. Complete it in FBR and make sure the unreconciled amount is 0.",
-            state: "attention",
-          },
+        : scope?.wealthStatement === "needs_review"
+          ? {
+              title: "Wealth Statement",
+              detail:
+                "Some rows could not be entered safely. Review Personal Assets and Reconciliation in FBR.",
+              state: "attention",
+            }
+          : {
+              title: "Wealth Statement",
+              detail:
+                "Not entered by this run. Complete it in FBR and make sure the unreconciled amount is 0.",
+              state: "attention",
+            },
   );
 
   rows.push(

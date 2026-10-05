@@ -6,6 +6,8 @@ import {
   findTransferLookalikePairs,
 } from "@/lib/tax/bank-transfer-matching";
 import { getRequiredTaxDocumentTypesForCurrentFlow } from "@/lib/tax/document-requirements";
+import { isPlaceholderIncomeCategory } from "@/lib/tax/bank-classification-rules";
+import { isGiftCategory, validateGiftDonorId } from "@/lib/tax/gift-income";
 import { validatePakistaniIban } from "@/lib/tax/iban";
 import type { TaxIncomeSource } from "@/lib/tax/filing-drafts";
 import { validateTaxYearStatement } from "@/lib/tax/tax-year-period";
@@ -127,6 +129,9 @@ export async function validateFilingCompleteness(
         debit: true,
         credit: true,
         classificationStatus: true,
+        suggestedEntryType: true,
+        suggestedCategory: true,
+        giftDonorId: true,
       },
     }),
   ]);
@@ -315,6 +320,34 @@ export async function validateFilingCompleteness(
     if (counterparts[0].classificationStatus !== "TRANSFER") {
       blockers.push(
         "Both sides of an internal transfer must have the Internal Transfer decision",
+      );
+    }
+  }
+
+  // An unexplained credit approved "as income" was booked under the placeholder
+  // category: it has no IRIS row and would be taxed. Name the row.
+  for (const transaction of transactions) {
+    if (
+      transaction.classificationStatus === "APPROVED" &&
+      isPlaceholderIncomeCategory(transaction.suggestedCategory)
+    ) {
+      blockers.push(
+        `A credit was approved as income without saying what it is: ${transaction.description}. Undo it, then use the pencil icon to choose Salary, Gift, Other income, or another decision.`,
+      );
+    }
+  }
+
+  // IRIS asks who gave a gift, so an approved gift without the donor's number
+  // cannot be entered; stop here and name the row.
+  for (const transaction of transactions) {
+    if (
+      transaction.classificationStatus === "APPROVED" &&
+      transaction.suggestedEntryType === "INCOME" &&
+      isGiftCategory(transaction.suggestedCategory) &&
+      !validateGiftDonorId(transaction.giftDonorId).valid
+    ) {
+      blockers.push(
+        `Gift needs the donor's CNIC or registration number: ${transaction.description}`,
       );
     }
   }

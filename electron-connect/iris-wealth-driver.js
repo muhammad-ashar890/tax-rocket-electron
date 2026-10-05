@@ -38,34 +38,36 @@
  *   - Dry mode never clicks inside the page; it only reads and reports.
  */
 
-const BUILD_TAG = "fix39-gift-keywords-20261003";
+const BUILD_TAG = "fix40-gift-7037-20261005";
 
 // Kept in step with lib/tax/wealth-rows.ts. A test compares the two, so a
 // category added on one side without the other fails the build.
 const EXPENSE_ROWS = Object.freeze({
-  "7066": "Asset Insurance / Security",
-  "7070": "Medical",
-  "7071": "Educational",
-  "7072": "Club",
-  "7073": "Functions / Gatherings",
-  "7076":
-    "Donation, Zakat, Annuity, Profit on Debt, Life Insurance Premium, etc.",
-  "7087": "Other Personal / Household Expenses",
-  "705601": "Foreign Traveling",
-  "7056": "Local Traveling",
-  "7051": "Rent",
-  "707302": "Wedding Events",
-  "707301": "Other Events / Functions / Gathering",
-  "7052": "Rates / Taxes / Charge / Cess",
-  "7055": "Vehicle Running / Maintenance",
-  "7058": "Electricity",
-  "7059": "Water",
-  "7060": "Gas",
-  "7061": "Telephone",
+  7066: "Asset Insurance / Security",
+  7070: "Medical",
+  7071: "Educational",
+  7072: "Club",
+  7073: "Functions / Gatherings",
+  7076: "Donation, Zakat, Annuity, Profit on Debt, Life Insurance Premium, etc.",
+  7087: "Other Personal / Household Expenses",
+  705601: "Foreign Traveling",
+  7056: "Local Traveling",
+  7051: "Rent",
+  707302: "Wedding Events",
+  707301: "Other Events / Functions / Gathering",
+  7052: "Rates / Taxes / Charge / Cess",
+  7055: "Vehicle Running / Maintenance",
+  7058: "Electricity",
+  7059: "Water",
+  7060: "Gas",
+  7061: "Telephone",
 });
 
 const BANK_CODE = "7030";
 const OUTFLOW_CODE = "7098";
+const GIFT_CODE = "7037";
+/** Gifts GIVEN (an outflow). Never written; only read to explain a misplaced gift. */
+const GIFT_GIVEN_CODE = "7091";
 const CASH_CODE = "7012";
 const CASH_VALUE_MODE = "add_to_iris_value";
 const EXPENSES_ROW_ID = "7089";
@@ -76,7 +78,17 @@ const DIALOG_TITLES = Object.freeze({
   financialAssets: "Add Financial Assets & Investments (Non-Business)",
   outflow: "Adjustments in Outflows",
   bank: "Bank Account",
+  gift: "Gift",
 });
+
+/** Navigation outcomes that only mean "IRIS has not finished rendering". */
+const TRANSIENT_NAVIGATION = new Set([
+  "document_not_open",
+  "section_not_settled",
+  "page_busy",
+]);
+const NAVIGATION_ATTEMPTS = 4;
+const NAVIGATION_RETRY_MS = 1500;
 
 const SECTION_IDS = Object.freeze({
   assets: "wealth_assets",
@@ -119,8 +131,8 @@ const DIALOG_BUTTONS = Object.freeze({
     DIALOG_TITLES.bank,
   ],
   cancel: [DIALOG_TITLES.expenses, DIALOG_TITLES.financialAssets],
-  close: [DIALOG_TITLES.outflow, DIALOG_TITLES.bank],
-  save: [DIALOG_TITLES.outflow],
+  close: [DIALOG_TITLES.outflow, DIALOG_TITLES.bank, DIALOG_TITLES.gift],
+  save: [DIALOG_TITLES.outflow, DIALOG_TITLES.gift],
 });
 
 /**
@@ -137,7 +149,11 @@ function wealthPageOp(step) {
       .toLowerCase();
   const visible = (el) => {
     if (!el || !el.isConnected) return false;
-    for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+    for (
+      let node = el;
+      node && node.nodeType === 1;
+      node = node.parentElement
+    ) {
       if (node.hidden) return false;
       const style = window.getComputedStyle(node);
       if (style.display === "none" || style.visibility === "hidden")
@@ -156,7 +172,10 @@ function wealthPageOp(step) {
   const inputsOf = (row) =>
     Array.from(
       row.querySelectorAll(
-        CFG.cellSelector + ' input:not([type="hidden"]), ' + CFG.cellSelector + " textarea",
+        CFG.cellSelector +
+          ' input:not([type="hidden"]), ' +
+          CFG.cellSelector +
+          " textarea",
       ),
     );
   const isEditable = (el) => Boolean(el) && !el.disabled && !el.readOnly;
@@ -177,7 +196,9 @@ function wealthPageOp(step) {
     dialogs().find((dialog) => dialogTitle(dialog) === norm(title)) || null;
   const buttonsOf = (dialog) =>
     Array.from(
-      dialog.querySelectorAll("mat-dialog-actions button, .dialog-footer button"),
+      dialog.querySelectorAll(
+        "mat-dialog-actions button, .dialog-footer button",
+      ),
     );
   const buttonLabel = (button) => norm(button.textContent);
   const setNative = (el, value) => {
@@ -242,7 +263,9 @@ function wealthPageOp(step) {
       row.querySelectorAll("button.btn-section-add"),
     ).filter((button) => norm(button.textContent) === norm(step.label));
     if (buttons.length !== 1)
-      return { status: buttons.length ? "ambiguous_button" : "button_not_found" };
+      return {
+        status: buttons.length ? "ambiguous_button" : "button_not_found",
+      };
     if (buttons[0].disabled) return { status: "button_disabled" };
     buttons[0].click();
     return { status: "clicked" };
@@ -303,7 +326,9 @@ function wealthPageOp(step) {
         ? 'textarea[formcontrolname="description"]'
         : step.field === "iban"
           ? 'input[placeholder="IBAN"]'
-          : null;
+          : step.field === "donor_id"
+            ? 'input[formcontrolname="idNumber"]'
+            : null;
     if (!selector) return { status: "unsupported_field" };
     const el = dialog.querySelector(selector);
     if (!el || el.disabled || el.readOnly) return { status: "field_not_found" };
@@ -318,7 +343,9 @@ function wealthPageOp(step) {
       dialog.querySelectorAll(".mat-mdc-form-field-icon-suffix button"),
     ).filter((button) => /search/i.test(button.textContent));
     if (buttons.length !== 1)
-      return { status: buttons.length ? "ambiguous_button" : "button_not_found" };
+      return {
+        status: buttons.length ? "ambiguous_button" : "button_not_found",
+      };
     buttons[0].click();
     return { status: "clicked" };
   }
@@ -338,6 +365,8 @@ function wealthPageOp(step) {
       bankName: valueOf('input[placeholder="Bank Name"]'),
       iban: valueOf('input[placeholder="IBAN"]'),
       description: valueOf('textarea[formcontrolname="description"]'),
+      donorId: valueOf('input[formcontrolname="idNumber"]'),
+      donorName: valueOf('input[formcontrolname="name"]'),
     };
   }
 
@@ -349,7 +378,9 @@ function wealthPageOp(step) {
       (button) => buttonLabel(button) === wanted,
     );
     if (matches.length !== 1)
-      return { status: matches.length ? "ambiguous_button" : "button_not_found" };
+      return {
+        status: matches.length ? "ambiguous_button" : "button_not_found",
+      };
     if (matches[0].disabled) return { status: "button_disabled" };
     matches[0].click();
     return { status: "clicked" };
@@ -367,19 +398,30 @@ const PAGE_CFG = Object.freeze({
 /** Refuses anything outside the documented click surface BEFORE it reaches the page. */
 function assertAllowedStep(step) {
   if (!step || !PAGE_OPS.includes(step.op))
-    throw new Error(`wealth driver: operation "${step && step.op}" is not allowed`);
-  const norm = (v) => String(v || "").trim().toLowerCase();
+    throw new Error(
+      `wealth driver: operation "${step && step.op}" is not allowed`,
+    );
+  const norm = (v) =>
+    String(v || "")
+      .trim()
+      .toLowerCase();
   if (step.op === "open_section_add") {
     const ok =
       (step.rowId === EXPENSES_ROW_ID && norm(step.label) === "+ expenses") ||
-      (step.rowId === FINANCIAL_ASSETS_ROW_ID && norm(step.label) === "+ assets");
+      (step.rowId === FINANCIAL_ASSETS_ROW_ID &&
+        norm(step.label) === "+ assets");
     if (!ok)
       throw new Error(
         `wealth driver: section button ${step.rowId} "${step.label}" is not allowed`,
       );
   }
-  if (step.op === "open_row_add" && ![OUTFLOW_CODE, BANK_CODE].includes(step.rowId))
-    throw new Error(`wealth driver: add icon on row ${step.rowId} is not allowed`);
+  if (
+    step.op === "open_row_add" &&
+    ![OUTFLOW_CODE, BANK_CODE, GIFT_CODE].includes(step.rowId)
+  )
+    throw new Error(
+      `wealth driver: add icon on row ${step.rowId} is not allowed`,
+    );
   const knownTitles = Object.values(DIALOG_TITLES);
   if (
     step.title !== undefined &&
@@ -409,15 +451,24 @@ function assertAllowedStep(step) {
   if (step.op === "dialog_set") {
     const ok =
       (step.field === "description" &&
-        norm(step.title) === norm(DIALOG_TITLES.outflow)) ||
-      (step.field === "iban" && norm(step.title) === norm(DIALOG_TITLES.bank));
+        [DIALOG_TITLES.outflow, DIALOG_TITLES.gift].some(
+          (title) => norm(step.title) === norm(title),
+        )) ||
+      (step.field === "iban" &&
+        norm(step.title) === norm(DIALOG_TITLES.bank)) ||
+      (step.field === "donor_id" &&
+        norm(step.title) === norm(DIALOG_TITLES.gift));
     if (!ok) throw new Error("wealth driver: that field may not be set here");
   }
   if (
     step.op === "dialog_search" &&
-    norm(step.title) !== norm(DIALOG_TITLES.bank)
+    ![DIALOG_TITLES.bank, DIALOG_TITLES.gift].some(
+      (title) => norm(step.title) === norm(title),
+    )
   )
-    throw new Error("wealth driver: search is only for the Bank Account dialog");
+    throw new Error(
+      "wealth driver: search is only for the Bank Account and Gift dialogs",
+    );
 }
 
 function buildPageScript(step) {
@@ -433,6 +484,7 @@ function planWealthWork(fields) {
   const plan = {
     expenses: [],
     outflows: [],
+    gifts: [],
     banks: [],
     cash: [],
     unsupported: [],
@@ -443,6 +495,12 @@ function planWealthWork(fields) {
       plan.expenses.push(field);
     } else if (code === OUTFLOW_CODE) {
       plan.outflows.push(field);
+    } else if (
+      code === GIFT_CODE &&
+      field.giftDonorId &&
+      field.rowDescriptionIncludes
+    ) {
+      plan.gifts.push(field);
     } else if (code === BANK_CODE && field.rowDescriptionIncludes) {
       plan.banks.push(field);
     } else if (
@@ -487,7 +545,8 @@ function planCashTarget({ delta, current, record }) {
   const cell = readCashCell(current);
   if (!Number.isFinite(change) || change === 0)
     return { action: "unreadable", reason: "cash_delta_invalid" };
-  if (cell === null) return { action: "unreadable", reason: "cash_cell_not_a_number" };
+  if (cell === null)
+    return { action: "unreadable", reason: "cash_cell_not_a_number" };
 
   const valid =
     record &&
@@ -510,7 +569,12 @@ function planCashTarget({ delta, current, record }) {
   }
   const target = baseline + change;
   if (target < 0)
-    return { action: "negative", reason: "cash_would_be_negative", baseline, target };
+    return {
+      action: "negative",
+      reason: "cash_would_be_negative",
+      baseline,
+      target,
+    };
   return {
     action: "write",
     baseline,
@@ -585,16 +649,42 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
 
   const openSection = async (sectionId, group) => {
     if (!group.length) return false;
+    // IRIS can be mid-render for a moment after a dialog closes, in which case
+    // the page briefly reports no open document. Opening a section only reads
+    // and clicks the left menu, so a short, bounded retry is safe.
     let moved;
-    try {
-      moved = await navigate(sectionId);
-    } catch (error) {
-      moved = { ok: false, status: `navigation_error: ${error && error.message}` };
+    for (let attempt = 1; attempt <= NAVIGATION_ATTEMPTS; attempt++) {
+      try {
+        moved = await navigate(sectionId);
+      } catch (error) {
+        moved = {
+          ok: false,
+          status: `navigation_error: ${error && error.message}`,
+        };
+      }
+      if (moved && moved.ok) break;
+      if (!moved || !TRANSIENT_NAVIGATION.has(moved.status)) break;
+      if (attempt < NAVIGATION_ATTEMPTS) {
+        note(
+          "section_retry",
+          `${sectionId}: ${moved.status}; waiting for IRIS to settle, then trying again (${attempt}/${NAVIGATION_ATTEMPTS - 1}).`,
+        );
+        await sleep(NAVIGATION_RETRY_MS);
+      }
     }
     if (!moved || !moved.ok) {
+      // A pop-up left open by an earlier step blocks the left menu; name it.
+      let openDialogs = "";
+      try {
+        const probe = await run({ op: "inspect", codes: [] });
+        if (probe && probe.dialogs && probe.dialogs.length)
+          openDialogs = ` Open pop-up(s) in IRIS: "${Array.from(probe.dialogs).join('", "')}".`;
+      } catch (error) {
+        openDialogs = "";
+      }
       note(
         "section_unavailable",
-        `${sectionId}: could not be opened (${moved && moved.status}). Make sure the Wealth Statement choice is Yes on the Summary of Economic Transactions page. ${group.length} figure(s) left untouched.`,
+        `${sectionId}: could not be opened (${moved && moved.status}). Make sure the Wealth Statement choice is Yes on the Summary of Economic Transactions page.${openDialogs} ${group.length} figure(s) left untouched.`,
       );
       failAll(group, WEALTH_STATUS.SECTION_UNAVAILABLE, moved && moved.status);
       return false;
@@ -618,8 +708,22 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
     try {
       await run({ op: "dialog_click", title, button });
     } catch (error) {
-      note("abandon_failed", `${title}: could not be closed (${error && error.message}).`);
+      note(
+        "abandon_failed",
+        `${title}: could not be closed (${error && error.message}).`,
+      );
+      return;
     }
+    // Do not move on until the dialog (and its backdrop) are really gone.
+    const closed = await waitFor(
+      () => run({ op: "inspect", codes: [] }),
+      (state) => !state.dialogs.length,
+    );
+    if (!closed.ok)
+      note(
+        "abandon_not_closed",
+        `${title}: still showing after CLOSE was pressed.`,
+      );
   };
 
   const fillGroup = async (group) => {
@@ -628,9 +732,9 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
   };
 
   // ── Reconciliation: expenses (7089) and tax outflow (7098) ──────────────
-  const reconGroup = [...plan.expenses, ...plan.outflows];
+  const reconGroup = [...plan.expenses, ...plan.outflows, ...plan.gifts];
   if (await openSection(SECTION_IDS.reconciliation, reconGroup)) {
-    let ready = [...plan.expenses, ...plan.outflows];
+    let ready = [...plan.expenses, ...plan.outflows, ...plan.gifts];
 
     if (plan.expenses.length) {
       const codes = plan.expenses.map((f) => String(f.irisCode));
@@ -640,7 +744,10 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
           !(seen.rows[String(f.irisCode)] || []).some((row) => row.editable),
       );
       if (!missing.length) {
-        note("expenses_present", "Every expense row already exists; no modal needed.");
+        note(
+          "expenses_present",
+          "Every expense row already exists; no modal needed.",
+        );
       } else if (!live) {
         note(
           "expenses_would_add",
@@ -648,7 +755,11 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
             .map((f) => EXPENSE_ROWS[String(f.irisCode)])
             .join(", ")} in "+ Expenses". Nothing clicked.`,
         );
-        failAll(missing, WEALTH_STATUS.DRY_ROW_MISSING, "expense_row_needs_modal");
+        failAll(
+          missing,
+          WEALTH_STATUS.DRY_ROW_MISSING,
+          "expense_row_needs_modal",
+        );
         ready = ready.filter((f) => !missing.includes(f));
       } else {
         const failed = await addExpenseRows(missing);
@@ -666,20 +777,94 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
         (rows[OUTFLOW_CODE] || []).filter(
           (row) =>
             row.editable &&
-            (!hint || row.description.toLowerCase().includes(hint.toLowerCase())),
+            (!hint ||
+              row.description.toLowerCase().includes(hint.toLowerCase())),
         );
       const seen = await run({ op: "inspect", codes: [OUTFLOW_CODE] });
       if (matching(seen.rows).length) {
-        note("outflow_present", "The tax-outflow row already exists; no modal needed.");
+        note(
+          "outflow_present",
+          "The tax-outflow row already exists; no modal needed.",
+        );
       } else if (!live) {
-        note("outflow_would_add", `DRY: would add "${hint}" under Adjustments in Outflows.`);
-        failAll(plan.outflows, WEALTH_STATUS.DRY_ROW_MISSING, "outflow_row_needs_modal");
+        note(
+          "outflow_would_add",
+          `DRY: would add "${hint}" under Adjustments in Outflows.`,
+        );
+        failAll(
+          plan.outflows,
+          WEALTH_STATUS.DRY_ROW_MISSING,
+          "outflow_row_needs_modal",
+        );
         ready = ready.filter((x) => !plan.outflows.includes(x));
       } else {
-        const failed = await addOutflowRow(hint || "Income tax deducted u/s 149", matching);
+        const failed = await addOutflowRow(
+          hint || "Income tax deducted u/s 149",
+          matching,
+        );
         if (failed) {
           failAll(plan.outflows, WEALTH_STATUS.SETUP_FAILED, failed);
           ready = ready.filter((x) => !plan.outflows.includes(x));
+        }
+      }
+    }
+
+    if (plan.gifts.length) {
+      const hintOf = (field) =>
+        String(field.rowDescriptionIncludes || "").toLowerCase();
+      const matchingGift = (rows, field) =>
+        (rows[GIFT_CODE] || []).filter(
+          (row) =>
+            row.editable &&
+            row.description.toLowerCase().includes(hintOf(field)),
+        );
+      for (const field of plan.gifts) {
+        const seen = await run({ op: "inspect", codes: [GIFT_CODE] });
+        if (matchingGift(seen.rows, field).length) {
+          note(
+            "gift_present",
+            `Gift row for ${field.giftDonorId} already exists; no dialog needed.`,
+          );
+        } else if (!live) {
+          note(
+            "gift_would_add",
+            `DRY: would add a Gift row for donor ${field.giftDonorId} under 7037. Nothing clicked.`,
+          );
+          // A gift the taxpayer typed by hand often lands under 7091 (gifts
+          // GIVEN, an outflow) instead of 7037. Read-only look so the message can say so.
+          let misplaced = null;
+          try {
+            const given = await run({
+              op: "inspect",
+              codes: [GIFT_GIVEN_CODE],
+            });
+            const child = (given.rows[GIFT_GIVEN_CODE] || []).find(
+              (row) => row.editable && /[1-9]/.test(String(row.value || "")),
+            );
+            if (child)
+              misplaced = {
+                code: GIFT_GIVEN_CODE,
+                description: child.description,
+                value: child.value,
+              };
+          } catch (error) {
+            misplaced = null;
+          }
+          failAll(
+            [field],
+            WEALTH_STATUS.DRY_ROW_MISSING,
+            "gift_row_needs_modal",
+            misplaced ? { misplacedGift: misplaced } : {},
+          );
+          ready = ready.filter((x) => x !== field);
+        } else {
+          const failed = await addGiftRow(field, (rows) =>
+            matchingGift(rows, field),
+          );
+          if (failed) {
+            failAll([field], WEALTH_STATUS.SETUP_FAILED, failed);
+            ready = ready.filter((x) => x !== field);
+          }
         }
       }
     }
@@ -693,7 +878,8 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
     const hasChild = (rows, iban) =>
       (rows[BANK_CODE] || []).some(
         (row) =>
-          row.editable && row.description.toLowerCase().includes(iban.toLowerCase()),
+          row.editable &&
+          row.description.toLowerCase().includes(iban.toLowerCase()),
       );
     let seen = await run({ op: "inspect", codes: [BANK_CODE] });
     const missing = plan.banks.filter(
@@ -719,7 +905,9 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
       }
       for (const field of missing) {
         if (!ready.includes(field)) continue;
-        const failed = await addBankAccount(String(field.rowDescriptionIncludes));
+        const failed = await addBankAccount(
+          String(field.rowDescriptionIncludes),
+        );
         if (failed) {
           failAll([field], WEALTH_STATUS.SETUP_FAILED, failed);
           ready = ready.filter((f) => f !== field);
@@ -784,11 +972,13 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
       results.push({
         ...field,
         ...carry,
-        value: decision.target === undefined ? field.value : String(decision.target),
+        value:
+          decision.target === undefined ? field.value : String(decision.target),
         status,
         setupStatus: decision.reason,
         existingValue: current,
-        plannedValue: decision.target === undefined ? undefined : String(decision.target),
+        plannedValue:
+          decision.target === undefined ? undefined : String(decision.target),
       });
       return;
     }
@@ -807,7 +997,12 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
       "cash_planned",
       `Cash in hand (7012): IRIS shows ${decision.baseline}; adding the movement ${delta} gives ${decision.target}.`,
     );
-    if (live && cashStore && outcome && (outcome.status === "filled" || outcome.status === "already_correct")) {
+    if (
+      live &&
+      cashStore &&
+      outcome &&
+      (outcome.status === "filled" || outcome.status === "already_correct")
+    ) {
       try {
         cashStore.save({
           existing: decision.baseline,
@@ -815,7 +1010,10 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
           delta,
         });
       } catch (error) {
-        note("cash_baseline_not_saved", `Cash in hand baseline could not be saved (${error && error.message}). A re-run on this machine could add the movement again.`);
+        note(
+          "cash_baseline_not_saved",
+          `Cash in hand baseline could not be saved (${error && error.message}). A re-run on this machine could add the movement again.`,
+        );
       }
     }
   }
@@ -836,7 +1034,10 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
       (state) => state.status === "ok",
     );
     if (!dialog.ok) {
-      note("expenses_dialog_missing", "The Add Personal Expenses dialog did not appear.");
+      note(
+        "expenses_dialog_missing",
+        "The Add Personal Expenses dialog did not appear.",
+      );
       return "expenses_dialog_not_shown";
     }
     const ticked = await run({
@@ -856,7 +1057,10 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
       return `expense_tick_${bad[0][1]}`;
     }
     if (!ticked.addEnabled) {
-      note("expenses_add_disabled", "ADD stayed disabled after ticking; dialog closed.");
+      note(
+        "expenses_add_disabled",
+        "ADD stayed disabled after ticking; dialog closed.",
+      );
       await abandon(DIALOG_TITLES.expenses, "Cancel");
       return "expenses_add_disabled";
     }
@@ -871,10 +1075,15 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
       () => run({ op: "inspect", codes }),
       (state) =>
         !state.dialogs.length &&
-        codes.every((code) => (state.rows[code] || []).some((row) => row.editable)),
+        codes.every((code) =>
+          (state.rows[code] || []).some((row) => row.editable),
+        ),
     );
     if (!appeared.ok) {
-      note("expenses_rows_missing", "The expense rows did not appear after ADD.");
+      note(
+        "expenses_rows_missing",
+        "The expense rows did not appear after ADD.",
+      );
       return "expense_rows_not_created";
     }
     note("expenses_added", `Added expense rows: ${labels.join(", ")}.`);
@@ -884,7 +1093,10 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
   async function addOutflowRow(description, matching) {
     const opened = await run({ op: "open_row_add", rowId: OUTFLOW_CODE });
     if (opened.status !== "clicked") {
-      note("outflow_open_failed", `Adjustments in Outflows add icon: ${opened.status}.`);
+      note(
+        "outflow_open_failed",
+        `Adjustments in Outflows add icon: ${opened.status}.`,
+      );
       return `outflow_icon_${opened.status}`;
     }
     const dialog = await waitFor(
@@ -921,7 +1133,99 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
       (state) => !state.dialogs.length && matching(state.rows).length > 0,
     );
     if (!appeared.ok) return "outflow_row_not_created";
-    note("outflow_added", `Added "${description}" under Adjustments in Outflows.`);
+    note(
+      "outflow_added",
+      `Added "${description}" under Adjustments in Outflows.`,
+    );
+    return null;
+  }
+
+  // 7037 Gift: IRIS needs the donor's id, resolved through the search button
+  // (the Name field is read-only and only fills after the search), plus a
+  // description. SAVE here only saves the row's dialog; it is the one SAVE the
+  // driver may press, and the amount is typed afterwards on the new child row.
+  async function addGiftRow(field, matching) {
+    const donorId = String(field.giftDonorId);
+    const description = String(
+      field.giftDescription || field.rowDescriptionIncludes,
+    );
+    const title = DIALOG_TITLES.gift;
+    const opened = await run({ op: "open_row_add", rowId: GIFT_CODE });
+    if (opened.status !== "clicked") {
+      note("gift_open_failed", `Gift (7037) add icon: ${opened.status}.`);
+      return `gift_icon_${opened.status}`;
+    }
+    const dialog = await waitFor(
+      () => run({ op: "dialog_state", title }),
+      (state) => state.status === "ok",
+    );
+    if (!dialog.ok) return "gift_dialog_not_shown";
+    const idSet = await run({
+      op: "dialog_set",
+      title,
+      field: "donor_id",
+      value: donorId,
+    });
+    if (idSet.status !== "set" || idSet.readback !== donorId) {
+      await abandon(title, "CLOSE");
+      return `gift_donor_id_${idSet.status}`;
+    }
+    const searched = await run({ op: "dialog_search", title });
+    if (searched.status !== "clicked") {
+      await abandon(title, "CLOSE");
+      return `gift_search_${searched.status}`;
+    }
+    const resolved = await waitFor(
+      () => run({ op: "dialog_state", title }),
+      (state) => state.status === "ok" && Boolean(state.donorName),
+    );
+    if (!resolved.ok) {
+      note(
+        "gift_donor_unresolved",
+        `IRIS did not return a name for donor ${donorId}; dialog closed, nothing added. Check the donor id (CNIC / NTN / passport) in TaxRocket.`,
+      );
+      await abandon(title, "CLOSE");
+      return "gift_donor_not_resolved";
+    }
+    const described = await run({
+      op: "dialog_set",
+      title,
+      field: "description",
+      value: description,
+    });
+    if (described.status !== "set" || described.readback !== description) {
+      await abandon(title, "CLOSE");
+      return `gift_description_${described.status}`;
+    }
+    const enabled = await waitFor(
+      () => run({ op: "dialog_state", title }),
+      (state) => state.status === "ok" && state.saveEnabled,
+    );
+    if (!enabled.ok) {
+      await abandon(title, "CLOSE");
+      return "gift_save_disabled";
+    }
+    const saved = await run({ op: "dialog_click", title, button: "SAVE" });
+    if (saved.status !== "clicked") return `gift_save_${saved.status}`;
+    const appeared = await waitFor(
+      () => run({ op: "inspect", codes: [GIFT_CODE] }),
+      (state) => !state.dialogs.length && matching(state.rows).length > 0,
+    );
+    if (!appeared.ok) {
+      const left =
+        appeared.value && appeared.value.dialogs
+          ? Array.from(appeared.value.dialogs)
+          : [];
+      note(
+        "gift_row_not_created",
+        `Gift (7037) for donor ${donorId} was saved but the new row was not seen.${left.length ? ` Pop-up(s) still open in IRIS: "${left.join('", "')}".` : ""} Check IRIS before re-running so the donor is not added twice.`,
+      );
+      return "gift_row_not_created";
+    }
+    note(
+      "gift_added",
+      `Added Gift row for donor ${donorId} (${resolved.value.donorName}) under 7037.`,
+    );
     return null;
   }
 
@@ -960,7 +1264,8 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
     const appeared = await waitFor(
       () => run({ op: "inspect", codes: [BANK_CODE] }),
       (s) =>
-        !s.dialogs.length && (s.rows[BANK_CODE] || []).some((row) => row.hasAddIcon),
+        !s.dialogs.length &&
+        (s.rows[BANK_CODE] || []).some((row) => row.hasAddIcon),
     );
     if (!appeared.ok) return "bank_summary_row_not_created";
     note("bank_summary_added", "Bank Account(s) row created via + Assets.");
@@ -988,14 +1293,18 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
       await abandon(DIALOG_TITLES.bank, "CLOSE");
       return `bank_iban_${set.status}`;
     }
-    const searched = await run({ op: "dialog_search", title: DIALOG_TITLES.bank });
+    const searched = await run({
+      op: "dialog_search",
+      title: DIALOG_TITLES.bank,
+    });
     if (searched.status !== "clicked") {
       await abandon(DIALOG_TITLES.bank, "CLOSE");
       return `bank_search_${searched.status}`;
     }
     const resolved = await waitFor(
       () => run({ op: "dialog_state", title: DIALOG_TITLES.bank }),
-      (state) => state.status === "ok" && state.accountTitle && state.addEnabled,
+      (state) =>
+        state.status === "ok" && state.accountTitle && state.addEnabled,
     );
     if (!resolved.ok) {
       note(
@@ -1017,21 +1326,87 @@ async function runWealthDriver(windowInstance, fields, options = {}) {
         !state.dialogs.length &&
         (state.rows[BANK_CODE] || []).some(
           (row) =>
-            row.editable && row.description.toLowerCase().includes(iban.toLowerCase()),
+            row.editable &&
+            row.description.toLowerCase().includes(iban.toLowerCase()),
         ),
     );
     if (!appeared.ok) return "bank_row_not_created";
-    note("bank_added", `Added bank account ${iban} (${resolved.value.accountTitle}).`);
+    note(
+      "bank_added",
+      `Added bank account ${iban} (${resolved.value.accountTitle}).`,
+    );
     return null;
   }
 
   return { results, setup };
 }
 
+/**
+ * Same work as runWealthDriver, but ONE figure at a time and, with
+ * `stopOnProblem`, it stops at the first figure that was not entered or
+ * confirmed. The figures after it are not touched: the taxpayer deals with
+ * the problem first and the next run continues from there.
+ *
+ * Order follows the all-at-once run: expenses, tax outflow, gifts, bank
+ * accounts, cash in hand, then anything the driver cannot enter.
+ * `isSuccess(status)` says which statuses count as entered or already correct.
+ * Returns { results, setup, stopped, notAttempted }.
+ */
+async function runWealthDriverStepwise(windowInstance, fields, options = {}) {
+  const {
+    stopOnProblem = true,
+    isSuccess = () => true,
+    // Figures the taxpayer says they entered themselves: only READ (dry mode),
+    // and `checkEntry` turns what was read into verified / not verified.
+    verifyOnly = () => false,
+    checkEntry = (entry) => entry,
+    ...rest
+  } = options;
+  const plan = planWealthWork(fields);
+  const ordered = [
+    ...plan.expenses,
+    ...plan.outflows,
+    ...plan.gifts,
+    ...plan.banks,
+    ...plan.cash,
+    ...plan.unsupported,
+  ];
+  const results = [];
+  const setup = [];
+  let stopped = false;
+  let attempted = 0;
+  for (const field of ordered) {
+    attempted += 1;
+    const checking = Boolean(verifyOnly(field));
+    // A hand-typed gift row carries the donor number in its text but not our
+    // description, so it is looked up by donor number.
+    const probe =
+      checking && field.giftDonorId
+        ? { ...field, rowDescriptionIncludes: String(field.giftDonorId) }
+        : field;
+    const outcome = await runWealthDriver(
+      windowInstance,
+      [probe],
+      checking ? { ...rest, mode: "dry" } : rest,
+    );
+    const entries = checking
+      ? outcome.results.map(checkEntry)
+      : outcome.results;
+    for (const entry of entries) results.push(entry);
+    for (const entry of outcome.setup) setup.push(entry);
+    if (stopOnProblem && entries.some((entry) => !isSuccess(entry.status))) {
+      stopped = true;
+      break;
+    }
+  }
+  return { results, setup, stopped, notAttempted: ordered.length - attempted };
+}
+
 module.exports = {
   BUILD_TAG,
   EXPENSE_ROWS,
   DIALOG_TITLES,
+  GIFT_CODE,
   SECTION_IDS,
   WEALTH_STATUS,
   PAGE_OPS,
@@ -1044,4 +1419,5 @@ module.exports = {
   CASH_CODE,
   CASH_VALUE_MODE,
   runWealthDriver,
+  runWealthDriverStepwise,
 };

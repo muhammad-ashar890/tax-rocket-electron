@@ -11,6 +11,10 @@
  *                      and ADD creates the 7030 summary row
  *   (+) on 7030     -> "Bank Account" dialog; the search button resolves a KNOWN
  *                      IBAN into title + bank; ADD creates the child 7030 row
+ *   (+) on 7037     -> "Gift" dialog; the search button resolves a KNOWN donor id
+ *                      into a name (the Name field is read-only and stays empty
+ *                      until then); SAVE needs id + name + description and
+ *                      creates the child 7037 row "Gift - id - name - description"
  *
  * It records every click so tests can prove which controls were (not) touched.
  * It cannot prove that real IRIS behaves like this — the first supervised live
@@ -32,8 +36,9 @@ function rowsOf(doc) {
 }
 
 class FakeIris {
-  constructor({ knownIbans = {}, modalOverrides = {} } = {}) {
+  constructor({ knownIbans = {}, knownDonors = {}, modalOverrides = {} } = {}) {
     this.knownIbans = knownIbans;
+    this.knownDonors = knownDonors;
     this.clicks = [];
     this.dom = new JSDOM(
       `<!doctype html><html><body>
@@ -48,6 +53,7 @@ class FakeIris {
       financial: read("modal-financial-assets.html"),
       outflow: read("modal-outflow.html"),
       bank: read("modal-bank.html"),
+      gift: read("modal-gift.html"),
       ...modalOverrides,
     };
     const full = new JSDOM(read("reconciliation-with-expenses-and-outflow.html")).window.document;
@@ -56,6 +62,10 @@ class FakeIris {
       (this.templates[row.id] ||= []).push(row);
     }
     const bankPage = new JSDOM(read("assets-with-bank.html")).window.document;
+    const giftPage = new JSDOM(read("reconciliation-with-gift.html")).window.document;
+    this.giftChild = rowsOf(giftPage).find(
+      (r) => r.id === "7037" && r.querySelector(".data-middle-child-wapper input:not([disabled])"),
+    );
     this.bankRows = rowsOf(bankPage).filter((r) => r.id === "7030");
     this.sections = {
       wealth_reconciliation: read("reconciliation-default.html"),
@@ -165,6 +175,11 @@ class FakeIris {
     } else if (kind === "bank") {
       const title = dialog.querySelector('input[placeholder="Account Title"]').value;
       byText("add").disabled = !title;
+    } else if (kind === "gift") {
+      const id = dialog.querySelector('input[formcontrolname="idNumber"]').value.trim();
+      const name = dialog.querySelector('input[formcontrolname="name"]').value.trim();
+      const text = dialog.querySelector("textarea").value.trim();
+      byText("save").disabled = !(id && name && text);
     }
   }
 
@@ -200,6 +215,7 @@ class FakeIris {
     if (!dialog && el.matches("mat-icon.btn-purple") && row) {
       if (row.id === "7098") this.openDialog("outflow");
       if (row.id === "7030") this.openDialog("bank");
+      if (row.id === "7037") this.openDialog("gift");
       return;
     }
     if (!dialog) return;
@@ -215,6 +231,16 @@ class FakeIris {
       if (known) {
         dialog.querySelector('input[placeholder="Account Title"]').value = known.title;
         dialog.querySelector('input[placeholder="Bank Name"]').value = known.bank;
+        this.refreshButtons(dialog);
+      }
+      return;
+    }
+    if (kind === "gift" && button && /search/i.test(button.textContent)) {
+      const id = dialog.querySelector('input[formcontrolname="idNumber"]').value;
+      const known = this.knownDonors[id];
+      if (known) {
+        // The real field is disabled; IRIS fills it programmatically.
+        dialog.querySelector('input[formcontrolname="name"]').value = known;
         this.refreshButtons(dialog);
       }
       return;
@@ -244,6 +270,16 @@ class FakeIris {
       const fresh = this.cloneTemplate(childTemplate);
       fresh.querySelector(".row-description-text").textContent = `Adjustments in Outflows - ${text}`;
       this.insertAfter(fresh, this.rowsWithId("7098").slice(-1)[0] || summary);
+      dialog.remove();
+      return;
+    }
+    if (label === "save" && kind === "gift") {
+      const id = dialog.querySelector('input[formcontrolname="idNumber"]').value.trim();
+      const name = dialog.querySelector('input[formcontrolname="name"]').value.trim();
+      const text = dialog.querySelector("textarea").value.trim();
+      const fresh = this.cloneTemplate(this.giftChild);
+      fresh.querySelector(".row-description-text").textContent = `Gift - ${id} - ${name} - ${text}`;
+      this.insertAfter(fresh, this.rowsWithId("7037").slice(-1)[0]);
       dialog.remove();
       return;
     }

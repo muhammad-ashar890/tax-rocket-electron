@@ -19,16 +19,29 @@ const SOURCE_DIR = process.argv[2] || path.join(os.homedir(), "uploads");
 const OUT_DIR = path.join(__dirname, "..", "test-fixtures", "iris", "wealth");
 
 const PAGES = [
-  ["data 116 - Wealth Statement — Reconconciliation of Net Assets IRIS 2.0.html", "reconciliation-default.html"],
+  [
+    "data 116 - Wealth Statement — Reconconciliation of Net Assets IRIS 2.0.html",
+    "reconciliation-default.html",
+  ],
   ["7098 added IRIS 2.0.html", "reconciliation-with-expenses-and-outflow.html"],
-  ["data 116 - Wealth Statement — Personal Assets  Liabilities IRIS 2.0.html", "assets-default.html"],
+  [
+    "data 116 - Wealth Statement — Personal Assets  Liabilities IRIS 2.0.html",
+    "assets-default.html",
+  ],
   ["bank account field visibleIRIS 2.0.html", "assets-with-bank.html"],
+  // A real gift saved through the 7037 dialog: the child row reads
+  // "Gift - <donor id> - <donor name> - <description>" and has an editable amount.
+  ["7037 capture IRIS 2.0.html", "reconciliation-with-gift.html"],
 ];
 const MODALS = [
   ["expense modal IRIS 2.0.html", "modal-expenses.html"],
-  ["Add Financial Assets & Investments modal IRIS 2.0.html", "modal-financial-assets.html"],
+  [
+    "Add Financial Assets & Investments modal IRIS 2.0.html",
+    "modal-financial-assets.html",
+  ],
   ["Adjustments in Outflows modal IRIS 2.0.html", "modal-outflow.html"],
   ["Bank Account(s) modal IRIS 2.0.html", "modal-bank.html"],
+  ["gift inflows popup IRIS 2.0.html", "modal-gift.html"],
 ];
 
 function load(file) {
@@ -37,13 +50,19 @@ function load(file) {
     console.warn(`  SKIP  ${file} (not found in ${SOURCE_DIR})`);
     return null;
   }
-  const html = fs.readFileSync(src, "utf8").replace(/<style[\s\S]*?<\/style>/g, "");
+  const html = fs
+    .readFileSync(src, "utf8")
+    .replace(/<style[\s\S]*?<\/style>/g, "");
   return new JSDOM(html).window.document;
 }
 
 function clean(el) {
   for (const attr of [...el.attributes]) {
-    if (/^(_ngcontent|_nghost|ng-reflect|mattooltip|style$|aria-|onkeypress|tabindex|data-mat)/.test(attr.name))
+    if (
+      /^(_ngcontent|_nghost|ng-reflect|mattooltip|style$|aria-|onkeypress|tabindex|data-mat)/.test(
+        attr.name,
+      )
+    )
       el.removeAttribute(attr.name);
   }
   for (const svg of [...el.querySelectorAll("svg")]) svg.remove();
@@ -98,4 +117,6 @@ for (const [file, out] of MODALS) {
   console.log(`  OK    ${out}`);
   written += 1;
 }
-console.log(`\n${written}/${PAGES.length + MODALS.length} wealth fixtures written to ${OUT_DIR}`);
+console.log(
+  `\n${written}/${PAGES.length + MODALS.length} wealth fixtures written to ${OUT_DIR}`,
+);

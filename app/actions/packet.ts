@@ -9,6 +9,7 @@ import { getServerSession } from "next-auth/next";
 import { authOptions } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { validateFilingCompleteness } from "@/lib/tax/filing-completeness";
+import { isGiftCategory } from "@/lib/tax/gift-income";
 import { validateAuthoritativeReconciliation } from "@/lib/tax/reconciliation-calculation";
 import { createNotification } from "@/app/actions/notifications";
 import { serializePacketMoney } from "@/lib/money";
@@ -238,97 +239,97 @@ export async function generateFilingPacketAction(
       latestPacket,
       taxCredits,
       salaryCertificate,
-    ] =
-      await Promise.all([
-        prisma.filingDraft.findUnique({
-          where: { id: draft.id },
-          select: {
-            taxYear: true,
-            status: true,
-            filerType: true,
-            businessStructure: true,
-            residencyStatus: true,
-            incomeSources: true,
-            readinessChecks: true,
-            openingWealth: true,
-            closingWealth: true,
-            reconciliationGap: true,
-            reconciliationStatus: true,
-            reconciliationMethod: true,
-            reconciliationNote: true,
-            taxableIncome: true,
-            taxWithheld: true,
-            taxPayable: true,
-            refundDue: true,
-            taxCalculationStatus: true,
-            taxpayerListStatus: true,
-            taxpayerListStatusSource: true,
-            taxpayerListStatusCheckedAt: true,
-            taxRuleSetVersion: true,
-            taxCalculationRevision: true,
-            packetApprovalConfirmed: true,
-          },
-        }),
-        prisma.document.findMany({
-          where: {
-            filingDraftId: draft.id,
-            userId: draft.userId,
-          },
-          select: {
-            documentType: true,
-            fileName: true,
-            mimeType: true,
-            sizeBytes: true,
-            extractionStatus: true,
-          },
-        }),
-        prisma.ledgerEntry.findMany({
-          where: {
-            filingDraftId: draft.id,
-            userId: draft.userId,
-          },
-          orderBy: { createdAt: "asc" },
-          select: {
-            id: true,
-            entryDate: true,
-            entryType: true,
-            category: true,
-            description: true,
-            amount: true,
-            source: true,
-          },
-        }),
-        prisma.filingPacket.findFirst({
-          where: {
-            filingDraftId: draft.id,
-            userId: draft.userId,
-          },
-          orderBy: { version: "desc" },
-          select: { id: true, version: true, approvalStatus: true },
-        }),
-        prisma.filingTaxCredit.findMany({
-          where: {
-            filingDraftId: draft.id,
-            userId: draft.userId,
-          },
-          select: {
-            id: true,
-            section: true,
-            subcategory: true,
-            amount: true,
-            source: true,
-          },
-        }),
-        prisma.document.findFirst({
-          where: {
-            filingDraftId: draft.id,
-            userId: draft.userId,
-            documentType: "salary_certificate",
-            extractionStatus: "MAPPED",
-          },
-          select: { extractedData: true },
-        }),
-      ]);
+    ] = await Promise.all([
+      prisma.filingDraft.findUnique({
+        where: { id: draft.id },
+        select: {
+          taxYear: true,
+          status: true,
+          filerType: true,
+          businessStructure: true,
+          residencyStatus: true,
+          incomeSources: true,
+          readinessChecks: true,
+          openingWealth: true,
+          closingWealth: true,
+          reconciliationGap: true,
+          reconciliationStatus: true,
+          reconciliationMethod: true,
+          reconciliationNote: true,
+          taxableIncome: true,
+          taxWithheld: true,
+          taxPayable: true,
+          refundDue: true,
+          taxCalculationStatus: true,
+          taxpayerListStatus: true,
+          taxpayerListStatusSource: true,
+          taxpayerListStatusCheckedAt: true,
+          taxRuleSetVersion: true,
+          taxCalculationRevision: true,
+          packetApprovalConfirmed: true,
+        },
+      }),
+      prisma.document.findMany({
+        where: {
+          filingDraftId: draft.id,
+          userId: draft.userId,
+        },
+        select: {
+          documentType: true,
+          fileName: true,
+          mimeType: true,
+          sizeBytes: true,
+          extractionStatus: true,
+        },
+      }),
+      prisma.ledgerEntry.findMany({
+        where: {
+          filingDraftId: draft.id,
+          userId: draft.userId,
+        },
+        orderBy: { createdAt: "asc" },
+        select: {
+          id: true,
+          entryDate: true,
+          entryType: true,
+          category: true,
+          description: true,
+          amount: true,
+          source: true,
+          sourceTransactionId: true,
+        },
+      }),
+      prisma.filingPacket.findFirst({
+        where: {
+          filingDraftId: draft.id,
+          userId: draft.userId,
+        },
+        orderBy: { version: "desc" },
+        select: { id: true, version: true, approvalStatus: true },
+      }),
+      prisma.filingTaxCredit.findMany({
+        where: {
+          filingDraftId: draft.id,
+          userId: draft.userId,
+        },
+        select: {
+          id: true,
+          section: true,
+          subcategory: true,
+          amount: true,
+          source: true,
+        },
+      }),
+      prisma.document.findFirst({
+        where: {
+          filingDraftId: draft.id,
+          userId: draft.userId,
+          documentType: "salary_certificate",
+          extractionStatus: "MAPPED",
+        },
+        select: { extractedData: true },
+      }),
+    ]);
 
     if (!draftData) {
       return { success: false, error: "Filing draft not found" };
@@ -406,6 +407,26 @@ export async function generateFilingPacketAction(
       select: { id: true, iban: true },
     });
 
+    // A gift's donor number lives on the bank transaction it came from; the
+    // ledger entry only points back at it.
+    const giftSourceIds = ledgerEntries
+      .filter((e) => isGiftCategory(e.category) && e.sourceTransactionId)
+      .map((e) => e.sourceTransactionId as string);
+    const giftDonorByTransaction = new Map<string, string | null>(
+      giftSourceIds.length === 0
+        ? []
+        : (
+            await prisma.bankTransaction.findMany({
+              where: {
+                id: { in: giftSourceIds },
+                filingDraftId: draft.id,
+                userId: draft.userId,
+              },
+              select: { id: true, giftDonorId: true },
+            })
+          ).map((t) => [t.id, t.giftDonorId] as [string, string | null]),
+    );
+
     // Build portalFieldMap using IRIS codes for Electron agent
     const portalFieldMap = buildPortalFieldMap({
       taxYear: draftData.taxYear,
@@ -417,6 +438,10 @@ export async function generateFilingPacketAction(
         category: e.category,
         description: e.description,
         amount: e.amount as any,
+        date: e.entryDate,
+        giftDonorId: e.sourceTransactionId
+          ? (giftDonorByTransaction.get(e.sourceTransactionId) ?? null)
+          : null,
       })),
       taxCredits: taxCredits.map((c) => ({
         id: c.id,
@@ -474,8 +499,13 @@ export async function generateFilingPacketAction(
     // the PORTAL map has no verified IRIS line for it — a business/services/
     // capital-gains taxpayer would otherwise generate a salary-only packet, have
     // the agent fill it cleanly, and file a return that quietly omits income.
-    const coverageGate = describeUnmappedPortalSources(portalFieldMap.mappingGaps);
-    if (coverageGate.blocked.length > 0 && !options?.acceptUnmappedPortalSources) {
+    const coverageGate = describeUnmappedPortalSources(
+      portalFieldMap.mappingGaps,
+    );
+    if (
+      coverageGate.blocked.length > 0 &&
+      !options?.acceptUnmappedPortalSources
+    ) {
       return {
         success: false,
         error: coverageGate.refusal,

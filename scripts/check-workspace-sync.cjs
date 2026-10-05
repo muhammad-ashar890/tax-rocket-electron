@@ -29,7 +29,7 @@ const path = require("path");
  * shipped code, never invented; `--self-test` proves that against this tree, so a renamed
  * function has to be updated here in the same commit or this check cries wolf.
  */
-const SYNC_STAMP = "packet-coverage-override-20260910";
+const SYNC_STAMP = "gift-7037-20261005";
 const MARKERS = [
   [
     "lib/tax/portal-field-map.ts",
@@ -110,12 +110,17 @@ const MARKERS = [
   ],
   [
     "electron-connect/job-report.js",
-    ["buildJobReport", "NEVER DONE BY THE AGENT"],
+    [
+      "buildJobReport",
+      "NEVER DONE BY THE AGENT",
+      "buildAttentionMessage",
+      "buildAttentionReport",
+    ],
     "the plain-language job report",
   ],
   [
     "electron-connect/iris-employer-driver.js",
-    ["runEmployerDriver", "fix39-gift-keywords-20261003"],
+    ["runEmployerDriver", "fix40-gift-7037-20261005"],
     "the employer driver (exact registered name only)",
   ],
   [
@@ -134,7 +139,11 @@ const MARKERS = [
   [
     "electron-connect/main.js",
     [
-      "fix39-gift-keywords-20261003",
+      "fix40-gift-7037-20261005",
+      "collectAcknowledgedAutofillItems",
+      "real_autofill_stopped",
+      "checkTakenOverEntry",
+      "runWealthDriverStepwise",
       "live_return_autofill",
       "Live entry entered and verified",
     ],
@@ -159,6 +168,18 @@ const MARKERS = [
     "electron-connect/iris-wealth-driver.js",
     ["planCashTarget", "add_to_iris_value"],
     "Cash in hand (7012): baseline plus movement, never a bare overwrite",
+  ],
+  [
+    "electron-connect/iris-wealth-driver.js",
+    [
+      "addGiftRow",
+      "gift_donor_not_resolved",
+      "Open pop-up(s) in IRIS",
+      "TRANSIENT_NAVIGATION",
+      "runWealthDriverStepwise",
+      "misplacedGift",
+    ],
+    "7037 Gift: donor id, search, description, SAVE of the dialog, then the amount",
   ],
   [
     "electron-connect/cash-baseline-store.js",
@@ -207,8 +228,28 @@ const MARKERS = [
   ],
   [
     "lib/tax/portal-field-map.ts",
-    ["valueMode: VALUE_MODE_ADD_TO_IRIS", "isGiftCategory"],
-    "the 7012 movement field and the gift exclusion",
+    ["valueMode: VALUE_MODE_ADD_TO_IRIS", "isGiftCategory", "giftAgg"],
+    "the 7012 movement field, the gift exclusion and the 7037 gift rows",
+  ],
+  [
+    "prisma/schema.prisma",
+    ["giftDonorId          String?"],
+    "the gift donor column (run the migration after copying)",
+  ],
+  [
+    "prisma/migrations/20261003120000_add_bank_transaction_gift_donor/migration.sql",
+    ['"giftDonorId" TEXT'],
+    "the migration that adds it",
+  ],
+  [
+    "lib/tax/gift-income.ts",
+    ["export function validateGiftDonorId"],
+    "donor number rules for the IRIS Gift dialog",
+  ],
+  [
+    "app/actions/packet.ts",
+    ["giftDonorByTransaction", "date: e.entryDate"],
+    "the packet carries each gift with its donor and booking date",
   ],
   [
     "lib/tax/filing-completeness.ts",
@@ -232,8 +273,53 @@ const MARKERS = [
   ],
   [
     "scripts/lib/fake-iris-wealth.cjs",
-    ["class FakeIris {"],
-    "the fake IRIS Wealth Statement page the driver tests run against",
+    ["class FakeIris {", "knownDonors"],
+    "the fake IRIS Wealth Statement page the driver tests run against (with the Gift dialog)",
+  ],
+  [
+    "lib/tax/bank-classification-rules.ts",
+    ["isPlaceholderIncomeCategory", "PLACEHOLDER_INCOME_ERROR"],
+    "an unexplained credit can never be approved as income",
+  ],
+  [
+    "app/actions/bank-classification.ts",
+    ["isPlaceholderIncomeCategory(transaction.suggestedCategory)"],
+    "the approve click refuses an unexplained credit",
+  ],
+  [
+    "lib/tax/filing-completeness.ts",
+    ["isPlaceholderIncomeCategory(transaction.suggestedCategory)"],
+    "the Continue gate names an unexplained credit approved as income",
+  ],
+  [
+    "components/tax/fbr-attention-panel.tsx",
+    ["FbrAttentionPanel", "What to do: "],
+    "the review pause shown as a list: what happened, what to do (new file)",
+  ],
+  [
+    "app/actions/fbr-jobs.ts",
+    ["readJobAttention", 'requiredAction === "portal_autofill_review"'],
+    "the job list passes the attention list to the page as plain text; the missing-items pause needs a ticked confirmation",
+  ],
+  [
+    "scripts/verify-iris-wealth-driver.cjs",
+    ["gift planning:"],
+    "the 7037 Gift driver tests",
+  ],
+  [
+    "scripts/verify-bank-classification.cjs",
+    ["becomes a 7037 Wealth row"],
+    "the packet test for gifts that carry a donor",
+  ],
+  [
+    "test-fixtures/iris/wealth/modal-gift.html",
+    ["app-nitr-gift-dialog"],
+    "fixture: the Gift dialog (new in this round)",
+  ],
+  [
+    "test-fixtures/iris/wealth/reconciliation-with-gift.html",
+    ["sub-child"],
+    "fixture: a saved Gift child row (new in this round)",
   ],
   [
     "test-fixtures/iris/wealth/modal-bank.html",

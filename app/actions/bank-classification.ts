@@ -13,15 +13,16 @@ import {
   isTransferLookalike,
   type TransferCandidate,
 } from "@/lib/tax/bank-transfer-matching";
-import { classifyTransaction } from "@/lib/tax/bank-classification-rules";
+import {
+  PLACEHOLDER_INCOME_ERROR,
+  classifyTransaction,
+  isPlaceholderIncomeCategory,
+} from "@/lib/tax/bank-classification-rules";
+import { isGiftCategory, validateGiftDonorId } from "@/lib/tax/gift-income";
 import { validateFilingCompleteness } from "@/lib/tax/filing-completeness";
 import { validateTaxYearStatement } from "@/lib/tax/tax-year-period";
-import {
-  toMoneyAmount,
-  toMoneyNumber,
-  type MoneyInput,
-  toMoneyNumberOrNull,
-} from "@/lib/money";
+import { toMoneyAmount, toMoneyNumber, type MoneyInput, toMoneyNumberOrNull } from "@/lib/money";
+
 
 async function getOwnedDraft(draftId: string) {
   const session = await getServerSession(authOptions);
@@ -881,6 +882,7 @@ export async function manuallyClassifyBankTransactionAction(
   transactionId: string,
   entryType: "INCOME" | "EXPENSE" | "ASSET" | "LIABILITY" | "EXCLUDE",
   category: string,
+  giftDonorId?: string,
 ) {
   try {
     const draft = await getOwnedDraft(draftId);
@@ -924,6 +926,7 @@ export async function manuallyClassifyBankTransactionAction(
             classificationStatus: "REJECTED",
             suggestedEntryType: null,
             suggestedCategory: category || "EXCLUDED",
+            giftDonorId: null,
           },
         });
       });
@@ -953,6 +956,19 @@ export async function manuallyClassifyBankTransactionAction(
     }
     if (!category.trim())
       return { success: false, error: "Category is required" };
+    if (isPlaceholderIncomeCategory(category))
+      return { success: false, error: PLACEHOLDER_INCOME_ERROR };
+
+    // A gift needs the donor's number: IRIS asks for it in the Gift dialog.
+    // Any other decision clears a donor number left over from an earlier one.
+    let donorId: string | null = null;
+    if (entryType === "INCOME" && isGiftCategory(category)) {
+      const donorCheck = validateGiftDonorId(giftDonorId);
+      if (!donorCheck.valid) {
+        return { success: false, error: donorCheck.error };
+      }
+      donorId = donorCheck.id;
+    }
 
     await prisma.$transaction(async (tx) => {
       await tx.ledgerEntry.deleteMany({
@@ -982,6 +998,7 @@ export async function manuallyClassifyBankTransactionAction(
           classificationStatus: "APPROVED",
           suggestedEntryType: entryType,
           suggestedCategory: category.trim(),
+          giftDonorId: donorId,
         },
       });
     });
@@ -1145,6 +1162,22 @@ export async function reviewBankTransactionClassificationAction(
 
     if (isTransferLookalike(transaction, transferCounterparts)) {
       return { success: false, error: TRANSFER_LOOKALIKE_ERROR };
+    }
+
+    if (isPlaceholderIncomeCategory(transaction.suggestedCategory)) {
+      return { success: false, error: PLACEHOLDER_INCOME_ERROR };
+    }
+
+    if (
+      transaction.suggestedEntryType === "INCOME" &&
+      isGiftCategory(transaction.suggestedCategory) &&
+      !validateGiftDonorId(transaction.giftDonorId).valid
+    ) {
+      return {
+        success: false,
+        error:
+          "A gift needs the donor's CNIC or registration number. Use the pencil icon, choose Income > Gift and enter it.",
+      };
     }
 
     const amount = toMoneyAmount(

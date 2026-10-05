@@ -255,6 +255,56 @@ export async function queueAssistedFilingJobAction(draftId: string) {
   }
 }
 
+export type JobAttentionItem = {
+  kind: "problem" | "conflict" | "prefill";
+  lines: { name: string; amount: string | null }[];
+  what: string;
+  todo: string;
+};
+export type JobAttention = {
+  done: number;
+  total: number;
+  /** Figures the agent has not reached yet because it stopped at this item. */
+  remaining: number;
+  items: JobAttentionItem[];
+};
+
+/** Keep only plain strings and numbers from the agent's list (never raw JSON). */
+function readJobAttention(value: unknown): JobAttention | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as { done?: unknown; total?: unknown; items?: unknown };
+  if (!Array.isArray(raw.items)) return null;
+  const text = (v: unknown, max = 400) =>
+    typeof v === "string" ? v.slice(0, max) : "";
+  const items: JobAttentionItem[] = [];
+  for (const entry of raw.items.slice(0, 30)) {
+    const item = entry as Record<string, unknown>;
+    const kind =
+      item.kind === "conflict" || item.kind === "prefill"
+        ? item.kind
+        : "problem";
+    const lines = (Array.isArray(item.lines) ? item.lines : [])
+      .slice(0, 30)
+      .map((line) => {
+        const l = line as Record<string, unknown>;
+        return {
+          name: text(l.name, 200),
+          amount: typeof l.amount === "string" ? l.amount.slice(0, 60) : null,
+        };
+      })
+      .filter((line) => line.name);
+    if (!lines.length) continue;
+    items.push({ kind, lines, what: text(item.what), todo: text(item.todo) });
+  }
+  if (!items.length) return null;
+  return {
+    done: Number(raw.done) || 0,
+    total: Number(raw.total) || 0,
+    remaining: Number((raw as { remaining?: unknown }).remaining) || 0,
+    items,
+  };
+}
+
 export async function getLocalAgentJobsAction(draftId: string) {
   try {
     const draft = await getOwnedDraft(draftId);
@@ -285,7 +335,15 @@ export async function getLocalAgentJobsAction(draftId: string) {
         wealthRows: number;
         employers: string | null;
         propertyPaymentsComputations: string | null;
+        manualItems: string[];
+        manualUnchecked: string[];
       } | null = null;
+      let attention: JobAttention | null = null;
+      try {
+        attention = readJobAttention(JSON.parse(resultJson || "{}")?.attention);
+      } catch {
+        attention = null;
+      }
       try {
         const scope = JSON.parse(resultJson || "{}")?.handoffScope;
         if (scope && typeof scope === "object") {
@@ -302,12 +360,26 @@ export async function getLocalAgentJobsAction(draftId: string) {
               typeof scope.propertyPaymentsComputations === "string"
                 ? scope.propertyPaymentsComputations
                 : null,
+            manualItems: (Array.isArray(scope.manualItems)
+              ? scope.manualItems
+              : []
+            )
+              .filter((item: unknown) => typeof item === "string")
+              .slice(0, 30)
+              .map((item: string) => item.slice(0, 200)),
+            manualUnchecked: (Array.isArray(scope.manualUnchecked)
+              ? scope.manualUnchecked
+              : []
+            )
+              .filter((item: unknown) => typeof item === "string")
+              .slice(0, 30)
+              .map((item: string) => item.slice(0, 200)),
           };
         }
       } catch {
         handoffScope = null;
       }
-      return { ...job, handoffScope };
+      return { ...job, handoffScope, attention };
     });
 
     return { success: true, jobs: views };
@@ -428,7 +500,8 @@ export async function resumeJobAfterPauseAction(
     // sends the exact text the user ticked; a direct call without it is refused.
     const needsAcknowledgement =
       requiredAction === "portal_handoff_review" ||
-      requiredAction === "portal_employer_review";
+      requiredAction === "portal_employer_review" ||
+      requiredAction === "portal_autofill_review";
     const acknowledgementText =
       typeof resumeData?.acknowledgementText === "string"
         ? resumeData.acknowledgementText.slice(0, 1000)

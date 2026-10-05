@@ -81,6 +81,7 @@ type BankRow = {
   classificationStatus?: string;
   suggestedEntryType?: string | null;
   suggestedCategory?: string | null;
+  giftDonorId?: string | null;
 };
 
 type WizardBankIntelligenceStepProps = Readonly<{
@@ -139,6 +140,7 @@ export function WizardBankIntelligenceStep({
     "INCOME" | "EXPENSE" | "ASSET" | "LIABILITY" | "EXCLUDE"
   >("EXPENSE");
   const [manualCategory, setManualCategory] = useState("");
+  const [manualDonorId, setManualDonorId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const errorRef = useRef<HTMLDivElement | null>(null);
 
@@ -234,6 +236,17 @@ export function WizardBankIntelligenceStep({
                   </option>
                 ))}
               </select>
+            )}
+            {manualEntryType === "INCOME" && manualCategory === "GIFT" && (
+              <input
+                type="text"
+                value={manualDonorId}
+                onChange={(event) => setManualDonorId(event.target.value)}
+                placeholder="Donor CNIC (13 digits)"
+                aria-label="Donor CNIC or registration number"
+                maxLength={15}
+                className="h-8 w-full rounded border bg-background px-2 text-xs"
+              />
             )}
             <button
               type="button"
@@ -484,6 +497,26 @@ export function WizardBankIntelligenceStep({
     await refreshData();
   }
 
+  // Opens the manual-decision panel next to the clicked button. A gift is
+  // approved through it because IRIS needs the donor's number.
+  function openManualPanel(
+    row: BankRow,
+    target: HTMLElement,
+    preset?: { entryType: "INCOME"; category: string },
+  ) {
+    const rect = target.getBoundingClientRect();
+    setManualReviewId(row.id!);
+    setManualReviewPosition({
+      top: rect.bottom + 4,
+      left: Math.max(8, rect.right - 192),
+    });
+    setManualEntryType(
+      preset?.entryType ?? (row.credit ? "INCOME" : "EXPENSE"),
+    );
+    setManualCategory(preset?.category ?? "");
+    setManualDonorId(row.giftDonorId ?? "");
+  }
+
   async function handleManualClassification(id: string) {
     setReviewingId(id);
     setError(null);
@@ -492,6 +525,9 @@ export function WizardBankIntelligenceStep({
       id,
       manualEntryType,
       manualCategory,
+      manualEntryType === "INCOME" && manualCategory === "GIFT"
+        ? manualDonorId
+        : undefined,
     );
     setReviewingId(null);
     if (!result.success) {
@@ -500,6 +536,7 @@ export function WizardBankIntelligenceStep({
     }
     setManualReviewId(null);
     setManualCategory("");
+    setManualDonorId("");
     onBankDataChanged?.();
     await refreshData();
   }
@@ -1050,6 +1087,9 @@ export function WizardBankIntelligenceStep({
                             className="border-blue-200 bg-blue-50 text-blue-700"
                           >
                             Approved
+                            {row.giftDonorId
+                              ? ` · gift from ${row.giftDonorId}`
+                              : ""}
                           </Badge>
                         ) : row.classificationStatus === "TRANSFER" ? (
                           <Badge
@@ -1086,8 +1126,19 @@ export function WizardBankIntelligenceStep({
                                 <button
                                   type="button"
                                   title="Approve suggestion"
-                                  onClick={() =>
-                                    handleReview(row.id!, "APPROVE")
+                                  onClick={(event) =>
+                                    row.suggestedEntryType === "INCOME" &&
+                                    row.suggestedCategory === "GIFT" &&
+                                    !row.giftDonorId
+                                      ? openManualPanel(
+                                          row,
+                                          event.currentTarget,
+                                          {
+                                            entryType: "INCOME",
+                                            category: "GIFT",
+                                          },
+                                        )
+                                      : handleReview(row.id!, "APPROVE")
                                   }
                                   disabled={reviewingId === row.id}
                                   className="flex h-7 w-7 items-center justify-center rounded-md text-amanah transition-colors hover:bg-amanah hover:text-white"
@@ -1126,14 +1177,26 @@ export function WizardBankIntelligenceStep({
                                     title={
                                       row.classificationStatus ===
                                       "POTENTIAL_INCOME"
-                                        ? "Approve as income"
+                                        ? "Choose what this income is"
                                         : row.classificationStatus ===
                                             "POTENTIAL_ASSET"
                                           ? "Approve as asset"
                                           : "Approve as liability"
                                     }
-                                    onClick={() =>
-                                      handleReview(row.id!, "APPROVE")
+                                    onClick={(event) =>
+                                      row.classificationStatus ===
+                                      "POTENTIAL_INCOME"
+                                        ? // An unexplained credit is never
+                                          // approved as-is: the user says what it is.
+                                          openManualPanel(
+                                            row,
+                                            event.currentTarget,
+                                            {
+                                              entryType: "INCOME",
+                                              category: "",
+                                            },
+                                          )
+                                        : handleReview(row.id!, "APPROVE")
                                     }
                                     disabled={reviewingId === row.id}
                                     className="flex h-7 w-7 items-center justify-center rounded-md text-amanah transition-colors hover:bg-amanah hover:text-white"
@@ -1212,19 +1275,9 @@ export function WizardBankIntelligenceStep({
                               <button
                                 type="button"
                                 title="Choose a category manually"
-                                onClick={(event) => {
-                                  const rect =
-                                    event.currentTarget.getBoundingClientRect();
-                                  setManualReviewId(row.id!);
-                                  setManualReviewPosition({
-                                    top: rect.bottom + 4,
-                                    left: Math.max(8, rect.right - 192),
-                                  });
-                                  setManualEntryType(
-                                    row.credit ? "INCOME" : "EXPENSE",
-                                  );
-                                  setManualCategory("");
-                                }}
+                                onClick={(event) =>
+                                  openManualPanel(row, event.currentTarget)
+                                }
                                 disabled={reviewingId === row.id}
                                 className="flex h-7 w-7 items-center justify-center rounded-md text-purple-600 transition-colors hover:bg-purple-600 hover:text-white"
                                 data-manual-review-trigger

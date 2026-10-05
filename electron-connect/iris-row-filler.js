@@ -46,7 +46,7 @@ const DESCRIPTION_SELECTOR = ".row-description-text";
  * a stale copy is a correctness risk, not a cosmetic one — main.js refuses to run
  * the real-portal flow when the three files disagree.
  */
-const BUILD_TAG = "fix39-gift-keywords-20261003";
+const BUILD_TAG = "fix40-gift-7037-20261005";
 
 /** Outcome reason codes. `filled` is the only success. */
 const FILL_STATUS = {
