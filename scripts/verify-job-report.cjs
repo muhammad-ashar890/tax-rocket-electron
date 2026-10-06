@@ -469,6 +469,7 @@ test("taken over but not confirmed: the message says what the agent saw and what
     irisCode: "7037",
     status: "takeover_unconfirmed",
     takeoverReason: "row_missing",
+    setupStatus: "gift_row_needs_modal",
     giftDonorId: "4220180715236",
     rowDescriptionIncludes: "4220180715236",
     plannedValue: "15000",
@@ -494,7 +495,7 @@ test("taken over but not confirmed: the message says what the agent saw and what
   const report = buildAttentionReport([gift, differs, empty]);
   assert.match(
     report.items[0].what,
-    /cannot find it in IRIS under Inflows > Gift for this donor\. There is a gift of PKR 15,000 under Gift \(row 7091\), which is for gifts you GAVE/,
+    /cannot find a gift of PKR 15,000 under Inflows > Gift in IRIS\. There is a gift of PKR 15,000 under Gift \(row 7091\), which is for gifts you GAVE/,
   );
   assert.match(
     report.items[0].todo,

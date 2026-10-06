@@ -308,6 +308,7 @@ function sandbox(names, extras = {}) {
     names = [
       ...names,
       "mergeNavigationAutofillOutcome",
+      "markAutofillOff",
       "buildHandoffScopeSummary",
       "hasConfirmedHandoffReview",
       "getHandoffReviewAction",
@@ -756,6 +757,26 @@ const returnWorkspace = () =>
 </div></app-wf-header></div></div>
 <div class="tableRows dataRow" id="1009"><div class="data-middle-child-wapper"><input type="text" value="0"></div></div>
 </div></app-nitr-workflow><script>window.actions=[]</script></body></html>`;
+
+test("slow FBR: a return whose title and year render late is waited for, not reported as unverified", async () => {
+  const late = returnWorkspace()
+    .replace(
+      /<app-wf-header>[\s\S]*<\/app-wf-header>/,
+      '<app-wf-header id="hdr"></app-wf-header>',
+    )
+    .replace(
+      "<script>window.actions=[]</script>",
+      `<script>window.actions=[];setTimeout(function(){document.getElementById("hdr").innerHTML='<div class="row"><div class="col-9"><div class="col-12"><h6>Year 2026</h6><p><span> 114(1) (Return of Income filed voluntarily for complete year) </span></p></div></div><div class="col-6"><p><b>Registration No:</b> 1234567890123</p></div></div>';},6000);</script>`,
+    );
+  await withPage(late, async (_page, win) => {
+    const result = await navigation.inspectNavigation(win, {
+      taxYear: 2026,
+      taxpayerIdentifier: "1234567890123",
+    });
+    assert.notEqual(result.requiredAction, "portal_readiness_unverified");
+    assert.equal(result.inspection.frames[0].document.taxYear, 2026);
+  });
+});
 
 // Synthetic TY2026 return structure for the narrowly scoped 64020004
 // navigation test. It uses no FBR request, account, or real taxpayer data.
@@ -3598,4 +3619,113 @@ test("taken-over wealth figures are verified through the driver in read-only mod
   await make("never").runRealIrisAutofill(packet({ acknowledgedAutofillItems: taken }), { id: "job-1" }, "live");
   assert.deepEqual(seen.wealthChecked, ["7051"]);
   assert.deepEqual(seen.wealthFields, ["7051"]);
+});
+
+test("a hand-entered gift with another donor number is accepted by place and amount, and the donor IRIS shows is named once", async () => {
+  const { make, packet } = stopHarness({
+    wealthStub: (fields) => ({
+      results: fields.map((f) => ({
+        ...f,
+        status: "already_correct",
+        dryRun: true,
+        takenOverChecked: true,
+        giftDonorId: "4220180718935",
+        giftDonorSeen: "4220144218163",
+      })),
+      setup: [],
+      stopped: false,
+      notAttempted: 0,
+    }),
+  });
+  const key = "7037:wealthFields:Amount:Gift received on 2025-10-15 from 4220180718935";
+  const gift = { key, name: "Gift received from 4220180718935", kind: "wealth" };
+  const p = packet({ acknowledgedAutofillItems: [gift] });
+  p.filingPacket.snapshot.portalFieldMap.push({
+    key, irisCode: "7037", column: "Amount", value: "50000", label: "Gift", sourceGroup: "wealthFields",
+    giftDonorId: "4220180718935", rowDescriptionIncludes: "4220180718935",
+  });
+  const run = await make("never").runRealIrisAutofill(p, { id: "job-1" }, "live");
+  const item = run.result.takenOver.find((i) => i.key === key);
+  assert.equal(item.checked, true);
+  assert.equal(item.name, "Gift received from 4220180718935 (IRIS shows donor 4220144218163)");
+  // A later run reads the saved name back and must not add the note twice.
+  const again = await make("never").runRealIrisAutofill(
+    packet({ acknowledgedAutofillItems: [{ ...item }] }), { id: "job-1" }, "live");
+  assert.equal(again.result.takenOver.find((i) => i.key === key).name, item.name);
+});
+
+test("a hand-entered bank account with another IBAN is accepted and the IBAN IRIS shows is named once", async () => {
+  const { make, packet } = stopHarness({
+    wealthStub: (fields) => ({
+      results: fields.map((f) => ({ ...f, status: "already_correct", dryRun: true, takenOverChecked: true, bankIbanPlanned: "PK36SCBL0000001123456702", bankIbanSeen: "PK71SCBL0000001303338401" })),
+      setup: [], stopped: false, notAttempted: 0,
+    }),
+  });
+  const key = "7030:wealthFields:Amount:PK36SCBL0000001123456702";
+  const p = packet({ acknowledgedAutofillItems: [{ key, name: "Bank account PK36SCBL0000001123456702", kind: "wealth" }] });
+  p.filingPacket.snapshot.portalFieldMap.push({ key, irisCode: "7030", column: "Amount", value: "75000", label: "Bank", sourceGroup: "wealthFields", rowDescriptionIncludes: "PK36SCBL0000001123456702" });
+  const run = await make("never").runRealIrisAutofill(p, { id: "job-1" }, "live");
+  const item = run.result.takenOver.find((i) => i.key === key);
+  assert.equal(item.checked, true);
+  assert.equal(item.name, "Bank account PK36SCBL0000001123456702 (IRIS shows IBAN PK71SCBL0000001303338401)");
+  const again = await make("never").runRealIrisAutofill(packet({ acknowledgedAutofillItems: [{ ...item }] }), { id: "job-1" }, "live");
+  assert.equal(again.result.takenOver.find((i) => i.key === key).name, item.name);
+});
+
+test("autofill switched off: a clean inspection says plainly that nothing was typed, instead of 'Return prepared'", async () => {
+  const { markAutofillOff } = sandbox(["markAutofillOff"]);
+  const clean = {
+    paused: false,
+    pauseAction: "portal_sections_inspected",
+    pauseMessage: "Your return is prepared for review.",
+    result: { requiredAction: "portal_sections_inspected", mode: "live_return_navigation_only" },
+    executionLog: [{ step: "inspection_complete" }],
+  };
+  const out = markAutofillOff(clean);
+  assert.equal(out.paused, false, "finishNavigationOnly still turns it into a pause");
+  assert.equal(out.pauseAction, "portal_autofill_off");
+  assert.match(out.pauseMessage, /autofill switched off/);
+  assert.match(out.pauseMessage, /start-live\.ps1/);
+  assert.match(out.pauseMessage, /typed nothing/);
+  assert.equal(out.result.autofillOff, true);
+  assert.equal(out.executionLog.at(-1).step, "real_autofill_off");
+  const other = { paused: true, pauseAction: "portal_readiness_unverified" };
+  assert.equal(markAutofillOff(other), other);
+  assert.equal(markAutofillOff(null), null);
+});
+
+test("a second agent copy does not vanish silently, and every agent says which autofill mode it is in", () => {
+  const src = fs.readFileSync(path.join(__dirname, "../electron-connect/main.js"), "utf8");
+  const lock = src.slice(src.indexOf("requestSingleInstanceLock()"), src.indexOf("app.on(\"second-instance\""));
+  assert.match(lock, /dialog\.showErrorBox\(/, "the closing copy must tell the user why");
+  assert.match(lock, /already running/);
+  assert.ok(lock.indexOf("showErrorBox") < lock.indexOf("app.quit()"));
+  assert.match(src, /Autofill: LIVE/);
+  assert.match(src, /Autofill: OFF\. This agent only looks at the FBR window and types nothing/);
+});
+
+test("slow FBR: a Draft list that first says '0 of 0' and then shows the draft does NOT start a second return", async () => {
+  const html = `<!doctype html><html><head><style>a,button{display:inline-block;padding:9px;margin:4px}[hidden]{display:none!important}</style></head><body>
+<nav><a id="homeLink" href="/dashboard">Home</a><a id="navbarDropdown1" onclick="actions.push('assets')">Assets Declaration</a>
+<a id="navbarDropdown1" onclick="actions.push('declaration')">Declaration</a><button>person_pinarrow_drop_down</button><a>PRIVATE TEST TAXPAYER NAME</a></nav>
+<a id="inbox">Inbox (Correspondence from FBR)</a><a id="draft" class="active">Draft (Unsubmitted Documents)</a><a>Completed Tasks</a>
+<div id="tabs"></div>
+<span class="mat-mdc-paginator-range-label" id="range">0 of 0</span>
+<table id="dashboardTable"><thead><tr><th>Task</th><th>Tax Period</th><th>Action</th></tr></thead><tbody id="tb"></tbody></table>
+<script>window.actions=[];setTimeout(function(){
+document.getElementById('tabs').innerHTML='<button id="it" class="active" onclick="actions.push(\\'it\\')">IT DECLARATION (1)</button>';
+document.getElementById('tb').innerHTML='<tr class="doubleclick"><td>114(1) (Return of Income filed voluntarily for complete year)</td><td>01-Jul-2025 - 30-Jun-2026</td><td><button class="edit" onclick="actions.push(\\'EDIT_RETURN\\')">Edit</button></td></tr>';
+document.getElementById('range').textContent='1 - 1 of 1';},6000);</script></body></html>`;
+  await withPage(html, async (_page, win) => {
+    const steps = [];
+    await navigation.inspectNavigation(win, {
+      taxYear: 2026,
+      openReturn: true,
+      taxpayerIdentifier: "1234567890123",
+      onStep: (step) => steps.push(String(step)),
+    });
+    assert.ok(!steps.includes("no_matching_draft"), `must not start a new return, steps: ${steps.join(", ")}`);
+    assert.ok(!steps.includes("empty_draft_grid"));
+    assert.ok(steps.includes("draft_grid_loaded_late"), `steps: ${steps.join(", ")}`);
+  });
 });

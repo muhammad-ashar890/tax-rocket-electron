@@ -123,42 +123,53 @@ function describeEmployers(autofill) {
 
 function describeFields(autofill) {
   const results = Array.isArray(autofill?.results) ? autofill.results : [];
-  const taken = (Array.isArray(autofill?.takenOver) ? autofill.takenOver : []).map(
-    (item) =>
-      item.checked
-        ? `  ENTERED BY YOU in FBR (confirmed in TaxRocket): ${item.name} - the agent read it back (read-only) and it matches the approved figure`
-        : `  ENTERED BY YOU in FBR (confirmed in TaxRocket): ${item.name} - the agent could not check it`,
+  const taken = (
+    Array.isArray(autofill?.takenOver) ? autofill.takenOver : []
+  ).map((item) =>
+    item.checked
+      ? `  ENTERED BY YOU in FBR (confirmed in TaxRocket): ${item.name} - the agent read it back (read-only) and it matches the approved figure`
+      : `  ENTERED BY YOU in FBR (confirmed in TaxRocket): ${item.name} - the agent could not check it`,
   );
   const stoppedNote =
-    autofill?.reviewRequired && Array.isArray(autofill?.pendingItems) && autofill.pendingItems.length
+    autofill?.reviewRequired &&
+    Array.isArray(autofill?.pendingItems) &&
+    autofill.pendingItems.length
       ? [
           `  The agent STOPPED at the first figure it could not enter. Later figures were not touched in this run.`,
         ]
       : [];
-  if (!results.length && !taken.length) return ["  No field was attempted in this run."];
-  return [...taken, ...stoppedNote, ...results.map((r) => {
-    const planned = money(r.plannedValue ?? r.value);
-    const isCash = r.cashDelta !== undefined && r.cashDelta !== null;
-    const had = isCash && r.baselineValue !== undefined ? r.baselineValue : r.existingValue;
-    const hadText =
-      had === null || had === undefined || had === ""
-        ? "IRIS cell was empty"
-        : `IRIS cell had ${money(had)}`;
-    const cashText = isCash
-      ? ` · cash movement ${Number(r.cashDelta) >= 0 ? "+" : "-"}${money(Math.abs(Number(r.cashDelta)))} added to IRIS's own figure`
-      : "";
-    let who;
-    if (r.status === "filled") who = "TYPED BY THE AGENT";
-    else if (r.status === "already_correct")
-      who =
-        "ALREADY THERE — the agent typed nothing (entered by you or by an earlier run)";
-    else if (r.status === "overwrite_needs_confirmation")
-      who =
-        "NOT TYPED — IRIS holds a different figure and it is never overwritten";
-    else who = `NOT TYPED (${r.status})`;
-    const label = r.rowDescription || r.label || "";
-    return `  [${r.sectionId || "?"}] ${r.irisCode} ${label} · ${r.requestedColumn || ""} · planned ${planned} · ${hadText}${cashText} → ${who}`;
-  })];
+  if (!results.length && !taken.length)
+    return ["  No field was attempted in this run."];
+  return [
+    ...taken,
+    ...stoppedNote,
+    ...results.map((r) => {
+      const planned = money(r.plannedValue ?? r.value);
+      const isCash = r.cashDelta !== undefined && r.cashDelta !== null;
+      const had =
+        isCash && r.baselineValue !== undefined
+          ? r.baselineValue
+          : r.existingValue;
+      const hadText =
+        had === null || had === undefined || had === ""
+          ? "IRIS cell was empty"
+          : `IRIS cell had ${money(had)}`;
+      const cashText = isCash
+        ? ` · cash movement ${Number(r.cashDelta) >= 0 ? "+" : "-"}${money(Math.abs(Number(r.cashDelta)))} added to IRIS's own figure`
+        : "";
+      let who;
+      if (r.status === "filled") who = "TYPED BY THE AGENT";
+      else if (r.status === "already_correct")
+        who =
+          "ALREADY THERE — the agent typed nothing (entered by you or by an earlier run)";
+      else if (r.status === "overwrite_needs_confirmation")
+        who =
+          "NOT TYPED — IRIS holds a different figure and it is never overwritten";
+      else who = `NOT TYPED (${r.status})`;
+      const label = r.rowDescription || r.label || "";
+      return `  [${r.sectionId || "?"}] ${r.irisCode} ${label} · ${r.requestedColumn || ""} · planned ${planned} · ${hadText}${cashText} → ${who}`;
+    }),
+  ];
 }
 
 function describeWealthSetup(autofill) {
@@ -252,7 +263,8 @@ const GIFT_HELP =
 /** Stable identity of one planned figure (the same rule the agent uses to skip items the taxpayer entered). */
 function itemKey(r) {
   return String(
-    r.key || `${String(r.irisCode || "")}|${String(r.rowDescriptionIncludes || "")}`,
+    r.key ||
+      `${String(r.irisCode || "")}|${String(r.rowDescriptionIncludes || "")}`,
   );
 }
 
@@ -286,37 +298,17 @@ function attentionLine(r) {
 function attentionReason(r) {
   const setup = String(r.setupStatus || "");
   const donor = r.giftDonorId ? ` ${r.giftDonorId}` : "";
-  if (setup === "gift_donor_not_resolved")
-    return {
-      what: `IRIS did not recognise the donor number${donor}.`,
-      todo: `Check the CNIC / NTN of this gift in Bank Intelligence (pencil icon), or ${GIFT_HELP}`,
-    };
-  if (setup === "gift_row_not_created")
-    return {
-      what: "The gift was saved in IRIS but the new row was not seen on the page.",
-      todo: "Look under Gift in IRIS: if the row is there, type the amount in it; if it is not, add the gift yourself. Do not add it twice.",
-    };
-  if (setup.startsWith("gift_"))
-    return {
-      what: "IRIS would not accept the gift details.",
-      todo: `Please ${GIFT_HELP}`,
-    };
-  if (setup === "bank_iban_not_resolved")
-    return {
-      what: "IRIS did not recognise this IBAN.",
-      todo: "Check it against your bank statement, or add the account yourself under Personal Assets > Bank Account(s).",
-    };
-  if (setup === "unexpected_dialog_open")
-    return {
-      what: "A pop-up was already open in IRIS.",
-      todo: "Close it in IRIS and enter this figure yourself.",
-    };
+  // A figure the taxpayer entered by hand is judged on what the read-back found,
+  // not on the setup note of the dry pass that read it.
   if (r.status === "takeover_unconfirmed") {
     const planned = money(r.plannedValue ?? r.value);
     const gift = String(r.irisCode) === "7037";
+    const bank = String(r.irisCode) === "7030";
     const where = gift
       ? "under Reconciliation of Net Assets > Inflows > Gift"
-      : "in the right row";
+      : bank
+        ? "under Personal Assets / Liabilities > Bank Account(s)"
+        : "in the right row";
     if (r.takeoverReason === "value_differs")
       return {
         what: `You said you entered this yourself, but IRIS shows PKR ${money(r.seenValue)} and the approved figure is PKR ${planned}.`,
@@ -337,7 +329,7 @@ function attentionReason(r) {
         ? ` There is a gift of PKR ${money(r.misplacedGift.value)} under Gift (row ${r.misplacedGift.code}), which is for gifts you GAVE (an outflow), not gifts you received.`
         : "";
       return {
-        what: `You said you entered this yourself, but the agent cannot find it in IRIS${gift ? " under Inflows > Gift for this donor" : ""}.${misplaced}`,
+        what: `You said you entered this yourself, but the agent cannot find ${gift ? `a gift of PKR ${planned} under Inflows > Gift` : bank ? `a bank account at this bank with PKR ${planned} under Bank Account(s)` : "it"} in IRIS.${misplaced}`,
         todo: r.misplacedGift
           ? `Delete that row in IRIS (the agent never deletes anything), add the gift ${where} with PKR ${planned} and the donor number shown above, then press Continue so the agent checks it again.`
           : `Add it ${where} with PKR ${planned}, then press Continue so the agent checks it again.`,
@@ -348,6 +340,31 @@ function attentionReason(r) {
       todo: "Check that it is in the right place with the right amount, then press Continue so the agent checks it again.",
     };
   }
+  if (setup === "gift_donor_not_resolved")
+    return {
+      what: `IRIS did not recognise the donor number${donor}.`,
+      todo: `IRIS only accepts donors it knows. Either correct the CNIC / NTN of this gift in Bank Intelligence (pencil icon) and start the filing again, or ${GIFT_HELP.replace(/\.$/, "")}, using a donor number IRIS accepts. The agent checks the place and the amount and reports the donor it finds.`,
+    };
+  if (setup === "gift_row_not_created")
+    return {
+      what: "The gift was saved in IRIS but the new row was not seen on the page.",
+      todo: "Look under Gift in IRIS: if the row is there, type the amount in it; if it is not, add the gift yourself. Do not add it twice.",
+    };
+  if (setup.startsWith("gift_"))
+    return {
+      what: "IRIS would not accept the gift details.",
+      todo: `Please ${GIFT_HELP}`,
+    };
+  if (setup === "bank_iban_not_resolved")
+    return {
+      what: "IRIS did not recognise this IBAN.",
+      todo: "IRIS only accepts accounts it knows. Either correct the IBAN in TaxRocket (check it against your bank statement) and start the filing again, or add the account yourself under Personal Assets > Bank Account(s) with an IBAN IRIS accepts. The agent then checks the bank, the place and the amount, and reports the IBAN it finds.",
+    };
+  if (setup === "unexpected_dialog_open")
+    return {
+      what: "A pop-up was already open in IRIS.",
+      todo: "Close it in IRIS and enter this figure yourself.",
+    };
   switch (r.status) {
     case "wealth_section_unavailable":
       return {
@@ -433,11 +450,15 @@ function buildAttentionReport(results, options = {}) {
     list.filter((r) => DONE_STATUSES.has(r.status)).length + alreadyDone;
   const groups = new Map();
   for (const r of list) {
-    if (DONE_STATUSES.has(r.status) || r.status === "overwrite_needs_confirmation")
+    if (
+      DONE_STATUSES.has(r.status) ||
+      r.status === "overwrite_needs_confirmation"
+    )
       continue;
     const reason = attentionReason(r);
     const key = `${reason.what}|${reason.todo}`;
-    if (!groups.has(key)) groups.set(key, { kind: "problem", lines: [], ...reason });
+    if (!groups.has(key))
+      groups.set(key, { kind: "problem", lines: [], ...reason });
     groups.get(key).lines.push(attentionLine(r));
   }
   const items = [...groups.values()];
@@ -445,21 +466,38 @@ function buildAttentionReport(results, options = {}) {
     if (r.status !== "overwrite_needs_confirmation") continue;
     items.push({
       kind: "conflict",
-      lines: [attentionLine({ ...r, plannedValue: undefined, value: undefined })],
+      lines: [
+        attentionLine({ ...r, plannedValue: undefined, value: undefined }),
+      ],
       what: `IRIS already shows PKR ${money(r.existingValue)}; your packet has PKR ${money(r.plannedValue ?? r.value)}.`,
       todo: "The agent never overwrites a figure in IRIS. Decide which figure is right and correct it in the FBR window.",
     });
   }
-  for (const row of Array.isArray(options.unexpectedPrefill) ? options.unexpectedPrefill : []) {
-    const values = (row.cells || []).map((cell) => money(cell.value)).join(" / ");
+  for (const row of Array.isArray(options.unexpectedPrefill)
+    ? options.unexpectedPrefill
+    : []) {
+    const values = (row.cells || [])
+      .map((cell) => money(cell.value))
+      .join(" / ");
     items.push({
       kind: "prefill",
-      lines: [{ key: `prefill|${row.code}`, name: `Row ${row.code}`, amount: values || null }],
+      lines: [
+        {
+          key: `prefill|${row.code}`,
+          name: `Row ${row.code}`,
+          amount: values || null,
+        },
+      ],
       what: "IRIS already holds a figure that your packet does not cover.",
       todo: "The IRIS total will differ from the packet until you have checked it.",
     });
   }
-  return { done, total: list.length + alreadyDone + remaining, remaining, items };
+  return {
+    done,
+    total: list.length + alreadyDone + remaining,
+    remaining,
+    items,
+  };
 }
 
 /**
@@ -479,7 +517,9 @@ function buildAttentionMessage(results, options = {}) {
   ];
   for (const item of problems) {
     const names = item.lines
-      .map((line) => (line.amount ? `${line.name} (PKR ${line.amount})` : line.name))
+      .map((line) =>
+        line.amount ? `${line.name} (PKR ${line.amount})` : line.name,
+      )
       .join("; ");
     lines.push(`\u2022 ${names}: ${item.what} ${item.todo}`);
   }
@@ -491,4 +531,8 @@ function buildAttentionMessage(results, options = {}) {
   return { text: lines.join("\n"), itemCount: count };
 }
 
-module.exports = { buildJobReport, buildAttentionMessage, buildAttentionReport };
+module.exports = {
+  buildJobReport,
+  buildAttentionMessage,
+  buildAttentionReport,
+};

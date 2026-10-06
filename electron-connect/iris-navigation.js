@@ -4556,9 +4556,38 @@ async function inspectNavigation(
             f.grid?.complete && f.grid.pageTotal === 0 && f.grid.rowCount === 0,
         )
       ) {
+        // Angular Material shows "0 of 0" before the list has loaded, and FBR
+        // can be slow. Believing it too early starts a SECOND return next to
+        // the existing draft. Require the emptiness to hold for a while.
+        let stillEmpty = true;
+        for (let wait = 0; wait < 8 && stillEmpty; wait++) {
+          await delay(1000);
+          inspection = await read();
+          stillEmpty = inspection.frames.some(
+            (f) =>
+              f.grid?.complete && f.grid.pageTotal === 0 && f.grid.rowCount === 0,
+          );
+        }
+        if (!stillEmpty) {
+          onStep(
+            "draft_grid_loaded_late",
+            "The Draft list was still loading: it showed zero records first, then real records. Using the real list.",
+          );
+          for (let retry = 0; retry < 6; retry++) {
+            const reopened = await act(action);
+            if (
+              reopened.frames.some((f) =>
+                ["clicked", "already_active"].includes(f.actionResult?.status),
+              )
+            )
+              break;
+            await delay(500);
+          }
+          continue;
+        }
         onStep(
           "empty_draft_grid",
-          "The Draft paginator explicitly reports zero records.",
+          "The Draft paginator reported zero records and kept doing so for 8 more seconds.",
         );
         continue;
       }

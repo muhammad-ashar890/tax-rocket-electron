@@ -100,7 +100,9 @@ export function FbrAttentionPanel({
               </ul>
               <p className="mt-2 text-sm text-foreground">{item.what}</p>
               <p className="mt-1 text-sm text-muted-foreground">
-                <span className="font-medium text-foreground">What to do: </span>
+                <span className="font-medium text-foreground">
+                  What to do:{" "}
+                </span>
                 {item.todo}
               </p>
             </li>

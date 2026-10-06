@@ -4579,13 +4579,32 @@ async function runRealIrisAutofill(jobContext, job, mode) {
   );
   const takenOverNow = takenOver
     .filter((item) => !failedTaken.has(item.key))
-    .map((item) => ({
-      ...item,
-      checked:
-        results.some(
-          (r) => autofillItemKey(r) === item.key && r.takenOverChecked,
-        ) || Boolean(item.checked),
-    }));
+    .map((item) => {
+      const hit = results.find(
+        (r) => autofillItemKey(r) === item.key && r.takenOverChecked,
+      );
+      // A hand-entered gift may use another donor number than the statement
+      // (IRIS only accepts donors it knows). Say so, once, in the item name.
+      const donorNote =
+        hit &&
+        hit.giftDonorSeen &&
+        String(hit.giftDonorSeen) !== String(hit.giftDonorId || "") &&
+        !String(item.name).includes("IRIS shows donor")
+          ? ` (IRIS shows donor ${hit.giftDonorSeen})`
+          : "";
+      const ibanNote =
+        hit &&
+        hit.bankIbanSeen &&
+        String(hit.bankIbanSeen) !== String(hit.bankIbanPlanned || "") &&
+        !String(item.name).includes("IRIS shows IBAN")
+          ? ` (IRIS shows IBAN ${hit.bankIbanSeen})`
+          : "";
+      return {
+        ...item,
+        name: `${item.name}${donorNote}${ibanNote}`,
+        checked: Boolean(hit) || Boolean(item.checked),
+      };
+    });
   // Checked ones are already in `results` (counted there); the rest are extra.
   const takenUncounted = takenOverNow.filter(
     (item) => !resultKeys.has(item.key),
@@ -4705,6 +4724,43 @@ async function runRealIrisAutofill(jobContext, job, mode) {
  * finished its work, and must still be recorded as awaiting the user rather
  * than left silently running.
  */
+/**
+ * A clean inspection with autofill off used to end as "Return prepared", which
+ * reads like a finished fill. Say plainly that nothing was typed and why.
+ */
+function markAutofillOff(navigation) {
+  const AUTOFILL_OFF_MESSAGE =
+    "The desktop agent was started with autofill switched off, so it only looked at the FBR window and typed nothing. Close the agent, start it again with start-live.ps1 (in the electron-connect folder), then choose Continue. Nothing was entered, saved, submitted, calculated, or paid.";
+  if (
+    !navigation ||
+    navigation.paused !== false ||
+    navigation.pauseAction !== "portal_sections_inspected"
+  )
+    return navigation;
+  const executionLog = [
+    ...(Array.isArray(navigation.executionLog) ? navigation.executionLog : []),
+    {
+      step: "real_autofill_off",
+      label: "real autofill off",
+      detail:
+        "TAXROCKET_REAL_AUTOFILL is not set to live in this agent, so no figure was entered. Start the agent with start-live.ps1 to fill.",
+      at: new Date().toISOString(),
+    },
+  ];
+  return {
+    ...navigation,
+    pauseAction: "portal_autofill_off",
+    pauseMessage: AUTOFILL_OFF_MESSAGE,
+    result: {
+      ...(navigation.result || {}),
+      requiredAction: "portal_autofill_off",
+      message: AUTOFILL_OFF_MESSAGE,
+      autofillOff: true,
+    },
+    executionLog,
+  };
+}
+
 async function finishNavigationOnly(navigation, job) {
   if (!navigation || navigation.paused !== false || !navigation.pauseAction)
     return navigation;
@@ -5597,7 +5653,10 @@ async function runLocalTaxAssistedFilingFlow(jobContext, job) {
     }
     const navigation = await runLocalIrisNavigationCheck(jobContext, job);
     if (autofillMode === "off" || navigation?.paused) {
-      return await finishNavigationOnly(navigation, job);
+      return await finishNavigationOnly(
+        autofillMode === "off" ? markAutofillOff(navigation) : navigation,
+        job,
+      );
     }
     // Assisted filing still stops before Save/Submit — this only populates the
     // data grid for the supervising user to review.
@@ -6840,6 +6899,16 @@ function createMainWindow() {
       "success",
       `Agent started — main ${AGENT_BUILD_TAG}; navigator ${irisNavigation.BUILD_TAG}. Both versions must match.`,
     );
+    // Say which mode this agent is in, so "it filled nothing" is never a mystery.
+    const startupMode = getRealAutofillMode();
+    pushStatus(
+      startupMode === "live" ? "success" : "progress",
+      startupMode === "live"
+        ? `Autofill: LIVE (Wealth Statement ${getWealthAutofillEnabled() ? "on" : "off"}, Employer Details ${getEmployerAutofillEnabled() ? "on" : "off"}).`
+        : startupMode === "dry"
+          ? "Autofill: DRY RUN. The agent reports what it would enter and types nothing."
+          : "Autofill: OFF. This agent only looks at the FBR window and types nothing. To fill, close it and start it with start-live.ps1.",
+    );
   });
 }
 
@@ -7252,6 +7321,17 @@ ipcMain.handle(
 const singleInstanceLock = app.requestSingleInstanceLock();
 
 if (!singleInstanceLock) {
+  // Another TaxRocket agent is already running and keeps the lock. This copy
+  // would otherwise vanish silently, and the older copy (possibly started
+  // without autofill) would go on handling jobs. Say so, then quit.
+  const alreadyRunning =
+    "Another TaxRocket desktop agent is already running, so this one is closing. The older agent keeps handling jobs with ITS OWN settings (for example autofill off). Close every TaxRocket / Electron window (or end the 'Electron' tasks in Task Manager), then start the agent again.";
+  console.error(`[agent:error] ${alreadyRunning}`);
+  try {
+    dialog.showErrorBox("TaxRocket agent is already running", alreadyRunning);
+  } catch (error) {
+    // The console message above is still shown.
+  }
   app.quit();
 } else {
   app.on("second-instance", (_event, argv) => {
