@@ -236,16 +236,35 @@ export function WizardSetupStep({
           description="Select all that apply. This determines which income-category steps and documents you'll need."
         />
         <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
-          {incomeSourceOptions.map((source) => (
-            <CompactSelectableCard
-              key={source.value}
-              icon={source.icon}
-              label={source.label}
-              selected={incomeSources.includes(source.value)}
-              onClick={() => onIncomeSourceToggle(source.value)}
-            />
-          ))}
+          {incomeSourceOptions
+            // Sales tax returns are filed from the separate Sales Tax module, so
+            // the card is not offered here. A draft saved earlier with it
+            // selected still shows the card so it can be unticked.
+            .filter(
+              (source) =>
+                source.value !== "sales_tax_fed_withholding" ||
+                incomeSources.includes(source.value),
+            )
+            .map((source) => (
+              <CompactSelectableCard
+                key={source.value}
+                icon={source.icon}
+                label={source.label}
+                selected={incomeSources.includes(source.value)}
+                onClick={() => onIncomeSourceToggle(source.value)}
+              />
+            ))}
         </div>
+        <p className="text-xs text-muted-foreground">
+          Sales tax returns are not part of this filing. File them from the{" "}
+          <a
+            href="/tax/sales-tax"
+            className="font-medium text-amanah underline"
+          >
+            Sales Tax section
+          </a>
+          .
+        </p>
       </div>
     );
   }

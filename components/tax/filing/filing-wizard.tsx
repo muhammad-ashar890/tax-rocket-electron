@@ -642,9 +642,7 @@ export function FilingWizard({
     employerCount: employerCount as "single" | "multiple" | "unsure",
     hasServicesIncome: hasServicesIncome as "yes" | "no" | "unsure",
     hasForeignIncomeOrAssets: hasForeignIncomeOrAssets as
-      | "yes"
-      | "no"
-      | "unsure",
+      "yes" | "no" | "unsure",
     hasAopCompanyLink: hasAopCompanyLink as "yes" | "no" | "unsure",
     highProfitOnDebt: highProfitOnDebt as "yes" | "no" | "unsure",
     filingIntent: filingIntent as "original" | "revised" | "unsure",
@@ -834,6 +832,11 @@ export function FilingWizard({
     formData.set("filingIntent", filingIntent);
     formData.set("currentStep", String(step));
     formData.set("wizardCompletionStep", String(furthestStepReached));
+    // Tell the server which draft this snapshot belongs to once it is known, so
+    // a save updates that draft and never touches another filing of the same
+    // tax year. Absent before the first save, which means "start a new filing".
+    const currentDraftId = draftId ?? resumeDraftId ?? null;
+    if (currentDraftId) formData.set("draftId", currentDraftId);
     for (const source of incomeSources)
       formData.append("incomeSources", source);
     for (const selection of incomeSubcategorySelections) {
@@ -843,6 +846,8 @@ export function FilingWizard({
       formData.append("readinessCompleted", item);
     return formData;
   }, [
+    draftId,
+    resumeDraftId,
     taxYear,
     residencyStatus,
     step,

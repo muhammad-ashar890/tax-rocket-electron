@@ -73,6 +73,8 @@ model User {
   localAgentJobs            LocalAgentJob[]
   taxAuditEvents            TaxAuditEvent[]
   notifications             Notification[]
+  salesTaxProfile           SalesTaxProfile?
+  salesTaxFilings           SalesTaxFiling[]
 }
 
 model VerificationToken {
@@ -143,7 +145,10 @@ model FilingDraft {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([userId, taxYear])
+  // Deliberately NOT unique: one taxpayer can have several filings for the same
+  // tax year (for example salary filed first, business income filed later).
+  // Which draft a save belongs to is decided in lib/tax/filing-draft-identity.ts.
+  @@index([userId, taxYear])
 }
 
 model Document {
@@ -550,4 +555,78 @@ model TaxAuditEvent {
   @@index([userId])
   @@index([filingDraftId])
   @@index([eventType])
+}
+
+// ────────────────────────────────────────────────────────────────
+// Sales Tax module (separate from the income-tax filing journey)
+// ────────────────────────────────────────────────────────────────
+model SalesTaxProfile {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  businessName   String
+  // Registration number as typed by the user; used for records and as a
+  // cross-check against the invoice templates. IRIS itself is logged into with
+  // the client's own account.
+  registrationNo String
+  // Authorities the business files with, stored as a JSON array of codes such
+  // as ["FBR"]. One return is prepared per authority per month.
+  authorities    String @default("[\"FBR\"]")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model SalesTaxFiling {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // "FBR" for now; "SRB", "PRA", "KPRA" and "BRA" are added with their phases.
+  authority   String
+  periodYear  Int
+  periodMonth Int
+  status      String @default("DRAFT")
+
+  // Figures the invoice files do not hold (adjustment lines, the section 8B
+  // answer, fixed assets, imports, exports), as typed by the user.
+  figures        Json?
+  // Set when the user approves the reviewed estimate. approvedPacket holds
+  // the approved figures; it only counts while the files and figures still
+  // match it.
+  approvedAt     DateTime?
+  approvedPacket Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  uploads SalesTaxUpload[]
+
+  // One return per authority per month.
+  @@unique([userId, authority, periodYear, periodMonth])
+  @@index([userId])
+}
+
+// An invoice file the user uploaded for one month: the official sales (DSI) or
+// purchase (DPI) template. The cells are stored as read, so the checks can be
+// run again whenever the rules change without asking for the file again.
+model SalesTaxUpload {
+  id       String         @id @default(cuid())
+  filingId String
+  filing   SalesTaxFiling @relation(fields: [filingId], references: [id], onDelete: Cascade)
+
+  // "SALES" or "PURCHASES".
+  kind     String
+  fileName String
+  fileSize Int
+  rowCount Int
+  // Rows of the SALES_INVOICES sheet as an array of arrays.
+  grid     Json
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One file of each kind per month; a new upload replaces the old one.
+  @@unique([filingId, kind])
 }

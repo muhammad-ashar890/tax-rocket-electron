@@ -13,6 +13,10 @@ export type FilingHistoryItem = {
   status: string;
   filerType: string | null;
   updatedAt: string;
+  /** Short list of the income sources in this filing, for example "Salary". */
+  incomeSummary?: string;
+  /** Position among this user's filings for the same tax year (1-based). */
+  sameYear?: { position: number; total: number } | null;
   packet: {
     id: string;
     version: number;
@@ -76,7 +80,18 @@ export function FilingHistoryList({
                       >
                         {statusLabel(filing.status)}
                       </Badge>
+                      {filing.sameYear && filing.sameYear.total > 1 && (
+                        <Badge variant="outline" className="text-muted-foreground">
+                          Filing {filing.sameYear.position} of{" "}
+                          {filing.sameYear.total} for this year
+                        </Badge>
+                      )}
                     </div>
+                    {filing.incomeSummary && (
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        Income: {filing.incomeSummary}
+                      </p>
+                    )}
                     <p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
                       <span aria-hidden="true">◷</span>
                       Updated{" "}
@@ -129,7 +144,7 @@ export function FilingHistoryList({
                     </p>
                   </div>
                   <div>
-                    <p className="text-xs text-muted-foreground">Tax payable</p>
+                    <p className="text-xs text-muted-foreground">Tax payable (estimate)</p>
                     <p className="mt-1 text-sm font-medium">
                       {packet?.taxPayable !== null &&
                       packet?.taxPayable !== undefined

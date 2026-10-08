@@ -64,7 +64,7 @@ const nextConfig = {
   poweredByHeader: false,
 
   experimental: {
-    serverComponentsExternalPackages: ["pdfkit"],
+    serverComponentsExternalPackages: ["pdfkit", "exceljs"],
     // Tax documents can be up to 10 MB; keep a small margin above the
     // application-level upload limit in app/actions/documents.ts.
     serverActions: {

@@ -743,11 +743,11 @@ export default function FbrConnectClient({
                 <>
                   <FbrAttentionPanel attention={activeJob.attention} />
                   <p className="text-xs text-muted-foreground">
-                    Enter the item above in the FBR window yourself, tick the box
-                    and press Continue. The agent reads it back (it never types
-                    over it). If it is in the right place with the right amount
-                    it carries on from the next figure; if not, it tells you
-                    again.
+                    Enter the item above in the FBR window yourself, tick the
+                    box and press Continue. The agent reads it back (it never
+                    types over it). If it is in the right place with the right
+                    amount it carries on from the next figure; if not, it tells
+                    you again.
                   </p>
                 </>
               ) : (
@@ -778,7 +778,9 @@ export default function FbrConnectClient({
                   <input
                     type="checkbox"
                     className="mt-0.5 h-4 w-4 shrink-0"
-                    checked={ackedKey === `${activeJob.id}:${activeJob.pauseAction}`}
+                    checked={
+                      ackedKey === `${activeJob.id}:${activeJob.pauseAction}`
+                    }
                     onChange={(e) =>
                       setAckedKey(
                         e.target.checked
@@ -820,8 +822,8 @@ export default function FbrConnectClient({
                     : activeJob.pauseAction === "portal_autofill_review"
                       ? "I have entered them in FBR — Continue"
                       : inspectionPause
-                      ? "Continue filing"
-                      : "Continue"}
+                        ? "Continue filing"
+                        : "Continue"}
               </Button>
               <Button
                 size="sm"
@@ -926,18 +928,18 @@ function HandoffCompleteCard({
           state: "done",
         }
       : scope?.salary === "filled"
-      ? {
-          title: "Salary income and withholding",
-          detail:
-            "Salary income and tax deducted under section 149 were entered and read back from the FBR draft.",
-          state: "done",
-        }
-      : {
-          title: "Salary income and withholding",
-          detail:
-            "Some salary amounts could not be confirmed in the FBR draft. Open Employment in FBR and check Salary and Tax Deductions.",
-          state: "attention",
-        },
+        ? {
+            title: "Salary income and withholding",
+            detail:
+              "Salary income and tax deducted under section 149 were entered and read back from the FBR draft.",
+            state: "done",
+          }
+        : {
+            title: "Salary income and withholding",
+            detail:
+              "Some salary amounts could not be confirmed in the FBR draft. Open Employment in FBR and check Salary and Tax Deductions.",
+            state: "attention",
+          },
   );
 
   rows.push(
@@ -978,24 +980,24 @@ function HandoffCompleteCard({
           state: "done",
         }
       : scope?.wealthStatement === "entered_not_calculated"
-      ? {
-          title: "Wealth Statement",
-          detail: `${scope.wealthRows} row(s) entered: personal expenses, tax paid and bank accounts. Open Reconciliation of Net Assets in FBR and make sure the unreconciled amount is 0.`,
-          state: "done",
-        }
-      : scope?.wealthStatement === "needs_review"
         ? {
             title: "Wealth Statement",
-            detail:
-              "Some rows could not be entered safely. Review Personal Assets and Reconciliation in FBR.",
-            state: "attention",
+            detail: `${scope.wealthRows} row(s) entered: personal expenses, tax paid and bank accounts. Open Reconciliation of Net Assets in FBR and make sure the unreconciled amount is 0.`,
+            state: "done",
           }
-        : {
-            title: "Wealth Statement",
-            detail:
-              "Not entered by this run. Complete it in FBR and make sure the unreconciled amount is 0.",
-            state: "attention",
-          },
+        : scope?.wealthStatement === "needs_review"
+          ? {
+              title: "Wealth Statement",
+              detail:
+                "Some rows could not be entered safely. Review Personal Assets and Reconciliation in FBR.",
+              state: "attention",
+            }
+          : {
+              title: "Wealth Statement",
+              detail:
+                "Not entered by this run. Complete it in FBR and make sure the unreconciled amount is 0.",
+              state: "attention",
+            },
   );
 
   rows.push(

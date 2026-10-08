@@ -7,6 +7,7 @@ import {
   FolderOpen,
   Home,
   Link2,
+  Receipt,
   Settings,
   User,
 } from "lucide-react";
@@ -24,6 +25,7 @@ const primaryLinks = [
   { href: "/tax/new", label: "New Filing", icon: FileText },
   { href: "/tax/history", label: "History", icon: FolderOpen },
   { href: "/tax/fbr-connect", label: "FBR Connect", icon: Link2 },
+  { href: "/tax/sales-tax", label: "Sales Tax", icon: Receipt },
   { href: "/tax/profile", label: "Profile", icon: User },
   { href: "/tax/settings", label: "Settings", icon: Settings },
 ];
@@ -36,7 +38,12 @@ export function DashboardSidebar() {
       <div className="space-y-4 lg:sticky lg:top-20">
         <nav className="rounded-2xl border bg-card p-2 shadow-sm">
           {primaryLinks.map((link) => {
-            const isActive = pathname === link.href;
+            // The Sales Tax module has sub-pages (one per month); keep it
+            // highlighted there. Every other link keeps the exact match.
+            const isActive =
+              pathname === link.href ||
+              (link.href === "/tax/sales-tax" &&
+                pathname.startsWith(`${link.href}/`));
             return (
               <Link
                 key={link.href}
@@ -54,7 +61,6 @@ export function DashboardSidebar() {
             );
           })}
         </nav>
-
       </div>
     </aside>
   );

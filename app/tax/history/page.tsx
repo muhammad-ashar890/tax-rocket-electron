@@ -14,6 +14,10 @@ import { validateFilingCompleteness } from "@/lib/tax/filing-completeness";
 import { validateAuthoritativeReconciliation } from "@/lib/tax/reconciliation-calculation";
 import { toMoneyNumber } from "@/lib/money";
 import {
+  describeIncomeSources,
+  numberFilingsPerYear,
+} from "@/lib/tax/filing-draft-identity";
+import {
   FILING_STATUS,
   getCurrentApprovalState,
   getEffectiveFilingStatus,
@@ -82,6 +86,10 @@ export default async function HistoryPage() {
     ),
   );
 
+  // A taxpayer can have several filings for one tax year (for example salary
+  // filed first, business income later); number them so they can be told apart.
+  const sameYearNumbering = numberFilingsPerYear(drafts);
+
   const filings: FilingHistoryItem[] = drafts.map((draft) => {
     const packet = draft.filingPackets[0] ?? null;
 
@@ -114,6 +122,8 @@ export default async function HistoryPage() {
       status: effectiveStatus,
       filerType: draft.filerType,
       updatedAt: draft.updatedAt.toISOString(),
+      incomeSummary: describeIncomeSources(draft.incomeSources),
+      sameYear: sameYearNumbering.get(draft.id) ?? null,
       packet: packet
         ? {
             ...packet,

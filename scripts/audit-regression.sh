@@ -37,6 +37,27 @@ FILES=(
   "lib/tax/filing-status.ts"
   "app/actions/filing-summary.ts"
   "app/actions/packet.ts"
+  "lib/sales-tax/compute-return.ts"
+  "lib/sales-tax/money.ts"
+  "lib/sales-tax/invoice-checks.ts"
+  "lib/sales-tax/template-reader.ts"
+  "lib/sales-tax/rules/fbr-goods/catalog.ts"
+  "lib/sales-tax/rules/fbr-goods/penalties.ts"
+  "lib/tax/filing-draft-identity.ts"
+  "app/actions/filing.ts"
+  "components/tax/filing/filing-wizard.tsx"
+  "app/actions/sales-tax.ts"
+  "lib/sales-tax/profile.ts"
+  "components/tax/sales-tax/sales-tax-wizard.tsx"
+  "components/tax/sales-tax/invoice-steps.tsx"
+  "lib/sales-tax/figures.ts"
+  "lib/sales-tax/estimate.ts"
+  "components/tax/sales-tax/review-step.tsx"
+  "lib/sales-tax/workbook.ts"
+  "lib/sales-tax/template-reader.ts"
+  "lib/sales-tax/problems.ts"
+  "components/tax/dashboard-sidebar.tsx"
+  "components/tax/filing/wizard-setup-step.tsx"
 )
 
 save()    { for f in "${FILES[@]}"; do mkdir -p "$BACKUP/$(dirname "$f")"; cp "$f" "$BACKUP/$f"; done; }
@@ -340,6 +361,267 @@ check "5F packet gap line formats a raw Decimal" \
         toMoneyAmount(snapshot.filing.reconciliationGap),
       ).toLocaleString()}`,' \
   '      `Reconciliation gap: PKR ${(snapshot.filing.reconciliationGap as unknown as number).toLocaleString()}`,'
+
+echo
+echo "Sales tax engine (FBR goods, Phase 1):"
+check "ST  balance payable ignores tax already paid (Sr.37)" \
+  "lib/sales-tax/compute-return.ts" \
+  'const line37 = line35 - line36;' \
+  'const line37 = line35 + line36;'
+
+check "ST  input tax limit taken on the wrong base (Sr.25)" \
+  "lib/sales-tax/compute-return.ts" \
+  'percentOfFloor(line15, eightB.capPercent)' \
+  'percentOfFloor(line17, eightB.capPercent)'
+
+check "ST  capital goods placed inside the limit (Sr.25)" \
+  "lib/sales-tax/compute-return.ts" \
+  'Math.min(ordinaryInput, capAmount) + capitalInput,' \
+  'Math.min(ordinaryInput + capitalInput, capAmount),'
+
+check "ST  credit notes added instead of subtracted" \
+  "lib/sales-tax/compute-return.ts" \
+  'return documentType === "Credit Note" ? -1 : 1;' \
+  'return 1;'
+
+check "ST  standard rate 18% -> 17%" \
+  "lib/sales-tax/rules/fbr-goods/catalog.ts" \
+  'value: 0.18,' \
+  'value: 0.17,'
+
+check "ST  late return penalty Rs 50,000 -> Rs 10,000" \
+  "lib/sales-tax/rules/fbr-goods/catalog.ts" \
+  'value: 50000,' \
+  'value: 10000,'
+
+check "ST  tax rounding truncates instead of rounding" \
+  "lib/sales-tax/money.ts" \
+  'Math.floor((scaled + 5000) / 10000)' \
+  'Math.floor(scaled / 10000)'
+
+check "ST  invoice tax tolerance widened" \
+  "lib/sales-tax/invoice-checks.ts" \
+  'export const TAX_TOLERANCE_PAISA = 100;' \
+  'export const TAX_TOLERANCE_PAISA = 100000;'
+
+check "ST  per-day penalty window shortened" \
+  "lib/sales-tax/rules/fbr-goods/penalties.ts" \
+  'if (daysLate <= window) {' \
+  'if (daysLate < window) {'
+
+check "ST  template layout check switched off" \
+  "lib/sales-tax/template-reader.ts" \
+  '  if (!headerMatches(grid, reference)) {' \
+  '  if (false) {'
+
+echo
+echo "Several filings per tax year:"
+check "MF  an approved or filed draft can be overwritten" \
+  "lib/tax/filing-draft-identity.ts" \
+  '    .filter((draft) => !isProtectedFilingDraft(draft))
+' \
+  ''
+check "MF  a completed real filing no longer protects a draft" \
+  "lib/tax/filing-draft-identity.ts" \
+  'connection.status === FILING_COMPLETED_STATUS ||' \
+  'false ||'
+check "MF  the explicit draft id is ignored by the server" \
+  "app/actions/filing.ts" \
+  '  const value = raw.trim();' \
+  '  const value = "";'
+check "MF  another user's draft id is accepted" \
+  "app/actions/filing.ts" \
+  '    if (!owned) throw new FilingDraftNotFoundError();' \
+  '    if (!owned) return explicitDraftId;'
+check "MF  the wizard stops sending the draft id" \
+  "components/tax/filing/filing-wizard.tsx" \
+  '    if (currentDraftId) formData.set("draftId", currentDraftId);' \
+  ''
+
+echo
+echo "Sales Tax module shell (Phase 2A):"
+check "SM  a month can be started for an authority outside the profile" \
+  "app/actions/sales-tax.ts" \
+  'if (!allowed.includes(authority as AuthorityCode)) {' \
+  'if (false) {'
+check "SM  a month that is not a draft can be deleted" \
+  "app/actions/sales-tax.ts" \
+  'if (filing.status !== STATUS_DRAFT) {' \
+  'if (false) {'
+check "SM  another user can open a month" \
+  "app/actions/sales-tax.ts" \
+  'where: { id: String(filingId ?? ""), userId },
+        include: {' \
+  'where: { id: String(filingId ?? "") },
+        include: {'
+check "SM  a month in the future can be started" \
+  "lib/sales-tax/profile.ts" \
+  '    period.year > currentYear ||
+    (period.year === currentYear && period.month > currentMonth)' \
+  '    false'
+check "SM  a provincial board that is not built yet can be saved" \
+  "lib/sales-tax/profile.ts" \
+  'code: "SRB", name: "SRB (Sindh)", scope: "Sales tax on services", enabled: false' \
+  'code: "SRB", name: "SRB (Sindh)", scope: "Sales tax on services", enabled: true'
+check "SM  the sidebar loses the Sales Tax link" \
+  "components/tax/dashboard-sidebar.tsx" \
+  '  { href: "/tax/sales-tax", label: "Sales Tax", icon: Receipt },
+' \
+  ''
+check "SM  the wizard offers the Sales Tax card again" \
+  "components/tax/filing/wizard-setup-step.tsx" \
+  'source.value !== "sales_tax_fed_withholding" ||' \
+  'true ||'
+
+check "SM  the wizard lets a return be created with a step still invalid" \
+  "components/tax/sales-tax/sales-tax-wizard.tsx" \
+  'disabled={submitting || !setupValid}' \
+  'disabled={submitting}'
+check "SM  the wizard starts the month before saving the business" \
+  "components/tax/sales-tax/sales-tax-wizard.tsx" \
+  '      const saved = await saveSalesTaxProfileAction({' \
+  '      await startSalesTaxMonthAction({ authority: "FBR", year, month });
+      const saved = await saveSalesTaxProfileAction({'
+check "SM  the whole-profile check skips the authority check" \
+  "lib/sales-tax/profile.ts" \
+  '  const authorities = validateAuthoritySelection(input.authorities);
+  if (authorities.ok === false) return { ok: false, error: authorities.error };' \
+  '  const authorities = { ok: true as const, value: ["FBR" as AuthorityCode] };'
+check "SM  the wizard lets a future month be picked" \
+  "components/tax/sales-tax/sales-tax-wizard.tsx" \
+  'disabled={future}' \
+  'disabled={false}'
+
+echo
+echo "Sales Tax invoice upload (Phase 2B):"
+check "SU  an upload for someone else's month is accepted" \
+  "app/actions/sales-tax.ts" \
+  '      prisma.salesTaxFiling.findFirst({
+        where: { id: filingId, userId },
+        select: { id: true, status: true, periodYear: true, periodMonth: true },
+      }),
+      prisma.salesTaxProfile.findUnique({ where: { userId } }),
+    ]);
+    if (!filing) return { success: false as const, error: "This month was not found." };
+    if (filing.status !== STATUS_DRAFT) {
+      return { success: false as const, error: "Files can only be changed while the month is a draft." };
+    }
+    if (!profile) {' \
+  '      prisma.salesTaxFiling.findFirst({
+        where: { id: filingId },
+        select: { id: true, status: true, periodYear: true, periodMonth: true },
+      }),
+      prisma.salesTaxProfile.findUnique({ where: { userId } }),
+    ]);
+    if (!filing) return { success: false as const, error: "This month was not found." };
+    if (filing.status !== STATUS_DRAFT) {
+      return { success: false as const, error: "Files can only be changed while the month is a draft." };
+    }
+    if (!profile) {'
+check "SU  a file that cannot be read is stored anyway" \
+  "app/actions/sales-tax.ts" \
+  'if (!stats || !stats.readable) {' \
+  'if (!stats) {'
+check "SU  the upload size limit is removed" \
+  "app/actions/sales-tax.ts" \
+  'if (file.size > MAX_UPLOAD_BYTES) {' \
+  'if (false) {'
+check "SU  a file with too many rows is accepted" \
+  "lib/sales-tax/workbook.ts" \
+  '      if (hasValue) tooLong = true;' \
+  '      if (hasValue) tooLong = false;'
+check "SU  merged header cells are no longer cleared" \
+  "lib/sales-tax/workbook.ts" \
+  'if (cell.isMerged && cell.master && cell.master.address !== cell.address) {' \
+  'if (false) {'
+check "SU  any blank header cell is accepted" \
+  "lib/sales-tax/template-reader.ts" \
+  '        normalizeHeader(cell(grid, rowIndex - 1, column)) ===
+          normalizeHeader(expected[column])
+      ) {
+        continue;' \
+  '        true
+      ) {
+        continue;'
+check "SU  a template problem stops naming its file" \
+  "lib/sales-tax/problems.ts" \
+  'const merged: Params = { sheet, ...params,' \
+  'const merged: Params = { ...params, sheet,'
+check "SU  the wizard stops asking before removing a file" \
+  "components/tax/sales-tax/invoice-steps.tsx" \
+  'if (!window.confirm("Remove this file? You can upload it again later.")) return;' \
+  ''
+
+echo
+echo "Sales Tax review and approval (Phase 3):"
+check "SR  a return is approved without the tick" \
+  "app/actions/sales-tax.ts" \
+  'if (confirmed !== true) {' \
+  'if (false) {'
+check "SR  a return that cannot be estimated is approved" \
+  "lib/sales-tax/estimate.ts" \
+  'if (!input.result.canEstimate || input.result.balancePayable === null) {' \
+  'if (false) {'
+check "SR  an approval survives a changed file" \
+  "lib/sales-tax/estimate.ts" \
+  '    files: input.files,
+    canEstimate:' \
+  '    canEstimate:'
+check "SR  an approval survives a changed figure" \
+  "lib/sales-tax/estimate.ts" \
+  '    figures: input.figures,
+    files: input.files,
+    canEstimate:' \
+  '    files: input.files,
+    canEstimate:'
+check "SR  another user can approve or save figures" \
+  "app/actions/sales-tax.ts" \
+  'async function loadMonthForReview(userId: string, filingId: string) {
+  const [filing, profile] = await Promise.all([
+    prisma.salesTaxFiling.findFirst({
+      where: { id: String(filingId ?? ""), userId },' \
+  'async function loadMonthForReview(userId: string, filingId: string) {
+  const [filing, profile] = await Promise.all([
+    prisma.salesTaxFiling.findFirst({
+      where: { id: String(filingId ?? "") },'
+check "SR  bad figures are stored" \
+  "app/actions/sales-tax.ts" \
+  'const checked = validateFiguresForm(form);
+    if (checked.ok === false) return { success: false as const, error: checked.error };' \
+  'const checked = validateFiguresForm(form) as { ok: true; value: ReturnFigures };'
+check "SR  a month that is not a draft can be approved" \
+  "app/actions/sales-tax.ts" \
+  'if (filing.status !== STATUS_DRAFT) {
+      return { success: false as const, error: "Only a draft return can be approved." };' \
+  'if (false) {
+      return { success: false as const, error: "Only a draft return can be approved." };'
+check "SR  an unregistered supplier row can be a fixed asset" \
+  "lib/sales-tax/estimate.ts" \
+  'if (row.sellerType !== "Registered") {
+      return `Fixed assets' \
+  'if (false) {
+      return `Fixed assets'
+check "SR  a negative amount is accepted" \
+  "lib/sales-tax/figures.ts" \
+  'if (paisa < 0) return { ok: false, error: `${label}: the amount cannot be negative.` };' \
+  ''
+check "SR  a stale approval is shown as current" \
+  "app/actions/sales-tax.ts" \
+  'current: isApprovalCurrent(filing.approvedPacket, { fingerprint }),' \
+  'current: true,'
+check "SR  the approve button works without the tick" \
+  "components/tax/sales-tax/sales-tax-wizard.tsx" \
+  '                      !reviewed ||
+                      !review?.estimate.canEstimate' \
+  '                      !review?.estimate.canEstimate'
+check "SR  the review step opens before the earlier steps are done" \
+  "components/tax/sales-tax/sales-tax-wizard.tsx" \
+  'if (index >= FIGURES_STEP && index > furthest) return;' \
+  ''
+check "SR  the screen stops saying the figures are an estimate" \
+  "components/tax/sales-tax/review-step.tsx" \
+  'IRIS calculates the final amounts' \
+  'the final amounts are shown here'
 
 restore
 

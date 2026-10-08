@@ -29,10 +29,7 @@ Module._resolveFilename = function (request, ...rest) {
 };
 require.extensions[".ts"] = function (module, filename) {
   const output = ts.transpileModule(fs.readFileSync(filename, "utf8"), {
-    compilerOptions: {
-      module: ts.ModuleKind.CommonJS,
-      target: ts.ScriptTarget.ES2020,
-    },
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
   }).outputText;
   module._compile(output, filename);
 };
@@ -40,12 +37,8 @@ require.extensions[".ts"] = function (module, filename) {
 const driver = require("../electron-connect/iris-wealth-driver.js");
 const filler = require("../electron-connect/iris-row-filler.js");
 const { FakeIris } = require("./lib/fake-iris-wealth.cjs");
-const { WEALTH_EXPENSE_ROWS } = require(
-  path.join(root, "lib/tax/wealth-rows.ts"),
-);
-const { buildPortalFieldMap, flattenPortalFieldMap } = require(
-  path.join(root, "lib/tax/portal-field-map.ts"),
-);
+const { WEALTH_EXPENSE_ROWS } = require(path.join(root, "lib/tax/wealth-rows.ts"));
+const { buildPortalFieldMap, flattenPortalFieldMap } = require(path.join(root, "lib/tax/portal-field-map.ts"));
 
 const HBL = "PK35HABB0000001234567801";
 const SCB = "PK36SCBL0000001123456702";
@@ -87,11 +80,7 @@ function harness({ mode = "live", fields, iris, navigate, cashStore } = {}) {
         return { ok: true, status: "switched" };
       }),
     fillRows: (group, opts) =>
-      filler.fillIrisRows(
-        fake,
-        group.map((f) => ({ ...f })),
-        { dryRun: opts.dryRun, sectionVerified: true },
-      ),
+      filler.fillIrisRows(fake, group.map((f) => ({ ...f })), { dryRun: opts.dryRun, sectionVerified: true }),
     onStep: (step, detail) => steps.push({ step, detail }),
     sleep: () => new Promise((r) => setTimeout(r, 2)),
     timeoutMs: 80,
@@ -99,8 +88,7 @@ function harness({ mode = "live", fields, iris, navigate, cashStore } = {}) {
   return {
     fake,
     steps,
-    run: (list) =>
-      driver.runWealthDriver(fake, list || Object.values(FIELDS), options),
+    run: (list) => driver.runWealthDriver(fake, list || Object.values(FIELDS), options),
     runStepwise: (list, extra = {}) =>
       driver.runWealthDriverStepwise(fake, list || Object.values(FIELDS), {
         ...options,
@@ -122,65 +110,32 @@ const byCode = (results) => {
 // ── planning and safety ────────────────────────────────────────────────────
 test("planning: expenses, the outflow and IBAN-addressed banks are placed; anything else is held", () => {
   const plan = driver.planWealthWork([
-    FIELDS.rent,
-    FIELDS.outflow,
-    FIELDS.hbl,
-    wf("7030", 5),
-    wf("7012", 9),
-    wf("7089", 1),
+    FIELDS.rent, FIELDS.outflow, FIELDS.hbl, wf("7030", 5), wf("7012", 9), wf("7089", 1),
   ]);
-  assert.deepEqual(
-    plan.expenses.map((f) => f.irisCode),
-    ["7051"],
-  );
-  assert.deepEqual(
-    plan.outflows.map((f) => f.irisCode),
-    ["7098"],
-  );
-  assert.deepEqual(
-    plan.banks.map((f) => f.irisCode),
-    ["7030"],
-  );
-  assert.deepEqual(plan.unsupported.map((f) => f.irisCode).sort(), [
-    "7012",
-    "7030",
-    "7089",
-  ]);
+  assert.deepEqual(plan.expenses.map((f) => f.irisCode), ["7051"]);
+  assert.deepEqual(plan.outflows.map((f) => f.irisCode), ["7098"]);
+  assert.deepEqual(plan.banks.map((f) => f.irisCode), ["7030"]);
+  assert.deepEqual(plan.unsupported.map((f) => f.irisCode).sort(), ["7012", "7030", "7089"]);
 });
 
 test("drift guard: the driver's expense labels equal lib/tax/wealth-rows.ts", () => {
-  const ts = Object.fromEntries(
-    Object.entries(WEALTH_EXPENSE_ROWS).map(([c, v]) => [c, v.label]),
-  );
+  const ts = Object.fromEntries(Object.entries(WEALTH_EXPENSE_ROWS).map(([c, v]) => [c, v.label]));
   assert.deepEqual({ ...driver.EXPENSE_ROWS }, ts);
 });
 
 test("drift guard: dialog titles and labels are the ones in the captured modals", () => {
   const titleOf = (name) => {
-    const html = fs.readFileSync(
-      path.join(root, "test-fixtures/iris/wealth", name),
-      "utf8",
-    );
-    return new JSDOM(html).window.document
-      .querySelector("[mat-dialog-title] .left")
-      .textContent.trim();
+    const html = fs.readFileSync(path.join(root, "test-fixtures/iris/wealth", name), "utf8");
+    return new JSDOM(html).window.document.querySelector("[mat-dialog-title] .left").textContent.trim();
   };
   assert.equal(titleOf("modal-expenses.html"), driver.DIALOG_TITLES.expenses);
-  assert.equal(
-    titleOf("modal-financial-assets.html"),
-    driver.DIALOG_TITLES.financialAssets,
-  );
+  assert.equal(titleOf("modal-financial-assets.html"), driver.DIALOG_TITLES.financialAssets);
   assert.equal(titleOf("modal-outflow.html"), driver.DIALOG_TITLES.outflow);
   assert.equal(titleOf("modal-bank.html"), driver.DIALOG_TITLES.bank);
   assert.equal(titleOf("modal-gift.html"), driver.DIALOG_TITLES.gift);
-  const html = fs.readFileSync(
-    path.join(root, "test-fixtures/iris/wealth/modal-expenses.html"),
-    "utf8",
-  );
+  const html = fs.readFileSync(path.join(root, "test-fixtures/iris/wealth/modal-expenses.html"), "utf8");
   const doc = new JSDOM(html).window.document;
-  const labels = [...doc.querySelectorAll(".source-card p")].map((p) =>
-    p.textContent.trim(),
-  );
+  const labels = [...doc.querySelectorAll(".source-card p")].map((p) => p.textContent.trim());
   assert.deepEqual(labels.sort(), Object.values(driver.EXPENSE_ROWS).sort());
 });
 
@@ -203,31 +158,13 @@ test("safety: the only clicks the driver can request are on the documented surfa
     { op: "dialog_click", title: "Add Personal Expenses", button: "SAVE" },
     { op: "dialog_click", title: "Bank Account", button: "Submit" },
     { op: "dialog_click", title: "Payment Confirmation", button: "ADD" },
-    {
-      op: "dialog_tick",
-      title: "Add Personal Expenses",
-      labels: ["Delete everything"],
-    },
-    {
-      op: "dialog_tick",
-      title: "Add Financial Assets & Investments (Non-Business)",
-      labels: ["Investments / Stocks / Bonds / etc."],
-    },
+    { op: "dialog_tick", title: "Add Personal Expenses", labels: ["Delete everything"] },
+    { op: "dialog_tick", title: "Add Financial Assets & Investments (Non-Business)", labels: ["Investments / Stocks / Bonds / etc."] },
     { op: "dialog_tick", title: "Bank Account", labels: ["Joint Account"] },
-    {
-      op: "dialog_set",
-      title: "Add Personal Expenses",
-      field: "description",
-      value: "x",
-    },
+    { op: "dialog_set", title: "Add Personal Expenses", field: "description", value: "x" },
     { op: "dialog_search", title: "Adjustments in Outflows" },
   ];
-  for (const step of bad)
-    assert.throws(
-      () => driver.buildPageScript(step),
-      /wealth driver/,
-      JSON.stringify(step),
-    );
+  for (const step of bad) assert.throws(() => driver.buildPageScript(step), /wealth driver/, JSON.stringify(step));
   const good = [
     { op: "inspect", codes: ["7098"] },
     { op: "open_section_add", rowId: "7089", label: "+ Expenses" },
@@ -235,54 +172,26 @@ test("safety: the only clicks the driver can request are on the documented surfa
     { op: "open_row_add", rowId: "7098" },
     { op: "open_row_add", rowId: "7030" },
     { op: "open_row_add", rowId: "7037" },
-    {
-      op: "dialog_set",
-      title: "Gift",
-      field: "donor_id",
-      value: "4220180718935",
-    },
-    {
-      op: "dialog_set",
-      title: "Gift",
-      field: "description",
-      value: "Gift received",
-    },
+    { op: "dialog_set", title: "Gift", field: "donor_id", value: "4220180718935" },
+    { op: "dialog_set", title: "Gift", field: "description", value: "Gift received" },
     { op: "dialog_search", title: "Gift" },
     { op: "dialog_click", title: "Gift", button: "SAVE" },
     { op: "dialog_click", title: "Gift", button: "CLOSE" },
     { op: "dialog_click", title: "Adjustments in Outflows", button: "SAVE" },
     { op: "dialog_click", title: "Bank Account", button: "ADD" },
     { op: "dialog_tick", title: "Add Personal Expenses", labels: ["Rent"] },
-    {
-      op: "dialog_tick",
-      title: "Add Financial Assets & Investments (Non-Business)",
-      labels: ["Bank Account(s)"],
-    },
+    { op: "dialog_tick", title: "Add Financial Assets & Investments (Non-Business)", labels: ["Bank Account(s)"] },
   ];
-  for (const step of good)
-    assert.doesNotThrow(
-      () => driver.buildPageScript(step),
-      JSON.stringify(step),
-    );
+  for (const step of good) assert.doesNotThrow(() => driver.buildPageScript(step), JSON.stringify(step));
 });
 
 test("page op: the add icon is the purple one on the summary row, never edit (orange) or delete (red)", async () => {
   const fake = new FakeIris({ knownIbans: KNOWN });
   fake.show("wealth_reconciliation");
   // Use the capture that already has a child 7098 row carrying orange + red icons.
-  const full = new JSDOM(
-    fs.readFileSync(
-      path.join(
-        root,
-        "test-fixtures/iris/wealth/reconciliation-with-expenses-and-outflow.html",
-      ),
-      "utf8",
-    ),
-  ).window.document;
+  const full = new JSDOM(fs.readFileSync(path.join(root, "test-fixtures/iris/wealth/reconciliation-with-expenses-and-outflow.html"), "utf8")).window.document;
   fake.container().innerHTML = full.querySelector(".iris-data").innerHTML;
-  const r = await fake.webContents.executeJavaScript(
-    driver.buildPageScript({ op: "open_row_add", rowId: "7098" }),
-  );
+  const r = await fake.webContents.executeJavaScript(driver.buildPageScript({ op: "open_row_add", rowId: "7098" }));
   assert.equal(r.status, "clicked");
   const clicked = fake.clicks.filter((c) => c.tag === "MAT-ICON");
   assert.equal(clicked.length, 1);
@@ -295,13 +204,7 @@ test("page op: a dialog that is already open blocks every opening click", async 
   fake.show("wealth_reconciliation");
   fake.openDialog("expenses");
   const before = fake.clicks.length;
-  const r = await fake.webContents.executeJavaScript(
-    driver.buildPageScript({
-      op: "open_section_add",
-      rowId: "7089",
-      label: "+ Expenses",
-    }),
-  );
+  const r = await fake.webContents.executeJavaScript(driver.buildPageScript({ op: "open_section_add", rowId: "7089", label: "+ Expenses" }));
   assert.equal(r.status, "dialog_already_open");
   assert.equal(fake.clicks.length, before);
 });
@@ -311,20 +214,8 @@ test("live: expenses, the outflow and two banks are created through their modals
   const h = harness();
   const { results } = await h.run();
   const r = byCode(results);
-  for (const key of [
-    "7051",
-    "7058",
-    "7055",
-    "7087",
-    "7098",
-    `7030@${HBL}`,
-    `7030@${SCB}`,
-  ]) {
-    assert.equal(
-      r[key].status,
-      filler.FILL_STATUS.FILLED,
-      `${key}: ${JSON.stringify(r[key])}`,
-    );
+  for (const key of ["7051", "7058", "7055", "7087", "7098", `7030@${HBL}`, `7030@${SCB}`]) {
+    assert.equal(r[key].status, filler.FILL_STATUS.FILLED, `${key}: ${JSON.stringify(r[key])}`);
   }
   // Values landed on the right rows.
   h.fake.show("wealth_reconciliation");
@@ -333,16 +224,9 @@ test("live: expenses, the outflow and two banks are created through their modals
   assert.equal(h.fake.inputValue(h.fake.row("7055")), "240000");
   assert.equal(h.fake.inputValue(h.fake.row("7087")), "1080000");
   const outflowChild = h.fake.rowsWithId("7098")[1];
-  assert.match(
-    outflowChild.querySelector(".row-description-text").textContent,
-    /Income tax deducted u\/s 149/,
-  );
+  assert.match(outflowChild.querySelector(".row-description-text").textContent, /Income tax deducted u\/s 149/);
   assert.equal(h.fake.inputValue(outflowChild), "210000");
-  assert.equal(
-    h.fake.inputValue(h.fake.rowsWithId("7098")[0]),
-    "",
-    "the summary row is never written",
-  );
+  assert.equal(h.fake.inputValue(h.fake.rowsWithId("7098")[0]), "", "the summary row is never written");
   h.fake.show("wealth_assets");
   const banks = h.fake.rowsWithId("7030");
   assert.equal(banks.length, 3, "summary + one child per bank");
@@ -357,7 +241,7 @@ test("live: the driver never touches Save, Submit, Calculate, delete, edit or th
   await h.run();
   const forbidden = h.fake.clicks.filter(
     (c) =>
-      (/Calculate|Save|Submit/i.test(c.text) && !c.inDialog) ||
+      /Calculate|Save|Submit/i.test(c.text) && !c.inDialog ||
       /btn-red|btn-orange|btn-section-delete/.test(c.cls) ||
       ["calc", "save", "submit"].includes(c.id),
   );
@@ -372,9 +256,7 @@ test("the click recorder is not vacuous: a click on the return's Save is caught 
   const fake = new FakeIris({ knownIbans: KNOWN });
   fake.document.getElementById("save").click();
   const caught = fake.clicks.filter(
-    (c) =>
-      (/Calculate|Save|Submit/i.test(c.text) && !c.inDialog) ||
-      ["calc", "save", "submit"].includes(c.id),
+    (c) => (/Calculate|Save|Submit/i.test(c.text) && !c.inDialog) || ["calc", "save", "submit"].includes(c.id),
   );
   assert.equal(caught.length, 1);
 });
@@ -383,12 +265,9 @@ test("live: ticks only what the packet needs", async () => {
   const h = harness({});
   await h.run([FIELDS.rent, FIELDS.electricity]);
   h.fake.show("wealth_reconciliation");
-  const codes =
-    h.fake.container() &&
-    [...h.fake.container().querySelectorAll(".tableRows[id]")].map((r) => r.id);
+  const codes = h.fake.container() && [...h.fake.container().querySelectorAll(".tableRows[id]")].map((r) => r.id);
   assert.ok(codes.includes("7051") && codes.includes("7058"));
-  for (const other of ["7055", "7087", "7070", "7061"])
-    assert.ok(!codes.includes(other), `${other} must not be added`);
+  for (const other of ["7055", "7087", "7070", "7061"]) assert.ok(!codes.includes(other), `${other} must not be added`);
 });
 
 test("live: a second run clicks nothing and reports already_correct", async () => {
@@ -397,27 +276,17 @@ test("live: a second run clicks nothing and reports already_correct", async () =
   const clicksBefore = h.fake.clicks.length;
   const second = await h.run();
   assert.equal(h.fake.clicks.length, clicksBefore, "no new clicks on a re-run");
-  for (const entry of second.results)
-    assert.equal(
-      entry.status,
-      filler.FILL_STATUS.ALREADY_CORRECT,
-      JSON.stringify(entry),
-    );
+  for (const entry of second.results) assert.equal(entry.status, filler.FILL_STATUS.ALREADY_CORRECT, JSON.stringify(entry));
 });
 
 test("live: a figure IRIS already holds is not overwritten", async () => {
   const h = harness();
   await h.run([FIELDS.rent]);
   h.fake.show("wealth_reconciliation");
-  const input = h.fake
-    .row("7051")
-    .querySelector(".data-middle-child-wapper input");
+  const input = h.fake.row("7051").querySelector(".data-middle-child-wapper input");
   input.value = "111";
   const again = await h.run([{ ...FIELDS.rent, value: "960000" }]);
-  assert.equal(
-    again.results[0].status,
-    filler.FILL_STATUS.OVERWRITE_NEEDS_CONFIRMATION,
-  );
+  assert.equal(again.results[0].status, filler.FILL_STATUS.OVERWRITE_NEEDS_CONFIRMATION);
   assert.equal(input.value, "111");
 });
 
@@ -427,12 +296,7 @@ test("dry: nothing is clicked inside the page; missing rows are reported, not cr
   const { results } = await h.run();
   assert.equal(h.fake.clicks.length, 0);
   assert.equal(h.fake.dialogs().length, 0);
-  for (const entry of results)
-    assert.equal(
-      entry.status,
-      driver.WEALTH_STATUS.DRY_ROW_MISSING,
-      JSON.stringify(entry),
-    );
+  for (const entry of results) assert.equal(entry.status, driver.WEALTH_STATUS.DRY_ROW_MISSING, JSON.stringify(entry));
   h.fake.show("wealth_reconciliation");
   assert.equal(h.fake.rowsWithId("7051").length, 0);
 });
@@ -446,35 +310,20 @@ test("dry: rows that already exist are checked with a dry-run fill, not written"
   assert.equal(live.fake.clicks.length, clicksBefore);
   assert.equal(results[0].dryRun, true);
   live.fake.show("wealth_reconciliation");
-  assert.equal(
-    live.fake.inputValue(live.fake.row("7051")),
-    "960000",
-    "dry run must not write",
-  );
+  assert.equal(live.fake.inputValue(live.fake.row("7051")), "960000", "dry run must not write");
 });
 
 // ── failures stop the step and are reported ────────────────────────────────
 test("failure: a section that will not open leaves its figures untouched", async () => {
-  const h = harness({
-    navigate: async () => ({ ok: false, status: "panel_not_found" }),
-  });
+  const h = harness({ navigate: async () => ({ ok: false, status: "panel_not_found" }) });
   const { results } = await h.run();
-  assert.ok(
-    results.every((r) => r.status === driver.WEALTH_STATUS.SECTION_UNAVAILABLE),
-  );
+  assert.ok(results.every((r) => r.status === driver.WEALTH_STATUS.SECTION_UNAVAILABLE));
   assert.equal(h.fake.clicks.length, 0);
 });
 
 test("failure: an unexpected dialog already on screen stops everything with zero clicks", async () => {
   const fake = new FakeIris({ knownIbans: KNOWN });
-  const h = harness({
-    iris: fake,
-    navigate: async (id) => {
-      fake.show(id);
-      fake.openDialog("bank");
-      return { ok: true, status: "switched" };
-    },
-  });
+  const h = harness({ iris: fake, navigate: async (id) => { fake.show(id); fake.openDialog("bank"); return { ok: true, status: "switched" }; } });
   const { results } = await h.run([FIELDS.rent]);
   assert.equal(results[0].status, driver.WEALTH_STATUS.SETUP_FAILED);
   assert.equal(results[0].setupStatus, "unexpected_dialog_open");
@@ -482,19 +331,11 @@ test("failure: an unexpected dialog already on screen stops everything with zero
 });
 
 test("failure: a category missing from the modal cancels it, adds nothing, and says why", async () => {
-  const raw = fs.readFileSync(
-    path.join(root, "test-fixtures/iris/wealth/modal-expenses.html"),
-    "utf8",
-  );
+  const raw = fs.readFileSync(path.join(root, "test-fixtures/iris/wealth/modal-expenses.html"), "utf8");
   const doc = new JSDOM(raw);
-  const card = [...doc.window.document.querySelectorAll(".source-card")].find(
-    (c) => c.querySelector("p").textContent.trim() === "Rent",
-  );
+  const card = [...doc.window.document.querySelectorAll(".source-card")].find((c) => c.querySelector("p").textContent.trim() === "Rent");
   card.remove();
-  const fake = new FakeIris({
-    knownIbans: KNOWN,
-    modalOverrides: { expenses: doc.serialize() },
-  });
+  const fake = new FakeIris({ knownIbans: KNOWN, modalOverrides: { expenses: doc.serialize() } });
   const h = harness({ iris: fake });
   const { results } = await h.run([FIELDS.rent]);
   assert.equal(results[0].status, driver.WEALTH_STATUS.SETUP_FAILED);
@@ -506,41 +347,23 @@ test("failure: a category missing from the modal cancels it, adds nothing, and s
 
 test("failure: an IBAN IRIS cannot resolve closes the dialog and adds no bank row", async () => {
   const h = harness();
-  const unknown = wf("7030", 5000, {
-    rowDescriptionIncludes: "PK00NOPE0000000000000000",
-  });
+  const unknown = wf("7030", 5000, { rowDescriptionIncludes: "PK00NOPE0000000000000000" });
   const { results } = await h.run([unknown, FIELDS.hbl]);
   const r = byCode(results);
-  assert.equal(
-    r["7030@PK00NOPE0000000000000000"].status,
-    driver.WEALTH_STATUS.SETUP_FAILED,
-  );
-  assert.equal(
-    r["7030@PK00NOPE0000000000000000"].setupStatus,
-    "bank_iban_not_resolved",
-  );
+  assert.equal(r["7030@PK00NOPE0000000000000000"].status, driver.WEALTH_STATUS.SETUP_FAILED);
+  assert.equal(r["7030@PK00NOPE0000000000000000"].setupStatus, "bank_iban_not_resolved");
   // The next, resolvable account is still completed.
   assert.equal(r[`7030@${HBL}`].status, filler.FILL_STATUS.FILLED);
   assert.equal(h.fake.dialogs().length, 0);
   h.fake.show("wealth_assets");
-  assert.equal(
-    h.fake.rowsWithId("7030").length,
-    2,
-    "summary + the resolvable bank only",
-  );
+  assert.equal(h.fake.rowsWithId("7030").length, 2, "summary + the resolvable bank only");
 });
 
 test("failure: if the 7098 description is not accepted nothing is saved", async () => {
-  const raw = fs.readFileSync(
-    path.join(root, "test-fixtures/iris/wealth/modal-outflow.html"),
-    "utf8",
-  );
+  const raw = fs.readFileSync(path.join(root, "test-fixtures/iris/wealth/modal-outflow.html"), "utf8");
   const doc = new JSDOM(raw);
   doc.window.document.querySelector("textarea").setAttribute("disabled", "");
-  const fake = new FakeIris({
-    knownIbans: KNOWN,
-    modalOverrides: { outflow: doc.serialize() },
-  });
+  const fake = new FakeIris({ knownIbans: KNOWN, modalOverrides: { outflow: doc.serialize() } });
   const h = harness({ iris: fake });
   const { results } = await h.run([FIELDS.outflow]);
   assert.equal(results[0].status, driver.WEALTH_STATUS.SETUP_FAILED);
@@ -551,10 +374,7 @@ test("failure: if the 7098 description is not accepted nothing is saved", async 
 // ── packet side: the 7098 row is addressed by its description ──────────────
 test("packet: the 7098 field carries the description hint so a hand-made 7098 row is never filled", () => {
   const map = buildPortalFieldMap({
-    taxYear: 2026,
-    filerType: "INDIVIDUAL",
-    taxpayerListStatus: null,
-    ledgerEntries: [],
+    taxYear: 2026, filerType: "INDIVIDUAL", taxpayerListStatus: null, ledgerEntries: [],
     salaryCertificateTaxWithheld: 210000,
   });
   const flat = flattenPortalFieldMap(map).filter((f) => f.irisCode === "7098");
@@ -568,24 +388,17 @@ test("row filler: with the hint, a hand-made 7098 row is not selected, ours is",
   h.fake.show("wealth_reconciliation");
   // Simulate the taxpayer adding their own 7098 row with different text.
   const mine = h.fake.rowsWithId("7098")[1].cloneNode(true);
-  mine.querySelector(".row-description-text").textContent =
-    "Adjustments in Outflows - Something else";
+  mine.querySelector(".row-description-text").textContent = "Adjustments in Outflows - Something else";
   mine.querySelector(".data-middle-child-wapper input").value = "";
   h.fake.rowsWithId("7098")[1].after(mine);
-  const out = await filler.fillIrisRows(h.fake, [{ ...FIELDS.outflow }], {
-    dryRun: false,
-    sectionVerified: true,
-  });
+  const out = await filler.fillIrisRows(h.fake, [{ ...FIELDS.outflow }], { dryRun: false, sectionVerified: true });
   assert.equal(out.results[0].status, filler.FILL_STATUS.ALREADY_CORRECT);
-  assert.equal(
-    mine.querySelector(".data-middle-child-wapper input").value,
-    "",
-    "their row stays empty",
-  );
+  assert.equal(mine.querySelector(".data-middle-child-wapper input").value, "", "their row stays empty");
 });
 
 // ── Cash in hand (7012): a movement added to IRIS's own figure ─────────────
-const CASH = (delta) => wf("7012", delta, { valueMode: "add_to_iris_value" });
+const CASH = (delta) =>
+  wf("7012", delta, { valueMode: "add_to_iris_value" });
 function memoryStore(initial = null) {
   const store = {
     record: initial,
@@ -610,43 +423,22 @@ function prefillCash(h, value) {
 
 test("cash planning: only a 7012 field marked add_to_iris_value is driven; a bare 7012 stays held", () => {
   const plan = driver.planWealthWork([CASH(50000), wf("7012", 9)]);
-  assert.deepEqual(
-    plan.cash.map((f) => f.value),
-    ["50000"],
-  );
-  assert.deepEqual(
-    plan.unsupported.map((f) => f.irisCode),
-    ["7012"],
-  );
+  assert.deepEqual(plan.cash.map((f) => f.value), ["50000"]);
+  assert.deepEqual(plan.unsupported.map((f) => f.irisCode), ["7012"]);
 });
 
 test("cash target: baseline plus movement; own earlier write is recognised; a foreign edit is refused", () => {
   const plan = (current, record, delta = 50000) =>
     driver.planCashTarget({ delta, current, record });
   assert.deepEqual(plan("1,300,000", null), {
-    action: "write",
-    baseline: 1300000,
-    target: 1350000,
-    replaceOnlyIfExisting: "1300000",
+    action: "write", baseline: 1300000, target: 1350000, replaceOnlyIfExisting: "1300000",
   });
   assert.equal(plan("", null).target, 50000);
   assert.equal(plan("", null).replaceOnlyIfExisting, undefined);
   const record = { existing: 1300000, written: 1350000 };
-  assert.equal(
-    plan("1350000", record).target,
-    1350000,
-    "own write: same target, not 1,400,000",
-  );
-  assert.equal(
-    plan("1300000", record).target,
-    1350000,
-    "write never landed: same baseline",
-  );
-  assert.equal(
-    plan("1350000", record, 80000).target,
-    1380000,
-    "a changed movement is re-based",
-  );
+  assert.equal(plan("1350000", record).target, 1350000, "own write: same target, not 1,400,000");
+  assert.equal(plan("1300000", record).target, 1350000, "write never landed: same baseline");
+  assert.equal(plan("1350000", record, 80000).target, 1380000, "a changed movement is re-based");
   assert.equal(plan("999", record).action, "conflict");
   assert.equal(plan("3", null, -5).action, "negative");
   assert.equal(plan("12abc", null).action, "unreadable");
@@ -658,21 +450,11 @@ test("live cash: adds the movement to the figure IRIS holds and remembers the ba
   const input = prefillCash(h, "1,300,000");
   const out = await h.run([CASH(50000)]);
   assert.equal(out.results.length, 1);
-  assert.equal(
-    out.results[0].status,
-    filler.FILL_STATUS.FILLED,
-    JSON.stringify(out.results[0]),
-  );
+  assert.equal(out.results[0].status, filler.FILL_STATUS.FILLED, JSON.stringify(out.results[0]));
   assert.equal(input.value, "1350000");
   assert.equal(out.results[0].baselineValue, 1300000);
-  assert.deepEqual(
-    {
-      existing: store.record.existing,
-      written: store.record.written,
-      delta: store.record.delta,
-    },
-    { existing: 1300000, written: 1350000, delta: 50000 },
-  );
+  assert.deepEqual({ existing: store.record.existing, written: store.record.written, delta: store.record.delta },
+    { existing: 1300000, written: 1350000, delta: 50000 });
 });
 
 test("live cash: a re-run does not add the movement twice", async () => {
@@ -681,11 +463,7 @@ test("live cash: a re-run does not add the movement twice", async () => {
   const input = prefillCash(h, "1300000");
   await h.run([CASH(50000)]);
   const again = await h.run([CASH(50000)]);
-  assert.equal(
-    again.results[0].status,
-    filler.FILL_STATUS.ALREADY_CORRECT,
-    JSON.stringify(again.results[0]),
-  );
+  assert.equal(again.results[0].status, filler.FILL_STATUS.ALREADY_CORRECT, JSON.stringify(again.results[0]));
   assert.equal(input.value, "1350000");
   assert.equal(store.record.existing, 1300000);
 });
@@ -696,11 +474,7 @@ test("live cash: a changed movement is re-based on the original IRIS figure", as
   const input = prefillCash(h, "1300000");
   await h.run([CASH(50000)]);
   const again = await h.run([CASH(80000)]);
-  assert.equal(
-    again.results[0].status,
-    filler.FILL_STATUS.FILLED,
-    JSON.stringify(again.results[0]),
-  );
+  assert.equal(again.results[0].status, filler.FILL_STATUS.FILLED, JSON.stringify(again.results[0]));
   assert.equal(input.value, "1380000");
   assert.equal(store.record.written, 1380000);
 });
@@ -712,16 +486,9 @@ test("live cash: a figure the taxpayer edited after our write is never overwritt
   await h.run([CASH(50000)]);
   input.value = "999";
   const again = await h.run([CASH(50000)]);
-  assert.equal(
-    again.results[0].status,
-    filler.FILL_STATUS.OVERWRITE_NEEDS_CONFIRMATION,
-  );
+  assert.equal(again.results[0].status, filler.FILL_STATUS.OVERWRITE_NEEDS_CONFIRMATION);
   assert.equal(input.value, "999");
-  assert.equal(
-    store.record.written,
-    1350000,
-    "the baseline is not rewritten on a conflict",
-  );
+  assert.equal(store.record.written, 1350000, "the baseline is not rewritten on a conflict");
 });
 
 test("live cash: without a saved baseline the figure on screen is the baseline", async () => {
@@ -761,44 +528,22 @@ test("cash: the 7012 row is missing -> reported by the row filler, nothing creat
 });
 
 test("cash: the packet emits a 7012 movement field, and nothing when the movement is zero", () => {
-  const base = {
-    taxYear: 2026,
-    filerType: "INDIVIDUAL",
-    taxpayerListStatus: "ACTIVE",
-    ledgerEntries: [],
-  };
+  const base = { taxYear: 2026, filerType: "INDIVIDUAL", taxpayerListStatus: "ACTIVE", ledgerEntries: [] };
   const withCash = buildPortalFieldMap({ ...base, netCashMovement: 50000 });
   const field = withCash.wealthFields.find((f) => f.irisCode === "7012");
   assert.equal(field.ourAmount, 50000);
   assert.equal(field.valueMode, "add_to_iris_value");
-  const flat = flattenPortalFieldMap(withCash).find(
-    (f) => f.irisCode === "7012",
-  );
+  const flat = flattenPortalFieldMap(withCash).find((f) => f.irisCode === "7012");
   assert.equal(flat.valueMode, "add_to_iris_value");
   assert.equal(flat.value, "50000");
   const deposit = buildPortalFieldMap({ ...base, netCashMovement: -12000 });
-  assert.equal(
-    deposit.wealthFields.find((f) => f.irisCode === "7012").ourAmount,
-    -12000,
-  );
+  assert.equal(deposit.wealthFields.find((f) => f.irisCode === "7012").ourAmount, -12000);
   for (const none of [0, null, undefined])
-    assert.ok(
-      !buildPortalFieldMap({
-        ...base,
-        netCashMovement: none,
-      }).wealthFields.some((f) => f.irisCode === "7012"),
-    );
+    assert.ok(!buildPortalFieldMap({ ...base, netCashMovement: none }).wealthFields.some((f) => f.irisCode === "7012"));
 });
 
 test("live cash: an unreadable saved baseline stops the step instead of guessing", async () => {
-  const broken = {
-    load: () => {
-      throw new Error("corrupt");
-    },
-    save: () => {
-      throw new Error("no");
-    },
-  };
+  const broken = { load: () => { throw new Error("corrupt"); }, save: () => { throw new Error("no"); } };
   const h = harness({ cashStore: broken });
   const input = prefillCash(h, "1350000");
   const out = await h.run([CASH(50000)]);
@@ -821,10 +566,7 @@ const giftField = (value = 65000, extra = {}) =>
 const giftHarness = (opts = {}) =>
   harness({
     ...opts,
-    iris: new FakeIris({
-      knownIbans: KNOWN,
-      knownDonors: { [DONOR]: DONOR_NAME, 4220100000001: "SECOND DONOR" },
-    }),
+    iris: new FakeIris({ knownIbans: KNOWN, knownDonors: { [DONOR]: DONOR_NAME, "4220100000001": "SECOND DONOR" } }),
   });
 
 test("gift planning: only a gift with a donor id and a description hint is driven", () => {
@@ -835,30 +577,18 @@ test("gift planning: only a gift with a donor id and a description hint is drive
     wf("7091", 5), // gifts GIVEN
   ]);
   assert.equal(plan.gifts.length, 1);
-  assert.deepEqual(plan.unsupported.map((f) => f.irisCode).sort(), [
-    "7037",
-    "7037",
-    "7091",
-  ]);
+  assert.deepEqual(plan.unsupported.map((f) => f.irisCode).sort(), ["7037", "7037", "7091"]);
 });
 
 test("live gift: the dialog is completed through the donor search, saved, and the amount lands on the child row", async () => {
   const h = giftHarness();
   const { results } = await h.run([giftField()]);
   assert.equal(results.length, 1);
-  assert.equal(
-    results[0].status,
-    filler.FILL_STATUS.FILLED,
-    JSON.stringify(results[0]),
-  );
+  assert.equal(results[0].status, filler.FILL_STATUS.FILLED, JSON.stringify(results[0]));
   h.fake.show("wealth_reconciliation");
   const rows = h.fake.rowsWithId("7037");
   assert.equal(rows.length, 2, "summary + one child");
-  assert.equal(
-    h.fake.inputValue(rows[0]),
-    "",
-    "the summary row is never written",
-  );
+  assert.equal(h.fake.inputValue(rows[0]), "", "the summary row is never written");
   assert.equal(
     rows[1].querySelector(".row-description-text").textContent,
     `Gift - ${DONOR} - ${DONOR_NAME} - ${GIFT_TEXT}`,
@@ -867,9 +597,7 @@ test("live gift: the dialog is completed through the donor search, saved, and th
   assert.equal(h.fake.dialogs().length, 0);
   // Search was pressed before SAVE.
   const labels = h.fake.clicks.map((c) => c.text.toLowerCase());
-  const search = h.fake.clicks.findIndex(
-    (c) => c.inDialog && /search/i.test(c.text),
-  );
+  const search = h.fake.clicks.findIndex((c) => c.inDialog && /search/i.test(c.text));
   const save = labels.lastIndexOf("save");
   assert.ok(search >= 0 && save > search, "search must come before SAVE");
 });
@@ -895,11 +623,7 @@ test("live gift: a re-run clicks nothing and reports already_correct", async () 
   await h.run([giftField()]);
   h.fake.clicks.length = 0;
   const { results } = await h.run([giftField()]);
-  assert.equal(
-    results[0].status,
-    filler.FILL_STATUS.ALREADY_CORRECT,
-    JSON.stringify(results[0]),
-  );
+  assert.equal(results[0].status, filler.FILL_STATUS.ALREADY_CORRECT, JSON.stringify(results[0]));
   assert.equal(h.fake.clicks.length, 0);
   h.fake.show("wealth_reconciliation");
   assert.equal(h.fake.rowsWithId("7037").length, 2, "no duplicate child row");
@@ -909,11 +633,7 @@ test("live gift: a changed amount on an existing gift row pauses with a conflict
   const h = giftHarness();
   await h.run([giftField(65000)]);
   const { results } = await h.run([giftField(70000)]);
-  assert.equal(
-    results[0].status,
-    filler.FILL_STATUS.OVERWRITE_NEEDS_CONFIRMATION,
-    JSON.stringify(results[0]),
-  );
+  assert.equal(results[0].status, filler.FILL_STATUS.OVERWRITE_NEEDS_CONFIRMATION, JSON.stringify(results[0]));
   h.fake.show("wealth_reconciliation");
   assert.equal(h.fake.inputValue(h.fake.rowsWithId("7037")[1]), "65000");
 });
@@ -928,10 +648,7 @@ test("live gift: two donors become two rows, each with its own amount", async ()
   });
   const first = giftField(65000, { key: "7037:first" });
   const { results } = await h.run([first, second]);
-  assert.deepEqual(
-    results.map((r) => r.status),
-    [filler.FILL_STATUS.FILLED, filler.FILL_STATUS.FILLED],
-  );
+  assert.deepEqual(results.map((r) => r.status), [filler.FILL_STATUS.FILLED, filler.FILL_STATUS.FILLED]);
   h.fake.show("wealth_reconciliation");
   const rows = h.fake.rowsWithId("7037");
   assert.equal(rows.length, 3);
@@ -965,17 +682,10 @@ test("failure: a donor id IRIS cannot resolve closes the dialog, saves nothing a
 });
 
 test("failure: a description IRIS does not accept closes the dialog without saving", async () => {
-  const raw = fs.readFileSync(
-    path.join(root, "test-fixtures/iris/wealth/modal-gift.html"),
-    "utf8",
-  );
+  const raw = fs.readFileSync(path.join(root, "test-fixtures/iris/wealth/modal-gift.html"), "utf8");
   const dom = new JSDOM(raw);
   dom.window.document.querySelector("textarea").setAttribute("disabled", "");
-  const fake = new FakeIris({
-    knownIbans: KNOWN,
-    knownDonors: { [DONOR]: DONOR_NAME },
-    modalOverrides: { gift: dom.serialize() },
-  });
+  const fake = new FakeIris({ knownIbans: KNOWN, knownDonors: { [DONOR]: DONOR_NAME }, modalOverrides: { gift: dom.serialize() } });
   const h = harness({ iris: fake });
   const { results } = await h.run([giftField()]);
   assert.equal(results[0].status, driver.WEALTH_STATUS.SETUP_FAILED);
@@ -985,14 +695,10 @@ test("failure: a description IRIS does not accept closes the dialog without savi
 });
 
 test("gift: a hand-made gift row for another description is not filled; ours is created", async () => {
-  const fake = new FakeIris({
-    knownIbans: KNOWN,
-    knownDonors: { [DONOR]: DONOR_NAME },
-  });
+  const fake = new FakeIris({ knownIbans: KNOWN, knownDonors: { [DONOR]: DONOR_NAME } });
   fake.show("wealth_reconciliation");
   const hand = fake.cloneTemplate(fake.giftChild);
-  hand.querySelector(".row-description-text").textContent =
-    "Gift - 4220100000001 - OTHER - by hand";
+  hand.querySelector(".row-description-text").textContent = "Gift - 4220100000001 - OTHER - by hand";
   fake.insertAfter(hand, fake.row("7037"));
   const h = harness({ iris: fake });
   const { results } = await h.run([giftField()]);
@@ -1036,25 +742,13 @@ test("navigation: 'document not open' is IRIS still rendering, so it is retried 
   assert.ok(flaky.steps.some((s) => s.step === "wealth_section_retry"));
 
   let always = 0;
-  const stuck = harness({
-    iris: new FakeIris({ knownIbans: KNOWN }),
-    navigate: async () => {
-      always += 1;
-      return { ok: false, status: "document_not_open" };
-    },
-  });
+  const stuck = harness({ iris: new FakeIris({ knownIbans: KNOWN }), navigate: async () => { always += 1; return { ok: false, status: "document_not_open" }; } });
   const out = await stuck.run([FIELDS.hbl]);
   assert.equal(always, 4, "bounded: four attempts in all");
   assert.equal(out.results[0].status, driver.WEALTH_STATUS.SECTION_UNAVAILABLE);
 
   let hard = 0;
-  const refused = harness({
-    iris: new FakeIris({ knownIbans: KNOWN }),
-    navigate: async () => {
-      hard += 1;
-      return { ok: false, status: "unsupported_section" };
-    },
-  });
+  const refused = harness({ iris: new FakeIris({ knownIbans: KNOWN }), navigate: async () => { hard += 1; return { ok: false, status: "unsupported_section" }; } });
   await refused.run([FIELDS.hbl]);
   assert.equal(hard, 1, "a real refusal is never retried");
 });
@@ -1068,20 +762,11 @@ test("stepwise: with nothing wrong it enters every figure, with the same outcome
   assert.equal(out.stopped, false);
   assert.equal(out.notAttempted, 0);
   const status = (results) =>
-    Object.fromEntries(
-      Object.entries(byCode(results)).map(([k, v]) => [k, v.status]),
-    );
+    Object.fromEntries(Object.entries(byCode(results)).map(([k, v]) => [k, v.status]));
   assert.deepEqual(status(out.results), status(all.results));
-  assert.ok(
-    Object.values(status(out.results)).every(
-      (v) => v === filler.FILL_STATUS.FILLED,
-    ),
-  );
+  assert.ok(Object.values(status(out.results)).every((v) => v === filler.FILL_STATUS.FILLED));
   // Nothing may be saved, calculated or submitted either way.
-  assert.equal(
-    step.fake.clicks.filter((c) => /^(calculate|submit)$/i.test(c.text)).length,
-    0,
-  );
+  assert.equal(step.fake.clicks.filter((c) => /^(calculate|submit)$/i.test(c.text)).length, 0);
 });
 
 test("stepwise: it stops at the first figure IRIS refuses and does not touch anything after it", async () => {
@@ -1099,11 +784,7 @@ test("stepwise: it stops at the first figure IRIS refuses and does not touch any
   assert.equal(out.notAttempted, 2);
   assert.equal(h.fake.dialogs().length, 0);
   h.fake.show("wealth_assets");
-  assert.equal(
-    h.fake.rowsWithId("7030").length <= 1,
-    true,
-    "no bank row was added after the stop",
-  );
+  assert.equal(h.fake.rowsWithId("7030").length <= 1, true, "no bank row was added after the stop");
 });
 
 test("stepwise: dry mode never stops early and never clicks", async () => {
@@ -1111,30 +792,15 @@ test("stepwise: dry mode never stops early and never clicks", async () => {
   const out = await h.runStepwise(undefined, { stopOnProblem: false });
   assert.equal(out.stopped, false);
   assert.equal(out.results.length, Object.keys(FIELDS).length);
-  assert.equal(
-    h.fake.clicks.filter(
-      (c) => c.tag === "MAT-ICON" || /^(save|add)$/i.test(c.text),
-    ).length,
-    0,
-  );
+  assert.equal(h.fake.clicks.filter((c) => c.tag === "MAT-ICON" || /^(save|add)$/i.test(c.text)).length, 0);
 });
 
 // ── a gift the taxpayer typed by hand is READ back, never written ─────────
-function handGift(
-  fake,
-  {
-    id = "7037",
-    donor = DONOR,
-    name = DONOR_NAME,
-    amount = "65000",
-    text = "gift",
-  } = {},
-) {
+function handGift(fake, { id = "7037", donor = DONOR, name = DONOR_NAME, amount = "65000", text = "gift" } = {}) {
   fake.show("wealth_reconciliation");
   const child = fake.cloneTemplate(fake.giftChild);
   child.id = id;
-  child.querySelector(".row-description-text").textContent =
-    `Gift - ${donor} - ${name} - ${text}`;
+  child.querySelector(".row-description-text").textContent = `Gift - ${donor} - ${name} - ${text}`;
   const input = child.querySelector("input");
   if (input) input.value = amount;
   fake.insertAfter(child, fake.row(id));
@@ -1142,10 +808,7 @@ function handGift(
 }
 const verifyOpts = {
   verifyOnly: () => true,
-  checkEntry: (entry) =>
-    entry.status === "already_correct"
-      ? { ...entry, takenOverChecked: true }
-      : entry,
+  checkEntry: (entry) => (entry.status === "already_correct" ? { ...entry, takenOverChecked: true } : entry),
 };
 
 test("verify a hand-typed gift: right row under Inflows > Gift, right amount -> read back as matching, nothing clicked", async () => {
@@ -1153,11 +816,7 @@ test("verify a hand-typed gift: right row under Inflows > Gift, right amount -> 
   handGift(h.fake);
   h.fake.clicks.length = 0;
   const out = await h.runStepwise([giftField()], verifyOpts);
-  assert.equal(
-    out.results[0].status,
-    filler.FILL_STATUS.ALREADY_CORRECT,
-    JSON.stringify(out.results[0]),
-  );
+  assert.equal(out.results[0].status, filler.FILL_STATUS.ALREADY_CORRECT, JSON.stringify(out.results[0]));
   assert.equal(out.results[0].takenOverChecked, true);
   assert.equal(h.fake.clicks.length, 0, "read-only");
 });
@@ -1166,16 +825,9 @@ test("verify a hand-typed gift: wrong amount -> reported with both figures, neve
   const h = giftHarness();
   const child = handGift(h.fake, { amount: "5000" });
   const out = await h.runStepwise([giftField()], verifyOpts);
-  assert.equal(
-    out.results[0].status,
-    filler.FILL_STATUS.OVERWRITE_NEEDS_CONFIRMATION,
-  );
+  assert.equal(out.results[0].status, filler.FILL_STATUS.OVERWRITE_NEEDS_CONFIRMATION);
   assert.equal(out.stopped, true);
-  assert.equal(
-    h.fake.inputValue(child),
-    "5000",
-    "the taxpayer's figure is untouched",
-  );
+  assert.equal(h.fake.inputValue(child), "5000", "the taxpayer's figure is untouched");
 });
 
 test("verify a hand-typed gift: typed under 7091 (gifts GIVEN) instead of 7037 -> not found, and the misplaced row is named", async () => {
@@ -1186,11 +838,7 @@ test("verify a hand-typed gift: typed under 7091 (gifts GIVEN) instead of 7037 -
   assert.equal(out.results[0].status, driver.WEALTH_STATUS.DRY_ROW_MISSING);
   assert.equal(out.results[0].misplacedGift.code, "7091");
   assert.equal(out.results[0].misplacedGift.value, "15000");
-  assert.equal(
-    h.fake.rowsWithId("7037").length,
-    1,
-    "no 7037 child was created",
-  );
+  assert.equal(h.fake.rowsWithId("7037").length, 1, "no 7037 child was created");
   assert.equal(h.fake.dialogs().length, 0);
 });
 
@@ -1207,25 +855,13 @@ const OTHER_DONOR = "4220144218163";
 
 test("verify a hand-typed gift: another donor number, right place, right amount -> accepted, and the donor shown in IRIS is reported", async () => {
   const h = giftHarness();
-  handGift(h.fake, {
-    donor: OTHER_DONOR,
-    name: "SOME OTHER PERSON",
-    amount: "50000",
-  });
+  handGift(h.fake, { donor: OTHER_DONOR, name: "SOME OTHER PERSON", amount: "50000" });
   h.fake.clicks.length = 0;
   const out = await h.runStepwise([giftField(50000)], verifyOpts);
-  assert.equal(
-    out.results[0].status,
-    filler.FILL_STATUS.ALREADY_CORRECT,
-    JSON.stringify(out.results[0]),
-  );
+  assert.equal(out.results[0].status, filler.FILL_STATUS.ALREADY_CORRECT, JSON.stringify(out.results[0]));
   assert.equal(out.results[0].takenOverChecked, true);
   assert.equal(out.results[0].giftDonorSeen, OTHER_DONOR);
-  assert.equal(
-    out.results[0].giftDonorId,
-    DONOR,
-    "the statement's donor is still the planned one",
-  );
+  assert.equal(out.results[0].giftDonorId, DONOR, "the statement's donor is still the planned one");
   assert.equal(h.fake.clicks.length, 0, "read-only");
 });
 
@@ -1256,68 +892,32 @@ test("verify hand-typed gifts: one IRIS row is never matched to two planned gift
     rowDescriptionIncludes: "Gift received on 2026-02-01 from 4220100000001",
     key: "second",
   });
-  const out = await h.runStepwise([giftField(50000), second], {
-    ...verifyOpts,
-    stopOnProblem: false,
-  });
+  const out = await h.runStepwise([giftField(50000), second], { ...verifyOpts, stopOnProblem: false });
   assert.equal(out.results[0].status, filler.FILL_STATUS.ALREADY_CORRECT);
-  assert.equal(
-    out.results[1].status,
-    driver.WEALTH_STATUS.DRY_ROW_MISSING,
-    "the same row cannot count twice",
-  );
+  assert.equal(out.results[1].status, driver.WEALTH_STATUS.DRY_ROW_MISSING, "the same row cannot count twice");
 });
 
 test("a live gift is never matched by amount: the agent adds its own row", async () => {
   const h = giftHarness();
-  handGift(h.fake, {
-    donor: OTHER_DONOR,
-    name: "SOME OTHER PERSON",
-    amount: "65000",
-  });
+  handGift(h.fake, { donor: OTHER_DONOR, name: "SOME OTHER PERSON", amount: "65000" });
   const out = await h.runStepwise([giftField(65000)], { stopOnProblem: true });
-  assert.equal(
-    out.results[0].status,
-    filler.FILL_STATUS.FILLED,
-    JSON.stringify(out.results[0]),
-  );
+  assert.equal(out.results[0].status, filler.FILL_STATUS.FILLED, JSON.stringify(out.results[0]));
   assert.equal(out.results[0].giftDonorSeen, undefined);
 });
 
 test("verify hand-typed gifts: two rows with the SAME donor number but different text and amounts are told apart, not read as ambiguous", async () => {
   const h = giftHarness();
-  handGift(h.fake, {
-    donor: OTHER_DONOR,
-    name: "SOME OTHER PERSON",
-    amount: "50000",
-    text: "gift",
-  });
-  handGift(h.fake, {
-    donor: OTHER_DONOR,
-    name: "SOME OTHER PERSON",
-    amount: "15000",
-    text: "brother",
-  });
+  handGift(h.fake, { donor: OTHER_DONOR, name: "SOME OTHER PERSON", amount: "50000", text: "gift" });
+  handGift(h.fake, { donor: OTHER_DONOR, name: "SOME OTHER PERSON", amount: "15000", text: "brother" });
   const second = giftField(15000, {
     giftDonorId: "4220100000001",
     giftDescription: "Gift received on 2026-02-01 from 4220100000001",
     rowDescriptionIncludes: "Gift received on 2026-02-01 from 4220100000001",
     key: "second",
   });
-  const out = await h.runStepwise([giftField(50000), second], {
-    ...verifyOpts,
-    stopOnProblem: false,
-  });
-  assert.equal(
-    out.results[0].status,
-    filler.FILL_STATUS.ALREADY_CORRECT,
-    JSON.stringify(out.results[0]),
-  );
-  assert.equal(
-    out.results[1].status,
-    filler.FILL_STATUS.ALREADY_CORRECT,
-    JSON.stringify(out.results[1]),
-  );
+  const out = await h.runStepwise([giftField(50000), second], { ...verifyOpts, stopOnProblem: false });
+  assert.equal(out.results[0].status, filler.FILL_STATUS.ALREADY_CORRECT, JSON.stringify(out.results[0]));
+  assert.equal(out.results[1].status, filler.FILL_STATUS.ALREADY_CORRECT, JSON.stringify(out.results[1]));
   assert.equal(out.results[0].giftDonorSeen, OTHER_DONOR);
   assert.equal(out.results[1].giftDonorSeen, OTHER_DONOR);
 });
@@ -1329,11 +929,7 @@ const OTHER_MEZ = "PK12MEZN0000001303338499";
 const bankHandHarness = async (amount, iban) => {
   const h = harness({
     iris: new FakeIris({
-      knownIbans: {
-        ...KNOWN,
-        [OTHER_SCB]: { title: "Someone", bank: "SCB" },
-        [OTHER_MEZ]: { title: "Someone", bank: "MEZ" },
-      },
+      knownIbans: { ...KNOWN, [OTHER_SCB]: { title: "Someone", bank: "SCB" }, [OTHER_MEZ]: { title: "Someone", bank: "MEZ" } },
     }),
   });
   // Stands in for the taxpayer typing the account in IRIS themselves.
@@ -1344,15 +940,8 @@ const bankHandHarness = async (amount, iban) => {
 test("verify a hand-entered bank account: another IBAN, same bank, same amount -> accepted, IBAN shown in IRIS reported, nothing clicked", async () => {
   const h = await bankHandHarness(75000, OTHER_SCB);
   h.fake.clicks.length = 0;
-  const out = await h.runStepwise(
-    [wf("7030", 75000, { rowDescriptionIncludes: SCB })],
-    verifyOpts,
-  );
-  assert.equal(
-    out.results[0].status,
-    filler.FILL_STATUS.ALREADY_CORRECT,
-    JSON.stringify(out.results[0]),
-  );
+  const out = await h.runStepwise([wf("7030", 75000, { rowDescriptionIncludes: SCB })], verifyOpts);
+  assert.equal(out.results[0].status, filler.FILL_STATUS.ALREADY_CORRECT, JSON.stringify(out.results[0]));
   assert.equal(out.results[0].takenOverChecked, true);
   assert.equal(out.results[0].bankIbanSeen, OTHER_SCB);
   assert.equal(out.results[0].bankIbanPlanned, SCB);
@@ -1361,20 +950,14 @@ test("verify a hand-entered bank account: another IBAN, same bank, same amount -
 
 test("verify a hand-entered bank account: another IBAN at ANOTHER bank is not accepted", async () => {
   const h = await bankHandHarness(75000, OTHER_MEZ);
-  const out = await h.runStepwise(
-    [wf("7030", 75000, { rowDescriptionIncludes: SCB })],
-    verifyOpts,
-  );
+  const out = await h.runStepwise([wf("7030", 75000, { rowDescriptionIncludes: SCB })], verifyOpts);
   assert.equal(out.stopped, true);
   assert.equal(out.results[0].status, driver.WEALTH_STATUS.DRY_ROW_MISSING);
 });
 
 test("verify a hand-entered bank account: another IBAN, same bank, different amount is not accepted", async () => {
   const h = await bankHandHarness(70000, OTHER_SCB);
-  const out = await h.runStepwise(
-    [wf("7030", 75000, { rowDescriptionIncludes: SCB })],
-    verifyOpts,
-  );
+  const out = await h.runStepwise([wf("7030", 75000, { rowDescriptionIncludes: SCB })], verifyOpts);
   assert.equal(out.stopped, true);
   assert.equal(out.results[0].status, driver.WEALTH_STATUS.DRY_ROW_MISSING);
 });
@@ -1382,10 +965,7 @@ test("verify a hand-entered bank account: another IBAN, same bank, different amo
 test("verify hand-entered bank accounts: one IRIS row never counts for two planned accounts", async () => {
   const h = await bankHandHarness(75000, OTHER_SCB);
   const out = await h.runStepwise(
-    [
-      wf("7030", 75000, { rowDescriptionIncludes: SCB }),
-      wf("7030", 75000, { rowDescriptionIncludes: "PK99SCBL0000009999999999" }),
-    ],
+    [wf("7030", 75000, { rowDescriptionIncludes: SCB }), wf("7030", 75000, { rowDescriptionIncludes: "PK99SCBL0000009999999999" })],
     { ...verifyOpts, stopOnProblem: false },
   );
   assert.equal(out.results[0].status, filler.FILL_STATUS.ALREADY_CORRECT);
@@ -1402,25 +982,15 @@ const handOutflowHarness = async (amount, text) => {
 test("verify a hand-added tax outflow: own wording, same amount -> accepted, nothing clicked", async () => {
   const h = await handOutflowHarness(210000, "Tax paid by my employer");
   h.fake.clicks.length = 0;
-  const out = await h.runStepwise(
-    [wf("7098", 210000, { rowDescriptionIncludes: OUTFLOW_HINT })],
-    verifyOpts,
-  );
-  assert.equal(
-    out.results[0].status,
-    filler.FILL_STATUS.ALREADY_CORRECT,
-    JSON.stringify(out.results[0]),
-  );
+  const out = await h.runStepwise([wf("7098", 210000, { rowDescriptionIncludes: OUTFLOW_HINT })], verifyOpts);
+  assert.equal(out.results[0].status, filler.FILL_STATUS.ALREADY_CORRECT, JSON.stringify(out.results[0]));
   assert.equal(out.results[0].takenOverChecked, true);
   assert.equal(h.fake.clicks.length, 0, "read-only");
 });
 
 test("verify a hand-added tax outflow: own wording and a different amount -> not accepted", async () => {
   const h = await handOutflowHarness(100000, "Tax paid by my employer");
-  const out = await h.runStepwise(
-    [wf("7098", 210000, { rowDescriptionIncludes: OUTFLOW_HINT })],
-    verifyOpts,
-  );
+  const out = await h.runStepwise([wf("7098", 210000, { rowDescriptionIncludes: OUTFLOW_HINT })], verifyOpts);
   assert.equal(out.stopped, true);
   assert.notEqual(out.results[0].status, filler.FILL_STATUS.ALREADY_CORRECT);
 });

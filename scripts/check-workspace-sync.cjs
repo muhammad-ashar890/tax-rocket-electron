@@ -110,12 +110,7 @@ const MARKERS = [
   ],
   [
     "electron-connect/job-report.js",
-    [
-      "buildJobReport",
-      "NEVER DONE BY THE AGENT",
-      "buildAttentionMessage",
-      "buildAttentionReport",
-    ],
+    ["buildJobReport", "NEVER DONE BY THE AGENT", "buildAttentionMessage", "buildAttentionReport"],
     "the plain-language job report",
   ],
   [
@@ -125,10 +120,7 @@ const MARKERS = [
   ],
   [
     "lib/tax/salary-certificate-fields.ts",
-    [
-      "extractSalaryCertificateEmployers",
-      "hasRequiredSalaryCertificateEmployer",
-    ],
+    ["extractSalaryCertificateEmployers", "hasRequiredSalaryCertificateEmployer"],
     "the employer name is a required review field on the salary certificate",
   ],
   [
@@ -171,14 +163,7 @@ const MARKERS = [
   ],
   [
     "electron-connect/iris-wealth-driver.js",
-    [
-      "addGiftRow",
-      "gift_donor_not_resolved",
-      "Open pop-up(s) in IRIS",
-      "TRANSIENT_NAVIGATION",
-      "runWealthDriverStepwise",
-      "misplacedGift",
-    ],
+    ["addGiftRow", "gift_donor_not_resolved", "Open pop-up(s) in IRIS", "TRANSIENT_NAVIGATION", "runWealthDriverStepwise", "misplacedGift"],
     "7037 Gift: donor id, search, description, SAVE of the dialog, then the amount",
   ],
   [
@@ -325,6 +310,271 @@ const MARKERS = [
     "test-fixtures/iris/wealth/modal-bank.html",
     ["mat-dialog-container"],
     "fixture read by the wealth driver tests",
+  ],
+  [
+    "lib/sales-tax/types.ts",
+    ["export interface ReturnResult"],
+    "sales tax engine (Phase 1): shared types",
+  ],
+  [
+    "lib/sales-tax/money.ts",
+    ["export function toPaisa"],
+    "sales tax engine: integer paisa helpers",
+  ],
+  [
+    "lib/sales-tax/dates.ts",
+    ["export function parseDateCell"],
+    "sales tax engine: calendar helpers",
+  ],
+  [
+    "lib/sales-tax/problems.ts",
+    ["export function makeProblem"],
+    "sales tax engine: plain-language messages",
+  ],
+  [
+    "lib/sales-tax/template-reader.ts",
+    ["export function readSalesSheet"],
+    "sales tax engine: reads the official invoice templates",
+  ],
+  [
+    "lib/sales-tax/invoice-checks.ts",
+    ["export function checkSalesRows"],
+    "sales tax engine: invoice row checks",
+  ],
+  [
+    "lib/sales-tax/compute-return.ts",
+    ["export function computeSalesTaxReturn"],
+    "sales tax engine: return lines",
+  ],
+  [
+    "lib/sales-tax/prepare-month.ts",
+    ["export function prepareMonth"],
+    "sales tax engine: templates to estimated return",
+  ],
+  [
+    "lib/sales-tax/index.ts",
+    ["export * from \"./compute-return\""],
+    "sales tax engine: public entry point",
+  ],
+  [
+    "lib/sales-tax/rules/fbr-goods/catalog.ts",
+    ["export const FBR_GOODS_RULES"],
+    "sales tax rules catalog with sources and dates",
+  ],
+  [
+    "lib/sales-tax/rules/fbr-goods/due-dates.ts",
+    ["export function getDueDates"],
+    "sales tax due dates",
+  ],
+  [
+    "lib/sales-tax/rules/fbr-goods/penalties.ts",
+    ["export function lateReturnPenalty"],
+    "sales tax late filing penalty and surcharge",
+  ],
+  [
+    "lib/sales-tax/rules/fbr-goods/validate-catalog.ts",
+    ["export function validateCatalog"],
+    "sales tax catalog validation",
+  ],
+  [
+    "lib/sales-tax/rules/fbr-goods/reference.ts",
+    ["export const SALES_TEMPLATE"],
+    "typed access to the official template lists",
+  ],
+  [
+    "lib/sales-tax/rules/fbr-goods/index.ts",
+    ["export * from \"./catalog\""],
+    "sales tax rules entry point",
+  ],
+  [
+    "lib/sales-tax/rules/fbr-goods/reference-data.json",
+    ["\"templateVersion\": \"1.0.44\""],
+    "official FBR template lists (generated)",
+  ],
+  [
+    "scripts/extract-iris-sales-references.cjs",
+    ["function referenceColumn"],
+    "regenerates the official template lists",
+  ],
+  [
+    "scripts/lib/sales-tax-test-kit.cjs",
+    ["function createChecker"],
+    "shared helpers for the sales tax suites",
+  ],
+  [
+    "scripts/verify-sales-tax-rules.cjs",
+    ["verify-sales-tax-rules"],
+    "sales tax rules suite",
+  ],
+  [
+    "scripts/verify-sales-tax-intake.cjs",
+    ["verify-sales-tax-intake"],
+    "sales tax intake suite",
+  ],
+  [
+    "scripts/verify-sales-tax-return.cjs",
+    ["verify-sales-tax-return"],
+    "sales tax hand-worked months suite",
+  ],
+  [
+    "scripts/verify-sales-tax-dates.cjs",
+    ["verify-sales-tax-dates"],
+    "sales tax dates and penalties suite",
+  ],
+  [
+    "test-fixtures/sales-tax/month-2026-06.json",
+    ["SYNTHETIC"],
+    "synthetic month fixture (June 2026)",
+  ],
+  [
+    "test-fixtures/sales-tax/month-2026-07.json",
+    ["SYNTHETIC"],
+    "synthetic month fixture (July 2026)",
+  ],
+  [
+    "test-fixtures/sales-tax/month-2026-08.json",
+    ["SYNTHETIC"],
+    "synthetic month fixture (August 2026)",
+  ],
+  [
+    "lib/tax/filing-draft-identity.ts",
+    ["export function pickReusableDraft"],
+    "several filings per tax year: which draft a save belongs to",
+  ],
+  [
+    "prisma/migrations/20261007120000_allow_multiple_filings_per_tax_year/migration.sql",
+    ["DROP INDEX \"FilingDraft_userId_taxYear_key\""],
+    "several filings per tax year: drops the one-draft-per-year unique index",
+  ],
+  [
+    "scripts/verify-multiple-filings-per-year.cjs",
+    ["Several filings for one tax year"],
+    "the test that pins the several-filings-per-year behaviour",
+  ],
+  [
+    "app/actions/filing.ts",
+    ["function getRequestedDraftId", "resolveTargetDraftId"],
+    "create and save target an explicit draft and never overwrite a protected one",
+  ],
+  [
+    "components/tax/filing/filing-wizard.tsx",
+    ["const currentDraftId = draftId ?? resumeDraftId ?? null"],
+    "the wizard sends the draft id with every snapshot",
+  ],
+  [
+    "app/tax/history/page.tsx",
+    ["numberFilingsPerYear"],
+    "history labels several filings of the same tax year",
+  ],
+  [
+    "lib/sales-tax/profile.ts",
+    ["export function validateProfile", "export function validateBusinessDetails"],
+    "sales tax module (Phase 2A): profile and month validation",
+  ],
+  [
+    "app/actions/sales-tax.ts",
+    ["export async function startSalesTaxMonthAction", "export async function uploadSalesTaxInvoicesAction"],
+    "sales tax module: server actions",
+  ],
+  [
+    "app/tax/sales-tax/page.tsx",
+    ["/tax/sales-tax/new"],
+    "sales tax module: main screen",
+  ],
+  [
+    "app/tax/sales-tax/new/page.tsx",
+    ["SalesTaxWizard"],
+    "sales tax module: wizard page",
+  ],
+  [
+    "components/tax/sales-tax/sales-tax-wizard.tsx",
+    ["validateAuthoritySelection", "setupValid"],
+    "sales tax module: step-by-step wizard",
+  ],
+  [
+    "app/tax/sales-tax/[id]/page.tsx",
+    ["getSalesTaxFilingAction"],
+    "sales tax module: month screen",
+  ],
+  [
+    "prisma/migrations/20261008120000_add_sales_tax_module/migration.sql",
+    ["CREATE TABLE \"SalesTaxFiling\""],
+    "sales tax module: tables",
+  ],
+  [
+    "components/tax/dashboard-sidebar.tsx",
+    ["/tax/sales-tax"],
+    "the sidebar links to the Sales Tax module",
+  ],
+  [
+    "components/tax/filing/wizard-setup-step.tsx",
+    ["Sales Tax section"],
+    "the income-tax wizard points to the Sales Tax module",
+  ],
+  [
+    "lib/sales-tax/workbook.ts",
+    ["export async function readInvoiceWorkbook", "MAX_DATA_ROWS"],
+    "sales tax uploads (Phase 2B): reads the uploaded Excel file",
+  ],
+  [
+    "lib/sales-tax/analyze-uploads.ts",
+    ["export function analyzeUploads"],
+    "sales tax uploads: totals and problem list for the uploaded files",
+  ],
+  [
+    "components/tax/sales-tax/invoice-steps.tsx",
+    ["uploadSalesTaxInvoicesAction", "export function CheckStep"],
+    "sales tax uploads: the invoice steps of the wizard",
+  ],
+  [
+    "prisma/migrations/20261008180000_add_sales_tax_uploads/migration.sql",
+    ["CREATE TABLE \"SalesTaxUpload\""],
+    "sales tax uploads: table",
+  ],
+  [
+    "scripts/verify-sales-tax-uploads.cjs",
+    ["Sales Tax invoice upload (Phase 2B)"],
+    "the test that pins the sales tax invoice upload",
+  ],
+  [
+    "lib/sales-tax/figures.ts",
+    ["export function validateFiguresForm", "export function parseStoredFigures"],
+    "sales tax review (Phase 3): the figures form and its checks",
+  ],
+  [
+    "lib/sales-tax/estimate.ts",
+    ["export function buildEstimate", "export function buildApprovalPacket", "export function isApprovalCurrent"],
+    "sales tax review: the estimate, the approval packet and its fingerprint",
+  ],
+  [
+    "components/tax/sales-tax/review-step.tsx",
+    ["IRIS calculates the final amounts", "export function ReviewStep"],
+    "sales tax review: the estimate screen",
+  ],
+  [
+    "components/tax/sales-tax/figures-step.tsx",
+    ["export function FiguresStep"],
+    "sales tax review: the figures step",
+  ],
+  [
+    "app/actions/sales-tax.ts",
+    ["export async function approveSalesTaxReturnAction", "export async function saveSalesTaxFiguresAction"],
+    "sales tax review: save figures and approve actions",
+  ],
+  [
+    "prisma/migrations/20261009120000_add_sales_tax_review/migration.sql",
+    ["\"approvedPacket\" JSONB"],
+    "sales tax review: figures and approval columns",
+  ],
+  [
+    "scripts/verify-sales-tax-review.cjs",
+    ["Sales Tax review and approval (Phase 3)"],
+    "the test that pins the sales tax review and approval",
+  ],
+  [
+    "scripts/verify-sales-tax-module.cjs",
+    ["Sales Tax module shell (Phase 2A)"],
+    "the test that pins the Sales Tax module shell",
   ],
 ];
 

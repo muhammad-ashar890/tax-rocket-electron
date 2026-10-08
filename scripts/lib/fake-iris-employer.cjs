@@ -22,14 +22,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { JSDOM } = require("jsdom");
 
-const DIR = path.join(
-  __dirname,
-  "..",
-  "..",
-  "test-fixtures",
-  "iris",
-  "employer",
-);
+const DIR = path.join(__dirname, "..", "..", "test-fixtures", "iris", "employer");
 const read = (name) => fs.readFileSync(path.join(DIR, name), "utf8");
 const bodyOf = (html) => new JSDOM(html).window.document.body;
 
@@ -61,23 +54,13 @@ class FakeIrisEmployer {
     );
     this.window = this.dom.window;
     this.document = this.window.document;
-    const panel = bodyOf(read("salary-employer-panel.html")).querySelector(
-      ".iris-data",
-    );
+    const panel = bodyOf(read("salary-employer-panel.html")).querySelector(".iris-data");
     this.document.querySelector(".iris-data").innerHTML = panel.innerHTML;
-    this.modalHtml = bodyOf(read("modal-add-employer.html")).querySelector(
-      "mat-dialog-container",
-    ).outerHTML;
+    this.modalHtml = bodyOf(read("modal-add-employer.html")).querySelector("mat-dialog-container").outerHTML;
     for (const item of existing) this.appendCard(item);
-    this.document.addEventListener(
-      "click",
-      (event) => this.onClick(event),
-      true,
-    );
+    this.document.addEventListener("click", (event) => this.onClick(event), true);
     this.document.addEventListener("input", (event) => this.onInput(event));
-    this.webContents = {
-      executeJavaScript: async (script) => this.window.eval(script),
-    };
+    this.webContents = { executeJavaScript: async (script) => this.window.eval(script) };
   }
 
   list() {
@@ -87,36 +70,21 @@ class FakeIrisEmployer {
     return [...this.list().children];
   }
   cardTexts() {
-    return this.cards().map((c) =>
-      c.textContent
-        .replace(/\s+/g, " ")
-        .replace(/edit\s*delete\s*$|edit\s*$/i, "")
-        .trim(),
-    );
+    return this.cards().map((c) => c.textContent.replace(/\s+/g, " ").replace(/edit\s*delete\s*$|edit\s*$/i, "").trim());
   }
   modal() {
     return this.document.querySelector("mat-dialog-container");
   }
   name() {
-    return (
-      this.modal() &&
-      this.modal().querySelector('input[formcontrolname="employerName"]')
-    );
+    return this.modal() && this.modal().querySelector('input[formcontrolname="employerName"]');
   }
   reg() {
-    return (
-      this.modal() &&
-      this.modal().querySelector('input[formcontrolname="employerRegNo"]')
-    );
+    return this.modal() && this.modal().querySelector('input[formcontrolname="employerRegNo"]');
   }
 
   appendCard({ name, regNo }) {
     const text =
-      this.cardFormat === "reg_only"
-        ? regNo
-        : this.cardFormat === "name_only"
-          ? name
-          : `${name} | ${regNo}`;
+      this.cardFormat === "reg_only" ? regNo : this.cardFormat === "name_only" ? name : `${name} | ${regNo}`;
     if (this.cardMarkup === "none") return;
     const card = this.document.createElement("div");
     if (this.cardMarkup === "plain") {
@@ -147,16 +115,13 @@ class FakeIrisEmployer {
     // a lower-case search listed nothing for "systems limited".
     const needle = String(typed || "").trim();
     if (!needle) return;
-    const hits = this.registry
-      .filter((r) => r.name.includes(needle))
-      .slice(0, 10);
+    const hits = this.registry.filter((r) => r.name.includes(needle)).slice(0, 10);
     if (!hits.length) return;
     const panel = this.document.createElement("div");
     panel.className = "mat-mdc-autocomplete-panel";
     for (const hit of hits) {
       const option = this.document.createElement(this.optionsMarkup);
-      if (this.optionsMarkup !== "mat-option")
-        option.setAttribute("role", "option");
+      if (this.optionsMarkup !== "mat-option") option.setAttribute("role", "option");
       option.className = "mat-mdc-option";
       option.dataset.regNo = hit.regNo;
       option.dataset.name = hit.name;
@@ -168,11 +133,7 @@ class FakeIrisEmployer {
 
   onInput(event) {
     const el = event.target;
-    if (
-      el &&
-      el.getAttribute &&
-      el.getAttribute("formcontrolname") === "employerName"
-    ) {
+    if (el && el.getAttribute && el.getAttribute("formcontrolname") === "employerName") {
       // Editing the name drops a registration number IRIS filled earlier.
       const reg = this.reg();
       if (reg && reg.disabled) {
@@ -180,9 +141,7 @@ class FakeIrisEmployer {
         reg.disabled = false;
       }
       const needle = String(el.value || "").trim();
-      const hits = needle
-        ? this.registry.filter((r) => r.name.includes(needle))
-        : [];
+      const hits = needle ? this.registry.filter((r) => r.name.includes(needle)) : [];
       if (this.autoResolveSingle && hits.length === 1) {
         this.document.querySelector(".cdk-overlay-container").innerHTML = "";
         el.value = hits[0].name;
@@ -199,8 +158,7 @@ class FakeIrisEmployer {
     this.clicks.push(this.describe(el));
     const button = el.closest && el.closest("button");
     if (button && button.classList.contains("salary-employer-add-btn")) {
-      if (!this.modal())
-        this.document.body.insertAdjacentHTML("beforeend", this.modalHtml);
+      if (!this.modal()) this.document.body.insertAdjacentHTML("beforeend", this.modalHtml);
       return;
     }
     const option = el.closest && el.closest(this.optionsMarkup);
@@ -212,10 +170,7 @@ class FakeIrisEmployer {
       return;
     }
     if (button && button.closest("mat-dialog-actions")) {
-      const label = button.textContent
-        .replace(/\s+/g, " ")
-        .trim()
-        .toLowerCase();
+      const label = button.textContent.replace(/\s+/g, " ").trim().toLowerCase();
       if (label === "cancel") {
         this.modal().remove();
       } else if (label === "add") {

@@ -27,6 +27,7 @@ import {
   shrinkWizardCompletion,
 } from "@/lib/tax/wizard-completion";
 import { isTaxActivitySource } from "@/lib/tax/filing-drafts";
+import { pickReusableDraft } from "@/lib/tax/filing-draft-identity";
 import {
   getTy2026SelectionDetails,
   isTy2026AutomaticIncomeSelection,
@@ -239,48 +240,118 @@ async function replaceIncomeSelections(
   });
 }
 
+/**
+ * The draft id the client says this request belongs to. The wizard sends it
+ * once it knows the draft (after Create Filing, Save Draft or a resume), so a
+ * later save updates THAT draft instead of guessing by tax year.
+ */
+function getRequestedDraftId(formData: FormData) {
+  const raw = formData.get("draftId");
+  if (typeof raw !== "string") return null;
+  const value = raw.trim();
+  if (!value || value.startsWith("draft_")) return null;
+  return value;
+}
+
+class FilingDraftNotFoundError extends Error {
+  constructor() {
+    super("Filing draft not found");
+    this.name = "FilingDraftNotFoundError";
+  }
+}
+
+/**
+ * Chooses the draft to update, or null when a new draft must be created.
+ *
+ * - With an explicit id: that draft, which must belong to the user.
+ * - Without one: the most recent same-year draft that is NOT protected (so an
+ *   unfinished draft is continued, as before). Approved, filed or running
+ *   filings are never reused: they are left untouched and a new draft is
+ *   created beside them.
+ */
+async function resolveTargetDraftId(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  taxYear: number,
+  explicitDraftId: string | null,
+) {
+  if (explicitDraftId) {
+    const owned = await tx.filingDraft.findFirst({
+      where: { id: explicitDraftId, userId },
+      select: { id: true },
+    });
+    if (!owned) throw new FilingDraftNotFoundError();
+    return owned.id;
+  }
+
+  const sameYear = await tx.filingDraft.findMany({
+    where: { userId, taxYear },
+    select: {
+      id: true,
+      status: true,
+      updatedAt: true,
+      packetApprovalConfirmed: true,
+      filingPackets: { select: { approvalStatus: true } },
+      fbrConnections: { select: { status: true } },
+    },
+  });
+  return pickReusableDraft(sameYear)?.id ?? null;
+}
+
 async function upsertFilingDraft(
   userId: string,
   input: ParsedFilingDraftInput,
   currentStep: number,
   requestedCompletionStep: number,
   allowCompletionAdvance: boolean,
+  explicitDraftId: string | null = null,
 ) {
   return prisma.$transaction(async (tx) => {
-    const draft = await tx.filingDraft.upsert({
-      where: {
-        userId_taxYear: {
-          userId,
-          taxYear: input.taxYear,
-        },
-      },
-      update: {
-        filerType: input.filerType,
-        businessStructure: input.businessStructure,
-        salaryPercentage: input.salaryPercentage,
-        residencyStatus: input.residencyStatus,
-        incomeSources: JSON.stringify(input.incomeSources),
-        readinessChecks: JSON.stringify(input.readinessCompleted),
-        currentStep,
-        ...(allowCompletionAdvance
-          ? { wizardCompletionStep: requestedCompletionStep }
-          : {}),
-        status: "IN_PROGRESS",
-      },
-      create: {
-        userId,
-        taxYear: input.taxYear,
-        filerType: input.filerType,
-        businessStructure: input.businessStructure,
-        salaryPercentage: input.salaryPercentage,
-        residencyStatus: input.residencyStatus,
-        incomeSources: JSON.stringify(input.incomeSources),
-        readinessChecks: JSON.stringify(input.readinessCompleted),
-        currentStep,
-        wizardCompletionStep: requestedCompletionStep,
-        status: "IN_PROGRESS",
-      },
-    });
+    // Serialize concurrent saves for the same user and year. Without the
+    // unique index, two simultaneous "create" requests could both find no
+    // reusable draft and each insert one.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`filing-draft:${userId}:${input.taxYear}`}))`;
+
+    const targetId = await resolveTargetDraftId(
+      tx,
+      userId,
+      input.taxYear,
+      explicitDraftId,
+    );
+
+    const draft = targetId
+      ? await tx.filingDraft.update({
+          where: { id: targetId },
+          data: {
+            taxYear: input.taxYear,
+            filerType: input.filerType,
+            businessStructure: input.businessStructure,
+            salaryPercentage: input.salaryPercentage,
+            residencyStatus: input.residencyStatus,
+            incomeSources: JSON.stringify(input.incomeSources),
+            readinessChecks: JSON.stringify(input.readinessCompleted),
+            currentStep,
+            ...(allowCompletionAdvance
+              ? { wizardCompletionStep: requestedCompletionStep }
+              : {}),
+            status: "IN_PROGRESS",
+          },
+        })
+      : await tx.filingDraft.create({
+          data: {
+            userId,
+            taxYear: input.taxYear,
+            filerType: input.filerType,
+            businessStructure: input.businessStructure,
+            salaryPercentage: input.salaryPercentage,
+            residencyStatus: input.residencyStatus,
+            incomeSources: JSON.stringify(input.incomeSources),
+            readinessChecks: JSON.stringify(input.readinessCompleted),
+            currentStep,
+            wizardCompletionStep: requestedCompletionStep,
+            status: "IN_PROGRESS",
+          },
+        });
 
     if (!allowCompletionAdvance) {
       // Save Draft may shrink completion after an upstream edit, but it must
@@ -423,6 +494,7 @@ export async function createFilingDraftAction(formData: FormData) {
       documentsStepIndex,
       documentsStepIndex,
       true,
+      getRequestedDraftId(formData),
     );
 
     revalidatePath("/tax/dashboard");
@@ -430,6 +502,9 @@ export async function createFilingDraftAction(formData: FormData) {
 
     return { success: true, draftId: draft.id };
   } catch (error) {
+    if (error instanceof FilingDraftNotFoundError) {
+      return { success: false, error: "Filing draft not found" };
+    }
     console.error("Error creating filing draft:", error);
     return { success: false, error: "Failed to create filing draft" };
   }
@@ -450,6 +525,7 @@ export async function saveFilingDraftAction(formData: FormData) {
       requestedStep,
       getRequestedCompletionStep(formData, requestedStep),
       false,
+      getRequestedDraftId(formData),
     );
 
     revalidatePath("/tax/dashboard");
@@ -457,6 +533,9 @@ export async function saveFilingDraftAction(formData: FormData) {
 
     return { success: true, draftId: draft.id };
   } catch (error) {
+    if (error instanceof FilingDraftNotFoundError) {
+      return { success: false, error: "Filing draft not found" };
+    }
     console.error("Error saving filing draft:", error);
     return { success: false, error: "Failed to save filing draft" };
   }

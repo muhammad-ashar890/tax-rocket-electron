@@ -45,16 +45,8 @@ const payload = {
   documentType: "salary_certificate",
   fields: [
     { label: "Employer Name", value: "Example Employer", confidence: 0.99 },
-    {
-      label: "Gross Salary (Annual PKR)",
-      value: "PKR 3,420,000",
-      confidence: 0.99,
-    },
-    {
-      label: "Tax Deducted u/s 149 (Annual PKR)",
-      value: "210,000",
-      confidence: 0.99,
-    },
+    { label: "Gross Salary (Annual PKR)", value: "PKR 3,420,000", confidence: 0.99 },
+    { label: "Tax Deducted u/s 149 (Annual PKR)", value: "210,000", confidence: 0.99 },
   ],
   notes: ["Synthetic test only"],
 };
@@ -72,11 +64,7 @@ assert.equal(
   5,
   "missing annual fields, Tax Year and the optional other-employers field are added without removing extracted fields",
 );
-assert.equal(
-  ready.fields[0].label,
-  "Employer Name",
-  "optional extracted details are preserved",
-);
+assert.equal(ready.fields[0].label, "Employer Name", "optional extracted details are preserved");
 assert.equal(hasRequiredSalaryCertificateAmounts(ready.fields), false);
 assert.deepEqual(extractSalaryCertificateAmounts("not-json"), {
   grossSalary: null,
@@ -127,71 +115,35 @@ assert.equal(
   "employer_name",
 );
 assert.equal(
-  getSalaryCertificateFieldKind(
-    "Other Employer Names (optional, separate with ;)",
-  ),
+  getSalaryCertificateFieldKind("Other Employer Names (optional, separate with ;)"),
   "other_employers",
 );
-for (const notAName of [
-  "Employer NTN",
-  "Employer Address",
-  "Employer Name/NTN",
-  "Employer Registration No.",
-]) {
+for (const notAName of ["Employer NTN", "Employer Address", "Employer Name/NTN", "Employer Registration No."]) {
   assert.equal(getSalaryCertificateFieldKind(notAName), null, notAName);
 }
 assert.equal(isSalaryCertificateRequiredField("Employer Name"), true);
-assert.equal(
-  isSalaryCertificateRequiredField(
-    "Other Employer Names (optional, separate with ;)",
-  ),
-  false,
-);
-assert.equal(
-  isSalaryCertificateRequiredField("Gross Salary (Annual PKR)"),
-  true,
-);
+assert.equal(isSalaryCertificateRequiredField("Other Employer Names (optional, separate with ;)"), false);
+assert.equal(isSalaryCertificateRequiredField("Gross Salary (Annual PKR)"), true);
 assert.equal(isSalaryCertificateRequiredField("Basic Pay"), false);
 
 const noEmployer = ensureSalaryCertificateReviewFields({
   fields: [{ label: "Gross Salary (Annual PKR)", value: "3420000" }],
 });
+assert.equal(hasRequiredSalaryCertificateEmployer(noEmployer.fields), false, "a blank employer field is required");
+assert.ok(noEmployer.fields.some((f) => f.label === "Employer Name (as registered with FBR)" && f.value === null));
 assert.equal(
-  hasRequiredSalaryCertificateEmployer(noEmployer.fields),
-  false,
-  "a blank employer field is required",
-);
-assert.ok(
-  noEmployer.fields.some(
-    (f) =>
-      f.label === "Employer Name (as registered with FBR)" && f.value === null,
-  ),
-);
-assert.equal(
-  hasRequiredSalaryCertificateEmployer([
-    { label: "Employer Name", value: "   " },
-  ]),
+  hasRequiredSalaryCertificateEmployer([{ label: "Employer Name", value: "   " }]),
   false,
   "whitespace is not a name",
 );
-assert.equal(
-  hasRequiredSalaryCertificateEmployer([
-    { label: "Employer Name", value: "ACME (PRIVATE) LIMITED" },
-  ]),
-  true,
-);
-assert.deepEqual(extractSalaryCertificateEmployers(JSON.stringify(payload)), [
-  "Example Employer",
-]);
+assert.equal(hasRequiredSalaryCertificateEmployer([{ label: "Employer Name", value: "ACME (PRIVATE) LIMITED" }]), true);
+assert.deepEqual(extractSalaryCertificateEmployers(JSON.stringify(payload)), ["Example Employer"]);
 assert.deepEqual(
   extractSalaryCertificateEmployers(
     JSON.stringify({
       fields: [
         { label: "Employer Name", value: " Acme  Ltd " },
-        {
-          label: "Other Employer Names (optional, separate with ;)",
-          value: "Beta Corp; acme ltd;\nGamma Co",
-        },
+        { label: "Other Employer Names (optional, separate with ;)", value: "Beta Corp; acme ltd;\nGamma Co" },
         { label: "Employer NTN", value: "1234567-8" },
       ],
     }),
@@ -206,21 +158,9 @@ assert.deepEqual(extractSalaryCertificateEmployers(null), []);
 {
   const mapped = JSON.stringify({
     fields: [
-      {
-        label: "Gross Salary (Annual PKR)",
-        value: "3420000",
-        confidence: 0.99,
-      },
-      {
-        label: "Tax Deducted u/s 149 (Annual PKR)",
-        value: "210000",
-        confidence: 0.99,
-      },
-      {
-        label: "Employer Name (as registered with FBR)",
-        value: "HASEEB KHAN",
-        confidence: 0.95,
-      },
+      { label: "Gross Salary (Annual PKR)", value: "3420000", confidence: 0.99 },
+      { label: "Tax Deducted u/s 149 (Annual PKR)", value: "210000", confidence: 0.99 },
+      { label: "Employer Name (as registered with FBR)", value: "HASEEB KHAN", confidence: 0.95 },
       { label: "Employer NTN", value: "1234567-8", confidence: 0.99 },
     ],
     notes: ["kept"],
@@ -246,9 +186,7 @@ assert.deepEqual(extractSalaryCertificateEmployers(null), []);
     "the NTN field is not treated as an employer name",
   );
   assert.equal(
-    next.fields.filter(
-      (f) => getSalaryCertificateFieldKind(f.label) === "employer_name",
-    ).length,
+    next.fields.filter((f) => getSalaryCertificateFieldKind(f.label) === "employer_name").length,
     1,
     "exactly one main employer field remains",
   );
@@ -259,48 +197,18 @@ assert.deepEqual(extractSalaryCertificateEmployers(null), []);
   });
   assert.deepEqual(cleared.employers, ["Acme Ltd"]);
   // Refusals.
-  assert.equal(
-    planSalaryCertificateEmployerUpdate(mapped, { employerName: "" }).ok,
-    false,
-  );
-  assert.equal(
-    planSalaryCertificateEmployerUpdate(mapped, { employerName: "A; B" }).ok,
-    false,
-    "one name only in the main field",
-  );
-  assert.equal(
-    planSalaryCertificateEmployerUpdate(mapped, {
-      employerName: "x".repeat(201),
-    }).ok,
-    false,
-  );
-  assert.equal(
-    planSalaryCertificateEmployerUpdate("not-json", { employerName: "A" }).ok,
-    false,
-  );
+  assert.equal(planSalaryCertificateEmployerUpdate(mapped, { employerName: "" }).ok, false);
+  assert.equal(planSalaryCertificateEmployerUpdate(mapped, { employerName: "A; B" }).ok, false, "one name only in the main field");
+  assert.equal(planSalaryCertificateEmployerUpdate(mapped, { employerName: "x".repeat(201) }).ok, false);
+  assert.equal(planSalaryCertificateEmployerUpdate("not-json", { employerName: "A" }).ok, false);
 }
 
 // Tax Year: required, readable, and equal to the return's tax year.
 assert.equal(getSalaryCertificateFieldKind("Tax Year"), "tax_year");
-assert.equal(
-  isSalaryCertificateRequiredField("Tax Year"),
-  true,
-  "Tax Year is required",
-);
-assert.equal(
-  getSalaryCertificateFieldKind("Tax Deducted u/s 149 (Annual PKR)"),
-  "tax_withheld",
-  "Tax Year does not capture the tax field",
-);
-assert.equal(
-  getSalaryCertificateFieldKind("Salary Period"),
-  null,
-  "Salary Period stays optional",
-);
-assert.ok(
-  ready.fields.some((f) => f.label === "Tax Year" && f.value === null),
-  "a blank Tax Year field is added",
-);
+assert.equal(isSalaryCertificateRequiredField("Tax Year"), true, "Tax Year is required");
+assert.equal(getSalaryCertificateFieldKind("Tax Deducted u/s 149 (Annual PKR)"), "tax_withheld", "Tax Year does not capture the tax field");
+assert.equal(getSalaryCertificateFieldKind("Salary Period"), null, "Salary Period stays optional");
+assert.ok(ready.fields.some((f) => f.label === "Tax Year" && f.value === null), "a blank Tax Year field is added");
 for (const [text, year] of [
   ["2026", 2026],
   ["TY2026", 2026],
@@ -319,10 +227,7 @@ for (const [text, year] of [
 {
   const withYear = (value) => [{ label: "Tax Year", value }];
   assert.equal(checkSalaryCertificateTaxYear(withYear("2026"), 2026).ok, true);
-  assert.equal(
-    checkSalaryCertificateTaxYear(withYear("July 2025 to June 2026"), 2026).ok,
-    true,
-  );
+  assert.equal(checkSalaryCertificateTaxYear(withYear("July 2025 to June 2026"), 2026).ok, true);
   const wrong = checkSalaryCertificateTaxYear(withYear("2025"), 2026);
   assert.equal(wrong.ok, false);
   assert.equal(wrong.certificateTaxYear, 2025);
@@ -339,10 +244,7 @@ assert.deepEqual(
     JSON.stringify({
       fields: [
         { label: "Employer Name", value: "Acme Ltd" },
-        {
-          label: "Other Employer Names (optional, separate with ; or ,)",
-          value: "technexia, systems limited",
-        },
+        { label: "Other Employer Names (optional, separate with ; or ,)", value: "technexia, systems limited" },
       ],
     }),
   ),
@@ -350,18 +252,13 @@ assert.deepEqual(
 );
 assert.deepEqual(
   extractSalaryCertificateEmployers(
-    JSON.stringify({
-      fields: [{ label: "Employer Name", value: "Smith, Jones and Co" }],
-    }),
+    JSON.stringify({ fields: [{ label: "Employer Name", value: "Smith, Jones and Co" }] }),
   ),
   ["Smith, Jones and Co"],
   "a comma in the main name is not a separator",
 );
 assert.equal(
-  planSalaryCertificateEmployerUpdate("{}", {
-    employerName: "Acme",
-    otherEmployerNames: "B, C",
-  }).employers.length,
+  planSalaryCertificateEmployerUpdate("{}", { employerName: "Acme", otherEmployerNames: "B, C" }).employers.length,
   3,
 );
 
@@ -369,19 +266,13 @@ assert.equal(
 {
   const base = [
     { label: "Employer Name", value: "Acme Ltd" },
-    {
-      label: "Other Employer Names (optional, separate with ;)",
-      value: "Beta Corp; Gamma Co",
-    },
+    { label: "Other Employer Names (optional, separate with ;)", value: "Beta Corp; Gamma Co" },
   ];
   const sig = salaryCertificateEmployerSignature(base);
   assert.equal(
     salaryCertificateEmployerSignature([
       { label: "Employer Name", value: " Acme   Ltd " },
-      {
-        label: "Other Employer Names (optional, separate with ; or ,)",
-        value: "Beta Corp, Gamma Co",
-      },
+      { label: "Other Employer Names (optional, separate with ; or ,)", value: "Beta Corp, Gamma Co" },
     ]),
     sig,
     "spacing and the separator typed do not count as an edit",
@@ -394,44 +285,21 @@ assert.equal(
     sig,
     "a changed name is an edit",
   );
-  assert.notEqual(
-    salaryCertificateEmployerSignature([base[0]]),
-    sig,
-    "removing the others is an edit",
-  );
+  assert.notEqual(salaryCertificateEmployerSignature([base[0]]), sig, "removing the others is an edit");
 }
 
 console.log("Salary-certificate field and gross-source checks passed.");
 
 // The "other employers" editor: one row per name, stored as one string.
 {
-  const { splitOtherEmployerRows, joinOtherEmployerRows } = require(
-    path.join(root, "lib/tax/salary-certificate-fields.ts"),
-  );
-  assert.deepEqual(
-    splitOtherEmployerRows(null),
-    [""],
-    "an empty value still shows one row",
-  );
+  const { splitOtherEmployerRows, joinOtherEmployerRows } = require(path.join(root, "lib/tax/salary-certificate-fields.ts"));
+  assert.deepEqual(splitOtherEmployerRows(null), [""], "an empty value still shows one row");
   assert.deepEqual(splitOtherEmployerRows("A; B"), ["A", "B"]);
-  assert.deepEqual(splitOtherEmployerRows("technexia, systems limited"), [
-    "technexia",
-    "systems limited",
-  ]);
-  assert.equal(
-    joinOtherEmployerRows(["A", "", " B  C "]),
-    "A; B C",
-    "blank rows are dropped, spacing is tidied",
-  );
+  assert.deepEqual(splitOtherEmployerRows("technexia, systems limited"), ["technexia", "systems limited"]);
+  assert.equal(joinOtherEmployerRows(["A", "", " B  C "]), "A; B C", "blank rows are dropped, spacing is tidied");
   assert.equal(joinOtherEmployerRows([""]), "");
-  const doc = fs.readFileSync(
-    path.join(root, "components/tax/filing/wizard-documents-step.tsx"),
-    "utf8",
-  );
+  const doc = fs.readFileSync(path.join(root, "components/tax/filing/wizard-documents-step.tsx"), "utf8");
   assert.match(doc, /OtherEmployerNamesField/);
-  const field = fs.readFileSync(
-    path.join(root, "components/tax/filing/other-employer-names-field.tsx"),
-    "utf8",
-  );
+  const field = fs.readFileSync(path.join(root, "components/tax/filing/other-employer-names-field.tsx"), "utf8");
   assert.match(field, /Add employer/);
 }
